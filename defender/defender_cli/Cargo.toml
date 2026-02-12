@@ -10,3 +10,4 @@ system_hardening = { path = "../crates/system_hardening" }
 monitoring = { path = "../crates/monitoring" }
 backups = { path = "../crates/backups" }
 defender_core = { path = "../crates/defender_core" }
+chrono = "0.4.43"

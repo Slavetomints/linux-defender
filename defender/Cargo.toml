@@ -1,0 +1,11 @@
+[workspace]
+members = [
+    "crates/anti_persistence",
+    "crates/system_hardening",
+    "crates/monitoring",
+    "crates/backups",
+    "crates/defender_core",
+    "defender_cli",
+]
+
+resolver = "2"

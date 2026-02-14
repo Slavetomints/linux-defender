@@ -43,7 +43,7 @@ fn filter_jobs(cronjobs: Vec<String>) -> Result<Vec<String>, String> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        print!("[?] Is this malicious? (y/N) {} \n>", cronjob);
+        print!("[?] Is this malicious? (y/N) {} \n> ", cronjob);
         io::stdout().flush().unwrap();
 
         let mut answer = String::new();

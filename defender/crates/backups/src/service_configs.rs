@@ -37,6 +37,12 @@ pub fn run(_ctx: &DefenderContext, save_location: &Option<PathBuf>) -> Result<()
         println!("[+] Backing up {}", path);
         let dest = save_path.join(format!("{}.bak", path.replace("/", "_")));
 
+        //check if the file/directory exists before trying to copy
+        if !dest.exists() {
+            println!("[!] Warning: {} does not exist, skipping backup", path);
+            continue;
+        }
+
 
         let output = Command::new("cp")
             .arg("-r")

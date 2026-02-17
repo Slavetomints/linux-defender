@@ -1,6 +1,10 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+mod privilege;
+
+pub use privilege::require_root;
+
 #[derive(Debug, Clone)]
 pub struct DefenderContext {
     pub report_file: PathBuf,

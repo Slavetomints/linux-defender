@@ -1,4 +1,7 @@
-use std::{io::{self, Write}, process::Command};
+use std::{
+    io::{self, Write},
+    process::Command,
+};
 
 use defender_core::DefenderContext;
 
@@ -14,7 +17,7 @@ pub fn run(_ctx: &DefenderContext) -> Result<(), String> {
     println!("[+] Filtering cronjobs...");
     let good_jobs: Vec<String> = filter_jobs(cronjobs).expect("[X] Failed to filter cronjobs");
     println!("[✓] Cronjobs filtered");
-     
+
     println!("[+] Writing good cronjobs to disk...");
     write_good_jobs(good_jobs).expect("[X] Failed to write good cron jobs to disk");
     println!("[✓] Good cronjobs written to disk");
@@ -64,14 +67,17 @@ fn filter_jobs(cronjobs: Vec<String>) -> Result<Vec<String>, String> {
 fn write_good_jobs(good_jobs: Vec<String>) -> Result<(), String> {
     let mut new_cron: String = good_jobs.join("\n");
     new_cron.push('\n');
-    
+
     let mut child = Command::new("crontab")
         .arg("-")
         .stdin(std::process::Stdio::piped())
         .spawn()
         .expect("Failed to spawn Crontab");
 
-    child.stdin.as_mut().unwrap()
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
         .write_all(new_cron.as_bytes())
         .unwrap();
 

@@ -59,7 +59,7 @@ fn get_cronjobs(user: &str) -> Result<Vec<String>, String> {
     let output = Command::new("crontab")
         .args(["-l", "-u", &user])
         .output()
-        .map_err(|e| format!("Failed to execute crontab for {}: {}", user, e))?;
+        .map_err(|e| format!("[X] Failed to execute crontab for {}: {}", user, e))?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);

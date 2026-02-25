@@ -105,63 +105,47 @@ pub struct CliArgs {
     pub all: bool,
 }
 
-pub fn run(_ctx: &DefenderContext, args: &CliArgs) -> Result<(), String>  {
-    if args.at_jobs {
-        at_jobs::run(_ctx).expect("[X] Failed to run at jobs module");
+pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result<(), String> {
+    struct Module<'a> {
+        name: &'a str,
+        enabled: bool,
+        run: fn(&DefenderContext) -> Result<(), String>,
     }
-    if args.capabilities {
-        capabilities::run(_ctx).expect("[X] Failed to run capabilities module");
+
+    let modules = vec![
+        Module { name: "at_jobs", enabled: args.at_jobs, run: at_jobs::run },
+        Module { name: "capabilities", enabled: args.capabilities, run: capabilities::run },
+        Module { name: "cron", enabled: args.cron, run: cron::run },
+        Module { name: "grub", enabled: args.grub, run: grub::run },
+        Module { name: "initramfs", enabled: args.initramfs, run: initramfs::run },
+        Module { name: "kernel_modules", enabled: args.kernel_modules, run: kernel_modules::run },
+        Module { name: "ld_preload", enabled: args.ld_preload, run: ld_preload::run },
+        Module { name: "logrotate", enabled: args.logrotate, run: logrotate::run },
+        Module { name: "pam", enabled: args.pam, run: pam::run },
+        Module { name: "php_shells", enabled: args.php_shells, run: php_shells::run },
+        Module { name: "prompt_command", enabled: args.prompt_command, run: prompt_command::run },
+        Module { name: "rc_local", enabled: args.rc_local, run: rc_local::run },
+        Module { name: "ssh_keys", enabled: args.ssh_keys, run: ssh_keys::run },
+        Module { name: "startup_scripts", enabled: args.startup_scripts, run: startup_scripts::run },
+        Module { name: "suid", enabled: args.suid, run: suid::run },
+        Module { name: "systemd", enabled: args.systemd, run: systemd::run },
+        Module { name: "udev", enabled: args.udev, run: udev::run },
+        Module { name: "users", enabled: args.users, run: users::run },
+        Module { name: "xdg_autostart", enabled: args.xdg_autostart, run: xdg_autostart::run },
+    ];
+
+    let run_all = args.all;
+
+    for module in modules {
+        if run_all || module.enabled {
+            println!("[+] Running {} module", module.name);
+
+            match (module.run)(ctx) {
+                Ok(_) => println!("[+] {} module complete", module.name),
+                Err(e) => eprintln!("[!] {} module failed: {}", module.name, e),
+            }
+        }
     }
-    if args.cron {
-        cron::run(_ctx).expect("[X] Failed to run cron module");
-    }
-    if args.grub {
-        grub::run(_ctx).expect("[X] Failed to run grub module");
-    }
-    if args.initramfs {
-        initramfs::run(_ctx).expect("[X] Failed to run initramfs module");
-    }
-    if args.kernel_modules {
-        kernel_modules::run(_ctx).expect("[X] Failed to run kernel modules module");
-    }
-    if args.ld_preload {
-        ld_preload::run(_ctx).expect("[X] Failed to run LD_PRELOAD module");
-    }
-    if args.logrotate {
-        logrotate::run(_ctx).expect("[X] Failed to run logrotate module");
-    }
-    if args.pam {
-        pam::run(_ctx).expect("[X] Failed to run PAM module");
-    }
-    if args.php_shells {
-        php_shells::run(_ctx).expect("[X] Failed to run PHP Shells module");
-    }
-    if args.prompt_command {
-        prompt_command::run(_ctx).expect("[X] Failed to run $PROMPT_COMMAND module");
-    }
-    if args.rc_local {
-        rc_local::run(_ctx).expect("[X] Failed to run rc.local module");
-    }
-    if args.ssh_keys {
-        ssh_keys::run(_ctx).expect("[X] Failed to run SSH keys module");
-    }
-    if args.startup_scripts {
-        startup_scripts::run(_ctx).expect("[X] Failed to run startup scripts module");
-    }
-    if args.suid {
-        suid::run(_ctx).expect("[X] Failed to run SUID module");
-    }
-    if args.systemd {
-        systemd::run(_ctx).expect("[X] Failed to run systemd module")
-    }
-    if args.udev {
-        udev::run(_ctx).expect("[X] Failed to run udev module");
-    }
-    if args.users {
-        users::run(_ctx).expect("[X] Failed to run users module");
-    }
-    if args.xdg_autostart {
-        xdg_autostart::run(_ctx).expect("[X] Failed to run XDG Autostart module");
-    }
+
     Ok(())
 }

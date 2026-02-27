@@ -1,37 +1,73 @@
-use std::{io::{self, Write}, process::Command};
+use std::{
+    fs::File,
+    io::{self, BufRead, BufReader, Write},
+    process::Command,
+};
 
-use defender_core::DefenderContext;
+use defender_core::{DefenderContext, require_root};
 
 pub fn run(_ctx: &DefenderContext) -> Result<(), String> {
-    //println!("[+] Collecting all users...");
-    //println!("[✓] Collected all users!");
+    if require_root().is_err() {
+        println!("[!] Not running as root - stopping crontab check.");
+        return Err("[X] Must run as root to inspect user crontabs".into());
+    }
 
-    println!("[+] Checking cronjobs...");
-    println!("[+] Collecting cronjobs...");
-    let cronjobs: Vec<String> = get_cronjobs().expect("[X] Failed to get cronjobs");
-    println!("[✓] Cronjobs collected!");
+    println!("[+] Collecting users...");
+    let users: Vec<String> = collect_users()?;
+    println!("[✓] Users collected.");
+    for user in users {
+        println!("[+] {} - Checking cronjobs...", user);
+        println!("[+] {} - Collecting cronjobs...", user);
+        let cronjobs: Vec<String> = get_cronjobs(&user).expect("[X] Failed to get cronjobs");
+        println!("[✓] {} - Cronjobs collected!", user);
 
-    println!("[+] Filtering cronjobs...");
-    let good_jobs: Vec<String> = filter_jobs(cronjobs).expect("[X] Failed to filter cronjobs");
-    println!("[✓] Cronjobs filtered");
-     
-    println!("[+] Writing good cronjobs to disk...");
-    write_good_jobs(good_jobs).expect("[X] Failed to write good cron jobs to disk");
-    println!("[✓] Good cronjobs written to disk");
+        println!("[+] {} - Filtering cronjobs...", user);
+        let good_jobs: Vec<String> = filter_jobs(cronjobs).expect("[X] Failed to filter cronjobs");
+        println!("[✓] {} - Cronjobs filtered", user);
+
+        println!("[+] {} - Writing good cronjobs to disk...", user);
+        write_good_jobs(good_jobs, &user)
+            .expect("[X] Failed to write good cron jobs to disk");
+        println!("[✓] {} - Good cronjobs written to disk", user);
+    }
     println!("[✓] All cronjobs checked!");
     Ok(())
 }
 
-fn get_cronjobs() -> Result<Vec<String>, String> {
+fn collect_users() -> Result<Vec<String>, String> {
+    let file =
+        File::open("/etc/passwd").map_err(|e| format!("Failed to open /etc/passwd: {}", e))?;
+
+    let reader = BufReader::new(file);
+
+    let mut users = Vec::new();
+
+    for line in reader.lines() {
+        let line = line.map_err(|e| format!("Failed to read line: {}", e))?;
+
+        if let Some(username) = line.split(':').next() {
+            users.push(username.to_string());
+        }
+    }
+
+    Ok(users)
+}
+
+fn get_cronjobs(user: &str) -> Result<Vec<String>, String> {
+    let mut cronjobs: Vec<String> = Vec::new();
+
     let output = Command::new("crontab")
-        .arg("-l")
+        .args(["-l", "-u", &user])
         .output()
-        .expect("failed to execute 'crontab -l'");
+        .map_err(|e| format!("[X] Failed to execute crontab for {}: {}", user, e))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
 
-    let cronjobs: Vec<String> = stdout.lines().map(|s| s.to_string()).collect();
-    return Ok(cronjobs);
+        cronjobs.extend(stdout.lines().map(|line| format!("{}: {}", user, line)));
+    }
+
+    Ok(cronjobs)
 }
 
 fn filter_jobs(cronjobs: Vec<String>) -> Result<Vec<String>, String> {
@@ -43,6 +79,7 @@ fn filter_jobs(cronjobs: Vec<String>) -> Result<Vec<String>, String> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
+        println!("{}", cronjob.len());
         print!("[?] Is this malicious? (y/N) {} \n> ", cronjob);
         io::stdout().flush().unwrap();
 
@@ -61,17 +98,19 @@ fn filter_jobs(cronjobs: Vec<String>) -> Result<Vec<String>, String> {
     return Ok(good_jobs);
 }
 
-fn write_good_jobs(good_jobs: Vec<String>) -> Result<(), String> {
-    let mut new_cron: String = good_jobs.join("\n");
-    new_cron.push('\n');
-    
+fn write_good_jobs(good_jobs: Vec<String>, user: &str) -> Result<(), String> {
+    let new_cron: String = good_jobs.join("\n");
+
     let mut child = Command::new("crontab")
-        .arg("-")
+        .args(["-", "-u", &user])
         .stdin(std::process::Stdio::piped())
         .spawn()
-        .expect("Failed to spawn Crontab");
+        .expect("[X] Failed to spawn Crontab");
 
-    child.stdin.as_mut().unwrap()
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
         .write_all(new_cron.as_bytes())
         .unwrap();
 

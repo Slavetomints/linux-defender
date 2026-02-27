@@ -67,11 +67,11 @@ pub fn run(_ctx: &DefenderContext, save_location: &Option<PathBuf>) -> Result<()
     // directory that contains the previous `H@shes.txt` file.
     let hash_file_path = match save_location.as_ref() {
         Some(p) => p.join("H@shes.txt"),
-        None => return Err("Please provide the directory containing a previous H@shes.txt via save_location".to_string()),
+        None => return Err("[X] ERROR: Please provide the directory containing a previous H@shes.txt via save_location".to_string()),
     };
 
     if !hash_file_path.exists() {
-        return Err(format!("Hashes file not found: {}", hash_file_path.display()));
+        return Err(format!("[X] ERROR: Hashes file not found: {}", hash_file_path.display()));
     }
 
     let previous = parse_hashes_file(&hash_file_path)?;
@@ -117,11 +117,11 @@ pub fn run(_ctx: &DefenderContext, save_location: &Option<PathBuf>) -> Result<()
 }
 
 fn parse_hashes_file(path: &Path) -> Result<HashMap<String,String>, String> {
-    let f = fs::File::open(path).map_err(|e| format!("Failed to open hashes file {}: {}", path.display(), e))?;
+    let f = fs::File::open(path).map_err(|e| format!("[X] ERROR: Failed to open hashes file {}: {}", path.display(), e))?;
     let reader = BufReader::new(f);
     let mut map = HashMap::new();
     for line in reader.lines() {
-        let line = line.map_err(|e| format!("Failed to read line: {}", e))?;
+        let line = line.map_err(|e| format!("[X] ERROR: Failed to read line: {}", e))?;
         let trimmed = line.trim();
         if trimmed.is_empty() { continue; }
         // split into two parts: token and path
@@ -147,7 +147,7 @@ fn compute_current_hashes() -> Result<HashMap<String,String>, String> {
         }
 
         if src.is_file() {
-            let bytes = fs::read(src).map_err(|e| format!("Failed to read {}: {}", path, e))?;
+            let bytes = fs::read(src).map_err(|e| format!("[X] ERROR: Failed to read {}: {}", path, e))?;
             let digest = md5::compute(&bytes);
             map.insert(path.to_string(), format!("{:x}", digest));
         } else if src.is_dir() {
@@ -156,7 +156,7 @@ fn compute_current_hashes() -> Result<HashMap<String,String>, String> {
                 if entry_path == src { continue; }
                 let rel = entry_path.to_string_lossy().to_string();
                 if entry_path.is_file() {
-                    let bytes = fs::read(entry_path).map_err(|e| format!("Failed to read {}: {}", rel, e))?;
+                    let bytes = fs::read(entry_path).map_err(|e| format!("[X] ERROR: Failed to read {}: {}", rel, e))?;
                     let digest = md5::compute(&bytes);
                     map.insert(rel, format!("{:x}", digest));
                 } else if entry_path.is_dir() {

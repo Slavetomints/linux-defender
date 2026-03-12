@@ -22,6 +22,7 @@ mod users;
 mod xdg_autostart;
 
 #[derive(Args, Debug)]
+#[command(arg_required_else_help = true)]
 pub struct CliArgs {
     // TODO: ADD CHECKS FOR EVERY USER AND SYSTEM-WIDE JOBS
     /// Checks cron jobs for the current user

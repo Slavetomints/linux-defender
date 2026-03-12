@@ -7,7 +7,8 @@ use walkdir::WalkDir;
 use md5;
 use chrono::Utc;
 
-
+//Define a static list of important config files and directories to back up. This is not exhaustive but covers many common services and configs.
+//TODO: Split up over other modules and then call them all in the --all command, but for now this is a single list for simplicity.
 const ALL_PATHS: &[&str] = &[
     "/etc/ssh/sshd_config",
     "/etc/ssh/ssh_config",
@@ -62,8 +63,7 @@ const ALL_PATHS: &[&str] = &[
     "/opt/splunk/etc/splunk-launch.conf",
 ];
 
-//The service Files themselves should also be backed up like, should show Exec start or exec timeout or possibly also link to service config. 
-
+//Main run --all
 pub fn run(_ctx: &DefenderContext, save_location: &Option<PathBuf>) -> Result<(), String> {
     // Determine save_path: use provided save_location or default to /etc/ccdc-b@ckup-{timestamp}
     // We'll collect an early-message queue for things we want to log before the log file exists
@@ -78,7 +78,7 @@ pub fn run(_ctx: &DefenderContext, save_location: &Option<PathBuf>) -> Result<()
     };
 
     // Ensure the save directory exists and create the hashes file inside it so the caller
-    // knows exactly where the hashes live.
+    // knows exactly where the hashes live, this location also saves the logs and backups.
     if !save_path.exists() {
         fs::create_dir_all(&save_path)
             .map_err(|e| format!("[X] ERROR : Failed to create save directory {}: {}", save_path.display(), e))?;
@@ -94,6 +94,7 @@ pub fn run(_ctx: &DefenderContext, save_location: &Option<PathBuf>) -> Result<()
         writeln!(log_writer, "{}", m).map_err(|e| format!("[X] ERROR : Failed to write to log file: {}", e))?;
     }
 
+    // Create the hash file in the save directory and initialize a buffered writer, and log where it will be stored.
     let hash_path = save_path.join("H@shes.txt");
     writeln!(log_writer, "[!] WARN: Writing hashes to {}", hash_path.to_string_lossy())
         .map_err(|e| format!("[X] ERROR : Failed to write to log file: {}", e))?;
@@ -106,6 +107,7 @@ pub fn run(_ctx: &DefenderContext, save_location: &Option<PathBuf>) -> Result<()
     println!("[!] INFO: Hash file -> {}", hash_path.to_string_lossy());
     println!("[!] INFO: Log file  -> {}", log_path.to_string_lossy());
 
+    //Write to log the file currently backing up then do logic to backup for each file. 
     writeln!(log_writer, "[+] Backing up service configs to {}", save_path.to_string_lossy())
         .map_err(|e| format!("[X] ERROR : Failed to write to log file: {}", e))?;
     for path in ALL_PATHS {
@@ -170,6 +172,7 @@ pub fn run(_ctx: &DefenderContext, save_location: &Option<PathBuf>) -> Result<()
         }
         let dest: PathBuf = save_path.join(format!("{}.bak", path.replace('/', "_")));
 
+        // Use 'cp -r' to copy files and directories, capturing any errors
         let output = Command::new("cp")
             .arg("-r")
             .arg(path)

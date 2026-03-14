@@ -2,6 +2,7 @@ use clap::Args;
 use defender_core::DefenderContext;
 
 #[derive(Args, Debug)]
+#[command(arg_required_else_help = true)]
 pub struct CliArgs {
     #[arg(long)]
     pub access_log: bool,

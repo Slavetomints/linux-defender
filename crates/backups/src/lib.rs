@@ -13,6 +13,7 @@ mod splunk;
 mod users;
 
 #[derive(Args, Debug)]
+#[command(arg_required_else_help = true)]
 pub struct CliArgs {
     #[arg(long)]
     pub all: bool,

@@ -1,12 +1,14 @@
 use defender_core::DefenderContext;
-use std::{process::Command, io::Write};
+use std::{process::Command};
 use std::fs;
+use std::io::{Write, BufWriter};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 use md5;
 use chrono::Utc;
 
-
+//Define a static list of important config files and directories to back up. This is not exhaustive but covers many common services and configs.
+//TODO: Split up over other modules and then call them all in the --all command, but for now this is a single list for simplicity.
 const ALL_PATHS: &[&str] = &[
     "/etc/ssh/sshd_config",
     "/etc/ssh/ssh_config",
@@ -61,40 +63,62 @@ const ALL_PATHS: &[&str] = &[
     "/opt/splunk/etc/splunk-launch.conf",
 ];
 
-//The service Files themselves should also be backed up like, should show Exec start or exec timeout or possibly also link to service config. 
-
+//Main run --all
 pub fn run(_ctx: &DefenderContext, save_location: &Option<PathBuf>) -> Result<(), String> {
     // Determine save_path: use provided save_location or default to /etc/ccdc-b@ckup-{timestamp}
+    // We'll collect an early-message queue for things we want to log before the log file exists
+    let mut queued_logs: Vec<String> = Vec::new();
     let save_path: PathBuf = if let Some(p) = save_location.as_ref() {
         p.clone()
     } else {
         let ts = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
         let default = PathBuf::from(format!("/etc/ccdc-b@ckup-{}", ts));
-        println!("[!] WARN: No save_location provided, defaulting to {}", default.to_string_lossy());
+        queued_logs.push(format!("[!] WARN: No save_location provided, defaulting to {}", default.to_string_lossy()));
         default
     };
 
     // Ensure the save directory exists and create the hashes file inside it so the caller
-    // knows exactly where the hashes live.
+    // knows exactly where the hashes live, this location also saves the logs and backups.
     if !save_path.exists() {
         fs::create_dir_all(&save_path)
             .map_err(|e| format!("[X] ERROR : Failed to create save directory {}: {}", save_path.display(), e))?;
     }
+    // Create the log file in the save directory and initialize a buffered writer.
+    let log_path = save_path.join("backup.log");
+    let log_file = fs::File::create(&log_path)
+        .map_err(|e| format!("[X] ERROR : Failed to create log file {}: {}", log_path.display(), e))?;
+    let mut log_writer = BufWriter::new(log_file);
 
+    // Flush any queued early messages into the log file
+    for m in queued_logs.iter() {
+        writeln!(log_writer, "{}", m).map_err(|e| format!("[X] ERROR : Failed to write to log file: {}", e))?;
+    }
+
+    // Create the hash file in the save directory and initialize a buffered writer, and log where it will be stored.
     let hash_path = save_path.join("H@shes.txt");
-    println!("[!] WARN:Writing hashes to {}", hash_path.to_string_lossy());
+    writeln!(log_writer, "[!] WARN: Writing hashes to {}", hash_path.to_string_lossy())
+        .map_err(|e| format!("[X] ERROR : Failed to write to log file: {}", e))?;
 
     let mut hashfile = fs::File::create(&hash_path)
         .map_err(|e| format!("Failed to create hash file {}: {}", hash_path.display(), e))?;
 
-    println!("[+] Backing up service configs to {}", save_path.to_string_lossy());
+    // Inform the console where the hash and log files will be stored (user requested)
+    println!("[!] INFO: Logs are now written to a logfile in the backup directory");
+    println!("[!] INFO: Hash file -> {}", hash_path.to_string_lossy());
+    println!("[!] INFO: Log file  -> {}", log_path.to_string_lossy());
+
+    //Write to log the file currently backing up then do logic to backup for each file. 
+    writeln!(log_writer, "[+] Backing up service configs to {}", save_path.to_string_lossy())
+        .map_err(|e| format!("[X] ERROR : Failed to write to log file: {}", e))?;
     for path in ALL_PATHS {
-        println!("[+] Backing up {}", path);
+        writeln!(log_writer, "[+] Backing up {}", path)
+            .map_err(|e| format!("[X] ERROR : Failed to write to log file: {}", e))?;
         let src = Path::new(path);
 
         // check if source exists before trying to copy
         if !src.exists() {
-            println!("[!] Warning: {} does not exist, skipping backup", path);
+            writeln!(log_writer, "[!] Warning: {} does not exist, skipping backup", path)
+                .map_err(|e| format!("[X] ERROR : Failed to write to log file: {}", e))?;
             continue;
         }
 
@@ -127,23 +151,28 @@ pub fn run(_ctx: &DefenderContext, save_location: &Option<PathBuf>) -> Result<()
                 } else if entry_path.is_dir() {
                     // Directory found inside a top-level directory: two levels deep. We don't hash
                     // directories two layers deep for now — just note and print.
-                    println!("[!] WARN: Dir inside dir: {} - not hashed (2 levels deep)", rel);
+                    writeln!(log_writer, "[!] WARN: Dir inside dir: {} - not hashed (2 levels deep)", rel)
+                        .map_err(|e| format!("[X] ERROR : Failed to write to log file: {}", e))?;
                     writeln!(hashfile, "<dir2>  {}", rel)
                         .map_err(|e| format!("[X] ERROR : Failed to write hash file: {}", e))?;
                 } else {
                     // Other types (symlink, device nodes, etc.) — note them.
+                    writeln!(log_writer, "[!] WARN: Other file type encountered: {}", rel)
+                        .map_err(|e| format!("[X] ERROR : Failed to write to log file: {}", e))?;
                     writeln!(hashfile, "<other>  {}", rel)
                         .map_err(|e| format!("[X] ERROR : Failed to write hash file: {}", e))?;
                 }
             }
         } else {
             // For other types (symlink, etc), just note the path
+            writeln!(log_writer, "[!] WARN: Other top-level path type: {}", path)
+                .map_err(|e| format!("[X] ERROR : Failed to write to log file: {}", e))?;
             writeln!(hashfile, "<other>  {}", path)
                 .map_err(|e| format!("[X] ERROR : Failed to write hash file: {}", e))?;
         }
-
         let dest: PathBuf = save_path.join(format!("{}.bak", path.replace('/', "_")));
 
+        // Use 'cp -r' to copy files and directories, capturing any errors
         let output = Command::new("cp")
             .arg("-r")
             .arg(path)
@@ -152,11 +181,16 @@ pub fn run(_ctx: &DefenderContext, save_location: &Option<PathBuf>) -> Result<()
             .map_err(|e| format!("[X] ERROR : Failed to execute 'cp {}': {}", path, e))?;
 
         if !output.status.success() {
+            writeln!(log_writer, "[X] ERROR : Failed to back up {}: {}", path, String::from_utf8_lossy(&output.stderr))
+                .map_err(|e| format!("[X] ERROR : Failed to write to log file: {}", e))?;
             return Err(format!(
                 "[X] ERROR : Failed to back up {}: {}",
                 path,
                 String::from_utf8_lossy(&output.stderr)
             ));
+        } else {
+            writeln!(log_writer, "[+] Successfully backed up {}", path)
+                .map_err(|e| format!("[X] ERROR : Failed to write to log file: {}", e))?;
         }
     }
 
@@ -164,7 +198,14 @@ pub fn run(_ctx: &DefenderContext, save_location: &Option<PathBuf>) -> Result<()
     hashfile.flush().map_err(|e| format!("[X] ERROR : Failed to flush hash file: {}", e))?;
     hashfile.sync_all().map_err(|e| format!("[X] ERROR : Failed to sync hash file to disk: {}", e))?;
 
+    writeln!(log_writer, "[✓] Completed backups. Hashes written to {}", hash_path.to_string_lossy())
+        .map_err(|e| format!("[X] ERROR : Failed to write to log file: {}", e))?;
+
+    // flush log writer and sync file to disk
+    log_writer.flush().map_err(|e| format!("[X] ERROR : Failed to flush log file: {}", e))?;
+
     println!("[✓] Completed backups. Hashes written to {}", hash_path.to_string_lossy());
+    println!("[✓] Logs written to {}", save_path.join("backup.log").to_string_lossy());
 
     Ok(())
 }

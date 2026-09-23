@@ -1,0 +1,32 @@
+name: Lint GitHub Actions workflows
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/**"
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Run the pinned release container rather than piping a script from a
+      # moving branch into a shell. actionlint bundles shellcheck, so `run:`
+      # blocks in these workflows are linted too.
+      - name: Check workflow files
+        run: |
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/repo" \
+            --workdir /repo \
+            rhysd/actionlint:1.7.7 \
+            -color

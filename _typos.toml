@@ -1,0 +1,4 @@
+# Project vocabulary the default dictionary mistakes for typos.
+[default.extend-words]
+# Linux kernel module names, e.g. snd_hda_intel (Intel HD Audio).
+hda = "hda"

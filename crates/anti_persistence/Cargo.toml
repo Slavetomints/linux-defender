@@ -1,9 +1,0 @@
-[package]
-name = "anti_persistence"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-clap = "4.5.58"
-defender_core = { path = "../defender_core" }
-walkdir = "2.5.0"

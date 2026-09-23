@@ -1,11 +1,59 @@
-[workspace]
-members = [
-    "crates/anti_persistence",
-    "crates/system_hardening",
-    "crates/monitoring",
-    "crates/backups",
-    "crates/defender_core",
-    "defender_cli",
-]
+[package]
+name = "defender-cli"
+version = "0.3.0"
+edition = "2024"
+# Verified in CI by .github/workflows/msrv.yml. Edition 2024 sets a hard floor
+# of 1.85; 1.86 is the oldest version the dependency tree builds and tests on.
+rust-version = "1.86"
+description = "CCDC system hardening, anti-persistence, and backup tooling"
+repository = "https://github.com/UWStout-CCDC/linux-defender"
+license = "MIT"
+# Test targets are declared explicitly below so tests/common.rs stays a shared
+# helper module rather than being auto-discovered as its own test binary.
+autotests = false
 
-resolver = "2"
+[lib]
+name = "defender_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "defender-cli"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4.43", features = ["alloc", "std"] }
+clap = { version = "4.5.58", features = ["derive"] }
+nix = { version = "0.31.1", features = ["user"] }
+sha2 = "0.10"
+thiserror = "2"
+walkdir = "2.5.0"
+
+[dev-dependencies]
+tempfile = "3"
+
+# One test binary per top-level source module it exercises.
+[[test]]
+name = "anti_persistence"
+path = "tests/anti_persistence.rs"
+
+[[test]]
+name = "backups"
+path = "tests/backups.rs"
+
+[[test]]
+name = "core"
+path = "tests/core.rs"
+
+[[test]]
+name = "monitoring"
+path = "tests/monitoring.rs"
+
+[[test]]
+name = "system_hardening"
+path = "tests/system_hardening.rs"
+
+# Drives the built binary end to end; covers src/main.rs.
+[[test]]
+name = "cli"
+path = "tests/cli.rs"

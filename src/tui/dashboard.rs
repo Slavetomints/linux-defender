@@ -32,6 +32,7 @@ pub fn render(
     nft_config: Option<&str>,
     sessions: &[SessionInfo],
     auth_events: &[String],
+    authorized_users: &[String],
 ) {
     let (top_area, firewall_area) = if nft_config.is_some() {
         let rows = Layout::default()
@@ -65,7 +66,7 @@ pub fn render(
         .split(cols[2]);
 
     render_services(f, left_rows[0], box_type, services);
-    render_sessions(f, left_rows[1], sessions);
+    render_sessions(f, left_rows[1], sessions, authorized_users);
     render_findings(f, cols[1], findings);
     render_sysinfo(f, right_rows[0]);
     render_auth_events(f, right_rows[1], auth_events);
@@ -106,7 +107,7 @@ fn render_services(
     f.render_widget(list, area);
 }
 
-fn render_sessions(f: &mut Frame, area: ratatui::layout::Rect, sessions: &[SessionInfo]) {
+fn render_sessions(f: &mut Frame, area: ratatui::layout::Rect, sessions: &[SessionInfo], _authorized_users: &[String]) {
     let any_flagged = sessions.iter().any(|s| s.flagged);
     let border_color = if any_flagged { Color::Red } else { Color::Blue };
     let title = format!(
@@ -352,7 +353,7 @@ pub fn poll_services(configs: &'static [ServiceConfig]) -> Vec<(&'static str, u1
 }
 
 /// Read currently logged-in sessions from `who`.
-pub fn poll_sessions() -> Vec<SessionInfo> {
+pub fn poll_sessions(authorized_users: &[String]) -> Vec<SessionInfo> {
     let Ok(out) = Command::new("who").output() else { return vec![] };
     let stdout = String::from_utf8_lossy(&out.stdout);
     let now_secs = SystemTime::now()
@@ -361,11 +362,11 @@ pub fn poll_sessions() -> Vec<SessionInfo> {
         .unwrap_or(0);
 
     stdout.lines()
-        .filter_map(|line| parse_who_line(line, now_secs))
+        .filter_map(|line| parse_who_line(line, now_secs, authorized_users))
         .collect()
 }
 
-fn parse_who_line(line: &str, now_secs: u64) -> Option<SessionInfo> {
+fn parse_who_line(line: &str, now_secs: u64, authorized_users: &[String]) -> Option<SessionInfo> {
     // Format: "user  tty  YYYY-MM-DD HH:MM  (source)"
     let parts: Vec<&str> = line.split_whitespace().collect();
     if parts.len() < 4 { return None; }
@@ -383,9 +384,9 @@ fn parse_who_line(line: &str, now_secs: u64) -> Option<SessionInfo> {
         .map(|ts| now_secs.saturating_sub(ts))
         .unwrap_or(0);
 
-    // Authorized users (root) are only flagged if their session exceeds 15 seconds.
-    // Any other user is always flagged — they should not be logged in at all.
-    let authorized = username == "root";
+    // Authorized users (root by default, configurable) are only flagged if their session
+    // exceeds 15 seconds. Any other user is always flagged — they should not be logged in.
+    let authorized = authorized_users.contains(&username);
     let flagged = if authorized { duration_secs > 15 } else { true };
 
     Some(SessionInfo { username, tty, login_time: login_str, source, duration_secs, flagged })

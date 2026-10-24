@@ -17,7 +17,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
-use crate::core::{BoxType, DefenderContext, Finding, detect_box_type, execute_action};
+use chrono::Local;
+
+use crate::core::{BoxType, DefenderContext, Finding, Severity, detect_box_type, execute_action};
 use crate::tui::logs::dashboard::LogDashboard as LogDash;
 
 use super::dashboard::{
@@ -65,6 +67,12 @@ const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
     ("logrotate",       "logrotate scripts",        true,  ScanInterval::OnDemand),
     ("udev",            "udev rules",               true,  ScanInterval::OnDemand),
     ("xdg_autostart",   "XDG autostart entries",   true,  ScanInterval::OnDemand),
+    ("ssh_config",      "sshd_config audit",        true,  ScanInterval::Frequent),
+    ("sudoers",         "sudoers audit",            true,  ScanInterval::Frequent),
+    ("cron_system",     "System cron dirs",         true,  ScanInterval::Continuous),
+    ("systemd_timers",  "Systemd timers",           true,  ScanInterval::Frequent),
+    ("shell_aliases",   "Shell alias backdoors",    true,  ScanInterval::Frequent),
+    ("polkit",          "polkit rules audit",       true,  ScanInterval::OnDemand),
     // ── Monitoring ─────────────────────────────────────────────────────────
     ("hidden_elf",          "Hidden ELF binaries",           false, ScanInterval::Frequent),
     ("deleted_binaries",    "Deleted running binaries",      false, ScanInterval::Continuous),
@@ -81,6 +89,12 @@ const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
     ("perm_anomalies",      "Permission/ownership anomalies",false, ScanInterval::OnDemand),
     ("attacker_tools",      "Attacker tool detection",       false, ScanInterval::Frequent),
     ("c2_detection",        "C2/implant detection",          false, ScanInterval::Continuous),
+    ("rootkit_cross_check", "Rootkit PID/port cross-check",  false, ScanInterval::Continuous),
+    ("proc_maps",           "RWX anonymous memory maps",     false, ScanInterval::Frequent),
+    ("binary_integrity",    "Binary integrity baseline",     false, ScanInterval::OnDemand),
+    ("git_hooks",           "Malicious git hooks",           false, ScanInterval::Frequent),
+    ("webserver_config",    "Webserver config audit",        false, ScanInterval::Frequent),
+    ("bind_mounts",         "Bind/overlay mount detection",  false, ScanInterval::Continuous),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +185,16 @@ pub struct App {
     pub auto_scan_running: HashSet<&'static str>,
     auto_scan_done_tx: Sender<&'static str>,
     auto_scan_done_rx: Receiver<&'static str>,
+    /// Automatically restart scored services that go down.
+    pub watchdog_enabled: bool,
+    /// How many times we have already restarted each service this session.
+    pub watchdog_restart_count: HashMap<&'static str, u32>,
+    /// Usernames that are permitted to be logged in (not flagged in Sessions pane).
+    pub authorized_users: Vec<String>,
+    /// True while the "add authorized user" text-input overlay is showing.
+    pub user_input_active: bool,
+    /// Buffer for the in-progress username being typed.
+    pub user_input_buf: String,
 }
 
 impl App {
@@ -185,6 +209,8 @@ impl App {
         let (scan_progress_tx, scan_progress_rx) = mpsc::channel();
         let (auto_scan_done_tx, auto_scan_done_rx) = mpsc::channel::<&'static str>();
         let scan_selected = vec![true; SCAN_MODULES.len()];
+        let authorized_users = vec!["root".to_string()];
+        let sessions = poll_sessions(&authorized_users);
         Self {
             box_type,
             tab: Tab::Dashboard,
@@ -208,19 +234,34 @@ impl App {
             download_status: None,
             tools_cursor: 0,
             active_wizard: None,
-            sessions: poll_sessions(),
+            sessions,
             auth_events: poll_auth_events(),
             auto_scan_enabled: false,
             auto_scan_last_run: HashMap::new(),
             auto_scan_running: HashSet::new(),
             auto_scan_done_tx,
             auto_scan_done_rx,
+            watchdog_enabled: false,
+            watchdog_restart_count: HashMap::new(),
+            authorized_users,
+            user_input_active: false,
+            user_input_buf: String::new(),
         }
     }
 
     fn tick(&mut self) {
         while let Ok(f) = self.finding_rx.try_recv() {
-            self.findings.push(f);
+            let is_dup = self.findings.iter().rev().take(50).any(|existing| {
+                existing.module == f.module
+                    && existing.summary == f.summary
+                    && existing.timestamp.signed_duration_since(f.timestamp)
+                        .num_seconds()
+                        .abs()
+                        < 120
+            });
+            if !is_dup {
+                self.findings.push(f);
+            }
         }
         if !self.findings.is_empty() && self.findings_cursor >= self.findings.len() {
             self.findings_cursor = self.findings.len() - 1;
@@ -245,9 +286,28 @@ impl App {
         }
         if self.last_service_check.elapsed() >= Duration::from_secs(5) {
             self.services = poll_services(self.box_type.services());
-            self.sessions = poll_sessions();
+            self.sessions = poll_sessions(&self.authorized_users);
             self.auth_events = poll_auth_events();
             self.last_service_check = Instant::now();
+            // Watchdog: automatically restart scored services that have gone down.
+            if self.watchdog_enabled {
+                let down: Vec<&'static str> = self.services.iter()
+                    .filter_map(|&(name, _port, up)| if !up { Some(name) } else { None })
+                    .collect();
+                for name in down {
+                    let count = self.watchdog_restart_count.get(name).copied().unwrap_or(0);
+                    if count < 3 {
+                        *self.watchdog_restart_count.entry(name).or_insert(0) += 1;
+                        let name_owned = name.to_string();
+                        std::thread::spawn(move || {
+                            let _ = std::process::Command::new("systemctl")
+                                .args(["restart", &name_owned])
+                                .output();
+                        });
+                        self.action_feedback = Some(format!("Watchdog: restarting {}…", name));
+                    }
+                }
+            }
         }
     }
 
@@ -332,6 +392,59 @@ impl App {
             let _ = progress_tx.send(String::new()); // signal done
         });
     }
+
+    /// Export the current findings as a timestamped IR report.
+    /// Returns the path written on success, or an error string.
+    fn export_ir_report(&self) -> Result<String, String> {
+        let now = Local::now();
+        let ts = now.format("%Y%m%d_%H%M%S").to_string();
+
+        let path = if nix::unistd::geteuid().is_root() {
+            let dir = std::path::Path::new("/etc/linux-defender/reports");
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("mkdir failed: {}", e))?;
+            dir.join(format!("{}.txt", ts))
+        } else {
+            std::path::PathBuf::from(format!("/tmp/defender-report-{}.txt", ts))
+        };
+
+        let crit = self.findings.iter().filter(|f| !f.resolved && f.severity == Severity::Critical).count();
+        let high = self.findings.iter().filter(|f| !f.resolved && f.severity == Severity::High).count();
+        let med  = self.findings.iter().filter(|f| !f.resolved && f.severity == Severity::Medium).count();
+
+        let mut report = format!(
+            "LINUX-DEFENDER IR REPORT\nGenerated: {}\nBox type: {}\nTotal findings: {} (Critical: {}, High: {}, Medium: {})\n{}\n\n",
+            now.format("%Y-%m-%d %H:%M:%S"),
+            self.box_type.label(),
+            self.findings.len(),
+            crit, high, med,
+            "=".repeat(40),
+        );
+
+        for finding in &self.findings {
+            report.push_str(&format!(
+                "[{}] {}  {}\n  {}\n",
+                finding.severity.label().trim(),
+                finding.verdict.label(),
+                finding.module,
+                finding.summary,
+            ));
+            if let Some(ref p) = finding.path {
+                report.push_str(&format!("  path: {}\n", p.display()));
+            }
+            if !finding.detail.is_empty() {
+                report.push_str(&format!("  {}\n", finding.detail));
+            }
+            for (label, value) in &finding.context {
+                report.push_str(&format!("  {}: {}\n", label, value));
+            }
+            report.push('\n');
+        }
+
+        let path_str = path.to_string_lossy().to_string();
+        std::fs::write(&path, report).map_err(|e| format!("write failed: {}", e))?;
+        Ok(path_str)
+    }
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -382,6 +495,32 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+
+                // When the "add user" modal is open, route all keys to it.
+                if app.user_input_active {
+                    match key.code {
+                        KeyCode::Esc => {
+                            app.user_input_active = false;
+                            app.user_input_buf.clear();
+                        }
+                        KeyCode::Enter => {
+                            let username = app.user_input_buf.trim().to_string();
+                            if !username.is_empty() && !app.authorized_users.contains(&username) {
+                                app.authorized_users.push(username);
+                            }
+                            app.user_input_active = false;
+                            app.user_input_buf.clear();
+                        }
+                        KeyCode::Backspace => {
+                            app.user_input_buf.pop();
+                        }
+                        KeyCode::Char(c) => {
+                            app.user_input_buf.push(c);
+                        }
+                        _ => {}
+                    }
                     continue;
                 }
 
@@ -533,6 +672,26 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                 // Clear last-run times so all due modules start immediately.
                                 app.auto_scan_last_run.clear();
                             }
+                        } else if app.tab == Tab::Dashboard {
+                            app.watchdog_enabled = !app.watchdog_enabled;
+                            if app.watchdog_enabled {
+                                // Reset restart counts when watchdog is freshly enabled.
+                                app.watchdog_restart_count.clear();
+                            }
+                        }
+                    }
+                    KeyCode::Char('u') => {
+                        if app.tab == Tab::Dashboard {
+                            app.user_input_active = true;
+                            app.user_input_buf.clear();
+                        }
+                    }
+                    KeyCode::Char('e') => {
+                        if app.tab == Tab::Scan && app.scan_focus == ScanFocus::Findings {
+                            match app.export_ir_report() {
+                                Ok(path) => app.action_feedback = Some(format!("Exported: {}", path)),
+                                Err(e)   => app.action_feedback = Some(format!("Export failed: {}", e)),
+                            }
                         }
                     }
                     KeyCode::Char('d') => {
@@ -629,7 +788,8 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
         ])
         .split(size);
 
-    render_tabbar(f, rows[0], app.tab);
+    let sessions_flagged = app.sessions.iter().any(|s| s.flagged);
+    render_tabbar(f, rows[0], app.tab, &app.findings, sessions_flagged);
 
     match app.tab {
         Tab::Dashboard => {
@@ -642,6 +802,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
                 app.nft_config.as_deref(),
                 &app.sessions,
                 &app.auth_events,
+                &app.authorized_users,
             );
         }
         Tab::Logs => {
@@ -665,23 +826,55 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
         wizard.render(f, size);
     }
 
+    // User input modal renders on top of everything.
+    if app.user_input_active {
+        render_user_input_modal(f, size, &app.user_input_buf);
+    }
+
     render_statusbar(f, rows[2], app);
 }
 
-fn render_tabbar(f: &mut ratatui::Frame, area: Rect, active: Tab) {
+fn render_tabbar(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    active: Tab,
+    findings: &[Finding],
+    sessions_flagged: bool,
+) {
+    let crit_count = findings
+        .iter()
+        .filter(|f| !f.resolved && f.severity == Severity::Critical)
+        .count();
+
     let spans: Vec<Span> = Tab::ALL
         .iter()
         .enumerate()
         .flat_map(|(i, &tab)| {
-            let label = format!(" [{}] {} ", i + 1, tab.label());
-            let style = if tab == active {
+            let base_label = format!(" [{}] {} ", i + 1, tab.label());
+            let base_style = if tab == active {
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
             } else {
                 Style::default().fg(Color::DarkGray)
             };
-            [Span::styled(label, style), Span::raw(" ")]
+
+            let mut parts: Vec<Span> = vec![Span::styled(base_label, base_style)];
+
+            if tab == Tab::Dashboard && sessions_flagged {
+                parts.push(Span::styled(
+                    "⚠",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ));
+            } else if tab == Tab::Scan && crit_count > 0 {
+                parts.push(Span::styled(
+                    format!("✖{}", crit_count),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ));
+            }
+
+            parts.push(Span::raw(" "));
+            parts
         })
         .collect();
 
@@ -720,23 +913,27 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
             .is_some_and(|p| p.paused);
     let pause_str = if paused { "  [PAUSED]" } else { "" };
 
+    let watchdog_str = if app.watchdog_enabled { "  WATCHDOG" } else { "" };
+
     let hint = match app.tab {
+        Tab::Dashboard => "  [w] watchdog  [u] users",
         Tab::Logs => "  [Tab] pane  [p] pause  [↑↓] scroll",
         Tab::Scan if app.show_finding_detail => "  [x] execute  [Esc] back",
         Tab::Scan => match app.scan_focus {
             ScanFocus::Modules => "  [Tab] → findings  [↑↓] move  [Space] toggle  [a] all  [s] scan  [w] auto",
-            ScanFocus::Findings => "  [Tab] → modules  [↑↓] move  [Enter] detail",
+            ScanFocus::Findings => "  [Tab] → modules  [↑↓] move  [Enter] detail  [e] export",
         },
         Tab::Tools => "  [↑↓] navigate   [d] download (binary)   [r] run selected tool/script",
         _ => "",
     };
 
     let text = format!(
-        " box:{box}  findings:{n}{down}{scan}{pause}  [q]uit  [1-7] tabs{hint}",
+        " box:{box}  findings:{n}{down}{scan}{watchdog}{pause}  [q]uit  [1-7] tabs{hint}",
         box = app.box_type.label(),
         n = app.findings.len(),
         down = down_str,
         scan = scan_str,
+        watchdog = watchdog_str,
         pause = pause_str,
     );
 
@@ -1130,6 +1327,36 @@ fn render_placeholder(f: &mut ratatui::Frame, area: Rect, name: &str) {
         .block(block)
         .style(Style::default().fg(Color::DarkGray));
     f.render_widget(p, area);
+}
+
+fn render_user_input_modal(f: &mut ratatui::Frame, area: Rect, buf: &str) {
+    let w = 44u16.min(area.width.saturating_sub(4));
+    let h = 5u16;
+    let x = (area.width.saturating_sub(w)) / 2;
+    let y = (area.height.saturating_sub(h)) / 2;
+    let popup = Rect::new(x, y, w, h);
+
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Add Authorized User ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let lines = vec![
+        Line::from(Span::styled("Username:", Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled(
+            format!("> {}_", buf),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "[Enter] confirm  [Esc] cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn select_box_type(

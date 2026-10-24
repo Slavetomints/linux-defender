@@ -11,17 +11,23 @@ use crate::core::{DefenderContext, DefenderError, Result};
 pub mod ai_artifacts;
 pub mod attacker_tools;
 pub mod auth_log;
+pub mod binary_integrity;
+pub mod bind_mounts;
 pub mod c2_detection;
 pub mod elf_disguise;
 pub mod deleted_binaries;
 pub mod fail2ban;
+pub mod git_hooks;
 pub mod perm_anomalies;
 pub mod hidden_elf;
 pub mod outbound_connections;
 pub mod port_map;
+pub mod proc_maps;
 pub mod process_tree;
 pub mod recently_modified;
+pub mod rootkit_cross_check;
 pub mod suspicious_services;
+pub mod webserver_config;
 pub mod world_writable;
 
 /// Which monitoring checks to run.
@@ -89,6 +95,30 @@ pub struct CliArgs {
     /// Detect C2 implants and beacons (memfd execution, deleted-temp exe, C2 ports, Go implants)
     #[arg(long)]
     pub c2_detection: bool,
+
+    /// Cross-check /proc PID list and listening ports against ps/ss for rootkit evidence
+    #[arg(long)]
+    pub rootkit_cross_check: bool,
+
+    /// Scan /proc/*/maps for anonymous rwxp mappings (shellcode injection)
+    #[arg(long)]
+    pub proc_maps: bool,
+
+    /// Verify SHA-256 hashes of system binaries against a stored baseline
+    #[arg(long)]
+    pub binary_integrity: bool,
+
+    /// Scan git repos for malicious hook scripts
+    #[arg(long)]
+    pub git_hooks: bool,
+
+    /// Audit nginx, Apache, and PHP config for webshell enablers
+    #[arg(long)]
+    pub webserver_config: bool,
+
+    /// Detect bind mounts and overlay/tmpfs hiding system paths
+    #[arg(long)]
+    pub bind_mounts: bool,
 
     // ── Legacy stub flags (maintained for backwards compatibility) ────────
 
@@ -164,6 +194,24 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
     if args.all || args.c2_detection {
         run_module("c2_detection", ctx)?;
     }
+    if args.all || args.rootkit_cross_check {
+        run_module("rootkit_cross_check", ctx)?;
+    }
+    if args.all || args.proc_maps {
+        run_module("proc_maps", ctx)?;
+    }
+    if args.all || args.binary_integrity {
+        run_module("binary_integrity", ctx)?;
+    }
+    if args.all || args.git_hooks {
+        run_module("git_hooks", ctx)?;
+    }
+    if args.all || args.webserver_config {
+        run_module("webserver_config", ctx)?;
+    }
+    if args.all || args.bind_mounts {
+        run_module("bind_mounts", ctx)?;
+    }
 
     // Legacy stubs — print a placeholder so existing integration tests pass.
     if args.access_log {
@@ -203,6 +251,12 @@ pub fn run_module(name: &str, ctx: &DefenderContext) -> Result {
         "perm_anomalies"         => perm_anomalies::run(ctx),
         "attacker_tools"         => attacker_tools::run(ctx),
         "c2_detection"           => c2_detection::run(ctx),
+        "rootkit_cross_check"    => rootkit_cross_check::run(ctx),
+        "proc_maps"              => proc_maps::run(ctx),
+        "binary_integrity"       => binary_integrity::run(ctx),
+        "git_hooks"              => git_hooks::run(ctx),
+        "webserver_config"       => webserver_config::run(ctx),
+        "bind_mounts"            => bind_mounts::run(ctx),
         _ => Err(DefenderError::Command(format!(
             "unknown monitoring module: {}",
             name

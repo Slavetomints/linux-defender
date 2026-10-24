@@ -24,21 +24,22 @@ struct Account {
     uid: u32,
     home: PathBuf,
     shell: String,
+    /// The raw line from `/etc/passwd`, used for evidence logging.
+    raw_line: String,
 }
 
 /// Walk `/etc/passwd`, analyse each non-system account, and emit a verdict.
 pub fn run(ctx: &DefenderContext) -> Result {
     if require_root().is_err() {
-        if ctx.in_tui() {
-            ctx.emit(Finding::new(
-                Severity::Medium,
-                "users",
-                "Not running as root — users check skipped",
-                "Run as root to inspect local accounts and sudoers.",
-            ));
-        } else {
+        if !ctx.in_tui() {
             eprintln!("[!] Not running as root — users check skipped");
         }
+        ctx.emit(Finding::new(
+            Severity::Medium,
+            "users",
+            "Not running as root — users check skipped",
+            "Run as root to inspect local accounts and sudoers.",
+        ));
         return Err(DefenderError::NotRoot);
     }
 
@@ -76,6 +77,29 @@ pub fn run(ctx: &DefenderContext) -> Result {
 }
 
 fn emit_uid0_finding(ctx: &DefenderContext, acct: &Account) {
+    // 1. Log the /etc/passwd entry as evidence before touching anything.
+    ctx.log_evidence_line("/etc/passwd", &acct.raw_line);
+
+    // 2. If /etc/shadow is readable, log the shadow entry too.
+    if let Ok(shadow) = fs::read_to_string("/etc/shadow") {
+        if let Some(shadow_line) = shadow.lines().find(|l| l.split(':').next() == Some(&acct.name)) {
+            ctx.log_evidence_line("/etc/shadow", shadow_line);
+        }
+    }
+
+    // 3. Remove the account.  ctx.run_remediation() uses .output() internally,
+    //    so it always waits for the child — no zombie processes.
+    let _removed = ctx.run_remediation(&["userdel", "-r", &acct.name]);
+
+    // 4. Verify: re-read /etc/passwd and check whether the entry is still there.
+    let still_present = fs::read_to_string("/etc/passwd")
+        .map(|contents| contents.lines().any(|l| l.split(':').next() == Some(&acct.name)))
+        .unwrap_or(false);
+
+    // 5. Log proof.
+    ctx.log_msg(&format!("PROOF: {} still in /etc/passwd: {}", acct.name, still_present));
+
+    // 6. Emit the finding with the required context fields.
     ctx.emit(
         Finding::new(
             Severity::Critical,
@@ -87,8 +111,10 @@ fn emit_uid0_finding(ctx: &DefenderContext, acct: &Account) {
                 acct.name
             ),
         )
-        .with_context("account", acct.name.clone())
+        .with_context("user", acct.name.clone())
         .with_context("uid", "0")
+        .with_context("removed", if !still_present { "true" } else { "false" })
+        .with_context("passwd_entry", acct.raw_line.clone())
         .with_context("shell", acct.shell.clone())
         .with_context("home", acct.home.display().to_string())
         .with_verdict(
@@ -287,6 +313,7 @@ fn parse_passwd() -> Result<Vec<Account>> {
                 uid,
                 home: PathBuf::from(fields[5]),
                 shell: fields[6].to_string(),
+                raw_line: line.to_string(),
             })
         })
         .collect())
@@ -319,6 +346,7 @@ mod tests {
                     uid,
                     home: PathBuf::from(f[5]),
                     shell: f[6].to_string(),
+                    raw_line: line.to_string(),
                 })
             })
             .collect();

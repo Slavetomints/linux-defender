@@ -12,6 +12,7 @@ use crate::core::{DefenderContext, DefenderError, Result};
 pub mod at_jobs;
 pub mod capabilities;
 pub mod cron;
+pub mod cron_system;
 pub mod grub;
 pub mod immutable;
 pub mod initramfs;
@@ -20,12 +21,17 @@ pub mod ld_preload;
 pub mod logrotate;
 pub mod pam;
 pub mod php_shells;
+pub mod polkit;
 pub mod prompt_command;
 pub mod rc_local;
+pub mod shell_aliases;
+pub mod ssh_config;
 pub mod ssh_keys;
 pub mod startup_scripts;
+pub mod sudoers;
 pub mod suid;
 pub mod systemd;
+pub mod systemd_timers;
 pub mod udev;
 pub mod users;
 pub mod xdg_autostart;
@@ -74,6 +80,18 @@ pub struct CliArgs {
     #[arg(long)] pub at_jobs: bool,
     /// Checks for immutable/append-only flags on sensitive files
     #[arg(long)] pub immutable: bool,
+    /// Check sshd_config for dangerous directives (ForceCommand, AuthorizedKeysCommand, etc.)
+    #[arg(long)] pub ssh_config: bool,
+    /// Audit /etc/sudoers and sudoers.d for NOPASSWD, LD_PRELOAD, and wildcard rules
+    #[arg(long)] pub sudoers: bool,
+    /// Check system cron directories (/etc/cron.d, periodic scripts) for malicious jobs
+    #[arg(long)] pub cron_system: bool,
+    /// Scan systemd timer units for suspicious short-interval or malicious ExecStart
+    #[arg(long)] pub systemd_timers: bool,
+    /// Detect malicious shell aliases in global and per-user dotfiles
+    #[arg(long)] pub shell_aliases: bool,
+    /// Audit polkit rules and pkla files for unconditional privilege grants
+    #[arg(long)] pub polkit: bool,
     /// Runs all persistence checks
     #[arg(long)] pub all: bool,
 }
@@ -82,10 +100,11 @@ type Module = (&'static str, bool, fn(&DefenderContext) -> Result);
 
 /// Run each requested check, reporting failures without aborting the run.
 pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
-    let modules: [Module; 20] = [
+    let modules: [Module; 26] = [
         ("at_jobs",          args.at_jobs,          at_jobs::run),
         ("capabilities",     args.capabilities,     capabilities::run),
         ("cron",             args.cron,             cron::run),
+        ("cron_system",      args.cron_system,      cron_system::run),
         ("grub",             args.grub,             grub::run),
         ("immutable",        args.immutable,        immutable::run),
         ("initramfs",        args.initramfs,        initramfs::run),
@@ -94,12 +113,17 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
         ("logrotate",        args.logrotate,        logrotate::run),
         ("pam",              args.pam,              pam::run),
         ("php_shells",       args.php_shells,       php_shells::run),
+        ("polkit",           args.polkit,           polkit::run),
         ("prompt_command",   args.prompt_command,   prompt_command::run),
         ("rc_local",         args.rc_local,         rc_local::run),
+        ("shell_aliases",    args.shell_aliases,    shell_aliases::run),
+        ("ssh_config",       args.ssh_config,       ssh_config::run),
         ("ssh_keys",         args.ssh_keys,         ssh_keys::run),
         ("startup_scripts",  args.startup_scripts,  startup_scripts::run),
+        ("sudoers",          args.sudoers,          sudoers::run),
         ("suid",             args.suid,             suid::run),
         ("systemd",          args.systemd,          systemd::run),
+        ("systemd_timers",   args.systemd_timers,   systemd_timers::run),
         ("udev",             args.udev,             udev::run),
         ("users",            args.users,            users::run),
         ("xdg_autostart",    args.xdg_autostart,    xdg_autostart::run),
@@ -138,6 +162,7 @@ pub fn run_module(name: &str, ctx: &DefenderContext) -> Result {
         "at_jobs"          => at_jobs::run(ctx),
         "capabilities"     => capabilities::run(ctx),
         "cron"             => cron::run(ctx),
+        "cron_system"      => cron_system::run(ctx),
         "grub"             => grub::run(ctx),
         "immutable"        => immutable::run(ctx),
         "initramfs"        => initramfs::run(ctx),
@@ -146,12 +171,17 @@ pub fn run_module(name: &str, ctx: &DefenderContext) -> Result {
         "logrotate"        => logrotate::run(ctx),
         "pam"              => pam::run(ctx),
         "php_shells"       => php_shells::run(ctx),
+        "polkit"           => polkit::run(ctx),
         "prompt_command"   => prompt_command::run(ctx),
         "rc_local"         => rc_local::run(ctx),
+        "shell_aliases"    => shell_aliases::run(ctx),
+        "ssh_config"       => ssh_config::run(ctx),
         "ssh_keys"         => ssh_keys::run(ctx),
         "startup_scripts"  => startup_scripts::run(ctx),
+        "sudoers"          => sudoers::run(ctx),
         "suid"             => suid::run(ctx),
         "systemd"          => systemd::run(ctx),
+        "systemd_timers"   => systemd_timers::run(ctx),
         "udev"             => udev::run(ctx),
         "users"            => users::run(ctx),
         "xdg_autostart"    => xdg_autostart::run(ctx),

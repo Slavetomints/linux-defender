@@ -105,6 +105,33 @@ pub fn prompt_yes(question: &str) -> Result<bool> {
     Ok(answer.trim().eq_ignore_ascii_case("y"))
 }
 
+/// Ask the operator for a free-form string value.
+pub fn prompt_string(question: &str) -> Result<String> {
+    print!("{}\n> ", question);
+    io::stdout().flush()?;
+
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+
+    Ok(answer.trim().to_string())
+}
+
+/// Ask for a string value, using `default` if the operator presses Enter.
+pub fn prompt_string_default(question: &str, default: &str) -> Result<String> {
+    print!("{} [{}]\n> ", question, default);
+    io::stdout().flush()?;
+
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+
+    let trimmed = answer.trim();
+    if trimmed.is_empty() {
+        Ok(default.to_string())
+    } else {
+        Ok(trimmed.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

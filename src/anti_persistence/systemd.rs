@@ -7,38 +7,53 @@
 
 use std::process::Command;
 
-use crate::core::{DefenderContext, DefenderError, Result, prompt_yes};
+use crate::core::{Action, DefenderContext, DefenderError, Finding, Result, Severity, prompt_yes};
 
 /// One unit as `systemctl list-units` describes it.
 struct Service {
-    /// Unit name, for example `sshd.service`.
     name: String,
-    /// Human-readable description.
     description: String,
-    /// Active state, for example `active` or `failed`.
     status: String,
 }
 
 /// Review every systemd unit and stop plus disable the ones the operator flags.
 pub fn run(ctx: &DefenderContext) -> Result {
-    println!("[+] Collecting systemd services...");
+    ctx.log_msg("[+] Collecting systemd services...");
     let services = collect_services()?;
-    println!("[✓] {} systemd services collected", services.len());
+    ctx.log_msg(&format!("[✓] {} systemd services collected", services.len()));
 
     ctx.debug(&format!("Parsed {} services", services.len()));
 
     for service in &services {
-        println!("[+] Name: {}", service.name);
-        println!("[+] Description: {}", service.description);
-        println!("[+] Status: {}", service.status);
+        if ctx.in_tui() {
+            ctx.emit(
+                Finding::new(
+                    Severity::Info,
+                    "systemd",
+                    format!("{} — {} ({})", service.name, service.description, service.status),
+                    format!(
+                        "unit: {}\ndescription: {}\nstatus: {}",
+                        service.name, service.description, service.status
+                    ),
+                )
+                .with_action(Action::Manual(format!(
+                    "systemctl stop {} && systemctl disable {}",
+                    service.name, service.name
+                ))),
+            );
+        } else {
+            println!("[+] Name: {}", service.name);
+            println!("[+] Description: {}", service.description);
+            println!("[+] Status: {}", service.status);
 
-        if prompt_yes("[?] Is this service malicious? (y/N)")? {
-            stop_service(&service.name)?;
-            disable_service(&service.name)?;
+            if prompt_yes("[?] Is this service malicious? (y/N)")? {
+                stop_service(&service.name)?;
+                disable_service(&service.name)?;
+            }
         }
     }
 
-    println!("[✓] All systemd services checked");
+    ctx.log_msg("[✓] All systemd services checked");
     Ok(())
 }
 
@@ -72,7 +87,6 @@ fn parse_services(output: &str) -> Vec<Service> {
     let mut services = Vec::new();
 
     for line in output.lines() {
-        // systemctl marks degraded units with a leading bullet.
         let parts: Vec<&str> = line.split_whitespace().skip_while(|p| *p == "●").collect();
 
         if parts.len() < 4 {

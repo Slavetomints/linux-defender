@@ -3,11 +3,14 @@
 //! Every dotfile a shell sources on login is a persistence slot. This checks
 //! the system-wide files and each login-capable account's own, reporting only
 //! lines that match a known-dangerous pattern rather than every line present.
+//!
+//! `/etc/skel` is checked separately: any backdoor there propagates to every
+//! new account created, making it a force-multiplier persistence slot.
 
 use std::path::{Path, PathBuf};
 
 use crate::core::scan::{effective_line, read_text_file, suspicious_matches};
-use crate::core::{DefenderContext, Result, collect_accounts};
+use crate::core::{Action, DefenderContext, Finding, Result, Severity, Verdict, collect_accounts};
 
 /// Files sourced for all users.
 const SYSTEM_FILES: &[&str] = &[
@@ -20,6 +23,9 @@ const SYSTEM_FILES: &[&str] = &[
 
 /// Drop-in directory sourced by `/etc/profile`.
 const SYSTEM_DIR: &str = "/etc/profile.d";
+
+/// Skeleton directory — copied verbatim into every new home directory.
+const SKEL_DIR: &str = "/etc/skel";
 
 /// Per-account dotfiles, relative to the account's home directory.
 const USER_FILES: &[&str] = &[
@@ -62,23 +68,163 @@ pub fn run(ctx: &DefenderContext) -> Result {
         hits.extend(inspect_file(target));
     }
 
-    if hits.is_empty() {
-        println!("[✓] No suspicious lines in any shell startup file");
+    // Check /etc/skel separately — findings are Critical because they propagate
+    // to every new account the system creates.
+    let skel_hits = scan_skel(ctx);
+
+    if hits.is_empty() && skel_hits == 0 {
+        ctx.log_msg("[✓] No suspicious lines in any shell startup file");
         return Ok(());
     }
 
-    println!(
-        "[!] {} suspicious line(s) in shell startup files:",
-        hits.len()
-    );
     for hit in &hits {
-        println!("    {}", hit.file.display());
-        println!("      {}", hit.line);
-        println!("      [!] {}", hit.reasons.join(", "));
+        // Log the suspicious line as evidence before emitting the finding.
+        ctx.log_msg(&format!(
+            "[!] Suspicious line in {}: {}  [{}]",
+            hit.file.display(), hit.line, hit.reasons.join(", ")
+        ));
+        ctx.log_evidence_line(&hit.file.display().to_string(), &hit.line);
+
+        // Auto-remove the malicious line from the file.
+        let removed = ctx.remove_line_from_file_logged(&hit.file, &hit.line);
+
+        ctx.emit(
+            Finding::new(
+                Severity::High,
+                "startup_scripts",
+                format!(
+                    "Startup backdoor {} in {} (line removed: {})",
+                    if removed { "REMOVED" } else { "FOUND" },
+                    hit.file.display(),
+                    removed,
+                ),
+                format!(
+                    "file: {}\nline: {}\nreasons: {}\nremoved: {}",
+                    hit.file.display(), hit.line, hit.reasons.join(", "), removed
+                ),
+            )
+            .with_path(hit.file.clone())
+            .with_context("line", hit.line.clone())
+            .with_context("flags", hit.reasons.join(", "))
+            .with_context("removed", removed.to_string())
+            .with_verdict(
+                if removed { Verdict::Remove } else { Verdict::Investigate },
+                if removed {
+                    "The malicious line was automatically removed. Evidence and proof logged.".to_string()
+                } else {
+                    format!(
+                        "Could not automatically remove line from {} — remove manually: \
+                         edit the file and delete the flagged line.",
+                        hit.file.display()
+                    )
+                },
+            )
+            .with_action(Action::Manual(format!(
+                "Verify {} no longer contains the removed line",
+                hit.file.display()
+            ))),
+        );
     }
-    println!("[!] Startup files are not auto-edited — remove the offending lines by hand.");
 
     Ok(())
+}
+
+/// Scan `/etc/skel` for backdoored dotfiles.
+///
+/// Executable binaries in skel → log evidence + auto-remove.
+/// Malicious lines in skel dotfiles → log evidence + auto-remove the line.
+/// Returns the number of findings emitted.
+fn scan_skel(ctx: &DefenderContext) -> usize {
+    let skel = Path::new(SKEL_DIR);
+    if !skel.is_dir() {
+        return 0;
+    }
+
+    let Ok(entries) = std::fs::read_dir(skel) else {
+        return 0;
+    };
+
+    let mut count = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        // An executable binary in skel is unconditionally malicious — auto-remove.
+        if is_executable(&path) && !looks_like_shell_script(&path) {
+            count += 1;
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+
+            ctx.log_msg(&format!(
+                "[!] CRITICAL: Executable binary in /etc/skel/{} — auto-removing", name
+            ));
+            ctx.log_evidence_file(&path);
+            let removed = ctx.remove_path_logged(&path);
+
+            ctx.emit(
+                Finding::new(
+                    Severity::Critical,
+                    "startup_scripts",
+                    format!(
+                        "Skel binary REMOVED: /etc/skel/{} (was auto-removed: {})",
+                        name, removed
+                    ),
+                    format!("path: {}\nauto_removed: {}", path.display(), removed),
+                )
+                .with_path(path.clone())
+                .with_context("removed", removed.to_string())
+                .with_verdict(
+                    Verdict::Remove,
+                    "A non-script executable in /etc/skel is never legitimate. \
+                     It would be copied into every new user's home directory. \
+                     Evidence and proof of removal logged."
+                    .to_string(),
+                ),
+            );
+        }
+
+        // Malicious lines in skel dotfiles — log evidence + auto-remove the line.
+        let hits = inspect_file(&path);
+        for hit in hits {
+            count += 1;
+            let fname = hit.file.file_name().unwrap_or_default().to_string_lossy().to_string();
+
+            ctx.log_msg(&format!(
+                "[!] CRITICAL: Backdoor line in /etc/skel/{} — auto-removing line",
+                fname
+            ));
+            ctx.log_evidence_line(&hit.file.display().to_string(), &hit.line);
+            let removed = ctx.remove_line_from_file_logged(&hit.file, &hit.line);
+
+            ctx.emit(
+                Finding::new(
+                    Severity::Critical,
+                    "startup_scripts",
+                    format!(
+                        "Skel backdoor REMOVED from /etc/skel/{} (removed: {})",
+                        fname, removed
+                    ),
+                    format!(
+                        "file: {}\nline: {}\nreasons: {}\nremoved: {}",
+                        hit.file.display(), hit.line, hit.reasons.join(", "), removed
+                    ),
+                )
+                .with_path(hit.file.clone())
+                .with_context("line", hit.line.clone())
+                .with_context("flags", hit.reasons.join(", "))
+                .with_context("removed", removed.to_string())
+                .with_verdict(
+                    Verdict::Remove,
+                    "/etc/skel files are copied into every new user's home directory. \
+                     This backdoor line has been automatically removed. Audit any accounts \
+                     created since this file was modified — their dotfiles may still contain it."
+                    .to_string(),
+                ),
+            );
+        }
+    }
+    count
 }
 
 /// Dangerous lines in one startup file, if it can be read.
@@ -95,6 +241,32 @@ fn inspect_file(path: &Path) -> Vec<Hit> {
             reasons,
         })
         .collect()
+}
+
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+fn looks_like_shell_script(path: &Path) -> bool {
+    // Shell scripts have a text extension or shebang; binaries typically don't.
+    if let Some(ext) = path.extension() {
+        let e = ext.to_string_lossy();
+        if matches!(e.as_ref(), "sh" | "bash" | "zsh" | "py" | "pl" | "rb") {
+            return true;
+        }
+    }
+    // Check shebang
+    if let Ok(mut f) = std::fs::File::open(path) {
+        use std::io::Read;
+        let mut buf = [0u8; 2];
+        if f.read_exact(&mut buf).is_ok() && &buf == b"#!" {
+            return true;
+        }
+    }
+    false
 }
 
 /// Lines matching a dangerous pattern, with the reasons they matched.

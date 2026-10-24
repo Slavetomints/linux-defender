@@ -6,13 +6,14 @@
 //! removing the wrong one breaks `sudo` or `passwd`.
 
 use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use crate::core::{DefenderContext, DefenderError, Result};
+use crate::core::{DefenderContext, DefenderError, Finding, Result, Severity};
 
 /// List every SUID binary on the root filesystem.
 pub fn run(ctx: &DefenderContext) -> Result {
-    println!("[+] Checking for SUID binaries. This may take a while...");
+    ctx.log_msg("[+] Checking for SUID binaries. This may take a while...");
 
     let mut child = Command::new("find")
         .args(["/", "-perm", "-4000", "-type", "f", "-xdev"])
@@ -28,13 +29,21 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
     let mut count = 0usize;
     for line in BufReader::new(stdout).lines() {
-        println!("{}", line?);
+        let path_str = line?;
         count += 1;
+        ctx.emit(
+            Finding::new(
+                Severity::Info,
+                "suid",
+                format!("SUID binary: {}", path_str),
+                "This binary runs as its owner regardless of who executes it.",
+            )
+            .with_path(PathBuf::from(&path_str)),
+        );
     }
 
     let status = child.wait()?;
 
-    // find exits 1 when it hit unreadable directories; that is expected here.
     if let Some(code) = status.code() {
         if code > 1 {
             return Err(DefenderError::Command(format!(
@@ -43,11 +52,16 @@ pub fn run(ctx: &DefenderContext) -> Result {
             )));
         }
         if code == 1 {
-            eprintln!("[!] find completed with minor permission errors");
+            ctx.emit(Finding::new(
+                Severity::Info,
+                "suid",
+                "find completed with minor permission errors (some directories unreadable)",
+                "",
+            ));
         }
     }
 
     ctx.debug(&format!("{} SUID binaries found", count));
-    println!("[+] SUID scan complete");
+    ctx.log_msg(&format!("[+] SUID scan complete — {} binaries found", count));
     Ok(())
 }

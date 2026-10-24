@@ -15,6 +15,7 @@
 //! - [`anti_persistence`] — find and remove attacker footholds
 //! - [`backups`] — capture a baseline, then diff against it later
 //! - [`monitoring`] — watch logs and network state (not yet implemented)
+//! - [`service_restore`] — recreate a scored service from scratch
 //! - [`system_hardening`] — proactive hardening (largely not yet implemented)
 //!
 //! [`core`] holds what they share: the [`DefenderContext`](core::DefenderContext)
@@ -55,4 +56,9 @@ pub mod anti_persistence;
 pub mod backups;
 pub mod core;
 pub mod monitoring;
+pub mod service_restore;
 pub mod system_hardening;
+pub mod tools;
+pub mod tui;
+/// TUI-native wizard overlays for operational tasks (fail2ban, firewall, IPv6, Splunk).
+pub mod wizards;

@@ -1,8 +1,8 @@
 //! Command-line entry point.
 //!
-//! Parses arguments, builds the [`DefenderContext`] that every check shares,
-//! and dispatches into exactly one subcommand. All real logic lives in the
-//! library crate so that integration tests can reach it directly.
+//! With no arguments: launches the full TUI.
+//! With arguments: runs the legacy CLI dispatch (used by integration tests
+//! and for quick one-shot checks without a terminal).
 
 use std::env;
 
@@ -11,7 +11,7 @@ use chrono::Local;
 use clap::{Parser, Subcommand};
 
 use defender_cli::core::DefenderContext;
-use defender_cli::{anti_persistence, backups, monitoring, system_hardening};
+use defender_cli::{anti_persistence, backups, monitoring, service_restore, system_hardening};
 
 /// CCDC Helper Program
 #[derive(Parser)]
@@ -37,6 +37,9 @@ enum Mode {
 
     /// Hardens the system from common attack vectors
     SystemHardening(system_hardening::CliArgs),
+
+    /// Reinstalls or restores scored services from scratch
+    ServiceRestore(service_restore::CliArgs),
 }
 
 impl Mode {
@@ -46,11 +49,17 @@ impl Mode {
             Mode::Backups(_) => "backups",
             Mode::Monitoring(_) => "monitoring",
             Mode::SystemHardening(_) => "system-hardening",
+            Mode::ServiceRestore(_) => "service-restore",
         }
     }
 }
 
 fn main() -> anyhow::Result<()> {
+    // No arguments → launch the TUI.
+    if env::args().len() == 1 {
+        return defender_cli::tui::run();
+    }
+
     let cli = Cli::parse();
 
     let timestamp = Local::now().format("%d-%m-%y-%H-%M-%S").to_string();
@@ -76,6 +85,9 @@ fn main() -> anyhow::Result<()> {
         }
         Mode::SystemHardening(args) => {
             system_hardening::run(&ctx, &args).context("Couldn't run System Hardening mode")?
+        }
+        Mode::ServiceRestore(args) => {
+            service_restore::run(&ctx, &args).context("Couldn't run Service Restore mode")?
         }
     }
 

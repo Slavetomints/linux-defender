@@ -9,17 +9,31 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::core::{
-    DefenderContext, DefenderError, Result, UserAccount, collect_accounts, prompt_yes, require_root,
+    DefenderContext, DefenderError, Finding, Result, Severity, UserAccount, Verdict,
+    collect_accounts, require_root,
 };
 
-/// Review each account's `authorized_keys` and remove the ones the operator flags.
+/// Review each account's `authorized_keys`, log all keys as evidence, then delete the file.
+///
+/// In CCDC every authorized_keys entry was planted by the red team or left over
+/// from pre-competition setup. We log the key content (type + comment, not the
+/// base64 body), delete the file, and verify it is gone — leaving a clean audit
+/// trail in the run log.
 pub fn run(ctx: &DefenderContext) -> Result {
     if require_root().is_err() {
-        eprintln!("[!] Not running as root - stopping ssh_keys check.");
+        if !ctx.in_tui() {
+            eprintln!("[!] Not running as root — ssh_keys check skipped");
+        }
+        ctx.emit(Finding::new(
+            Severity::Medium,
+            "ssh_keys",
+            "Not running as root — ssh_keys check skipped",
+            "Run as root to review and remove authorized_keys.",
+        ));
         return Err(DefenderError::NotRoot);
     }
 
-    println!("[+] Checking SSH authorized_keys...");
+    ctx.log_msg("[+] Checking SSH authorized_keys...");
 
     for account in collect_accounts()? {
         let keyfile = authorized_keys_path(&account);
@@ -31,21 +45,76 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
         let contents = fs::read_to_string(&keyfile).unwrap_or_default();
         let keys = parse_authorized_keys(&contents);
+        if keys.is_empty() {
+            continue;
+        }
 
-        println!(
-            "[!] {} has {} authorized key(s) at {}",
-            account.name,
+        let mtime_label = keyfile
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map(|t| ctx.mtime_label(t))
+            .unwrap_or_else(|| "unknown".into());
+
+        ctx.log_msg(&format!(
+            "[!] {} authorized key(s) found in {} — auto-removing",
             keys.len(),
-            keyfile.display()
-        );
-        for key in &keys {
-            println!("    - {}", key);
-        }
+            keyfile.display(),
+        ));
 
-        if prompt_yes("[?] Remove this authorized_keys file? (y/N)")? {
-            fs::remove_file(&keyfile)?;
-            println!("[+] Removed {}", keyfile.display());
+        // Phase 1: log evidence (key summaries + raw file)
+        for key in &keys {
+            ctx.log_evidence_line(&keyfile.display().to_string(), key);
         }
+        ctx.log_evidence_file(&keyfile);
+
+        // Phase 2: delete the entire file
+        let removed = ctx.remove_path_logged(&keyfile);
+
+        let mut finding = Finding::new(
+            Severity::High,
+            "ssh_keys",
+            format!(
+                "{} authorized_keys REMOVED: {} key(s) (removed: {})",
+                account.name,
+                keys.len(),
+                removed,
+            ),
+            format!(
+                "account: {}\npath: {}\nkeys: {}\nremoved: {}",
+                account.name,
+                keyfile.display(),
+                keys.join(", "),
+                removed,
+            ),
+        )
+        .with_path(keyfile.clone())
+        .with_context("account", account.name.clone())
+        .with_context("path", keyfile.display().to_string())
+        .with_context("key count", keys.len().to_string())
+        .with_context("mtime", mtime_label)
+        .with_context("removed", removed.to_string())
+        .with_verdict(
+            Verdict::Remove,
+            if removed {
+                "Authorized keys were deleted. Evidence and proof logged. \
+                 In CCDC all authorized_keys are red team backdoors — they survive \
+                 password changes and must be purged."
+                .to_string()
+            } else {
+                "Authorized keys were found but deletion failed — check the log and \
+                 remove manually."
+                .to_string()
+            },
+        );
+
+        for (i, key) in keys.iter().enumerate() {
+            finding = finding.with_context(
+                Box::leak(format!("key {}", i + 1).into_boxed_str()),
+                key.clone(),
+            );
+        }
+        ctx.emit(finding);
     }
 
     Ok(())

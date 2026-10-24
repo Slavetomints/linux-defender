@@ -20,7 +20,9 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use crate::core::{BoxType, DefenderContext, Finding, detect_box_type, execute_action};
 use crate::tui::logs::dashboard::LogDashboard as LogDash;
 
-use super::dashboard::{poll_services, render as render_dashboard};
+use super::dashboard::{
+    SessionInfo, poll_auth_events, poll_services, poll_sessions, render as render_dashboard,
+};
 use super::logs::preserve;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +80,7 @@ const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
     ("elf_disguise",        "ELF/script disguise check",     false, ScanInterval::Frequent),
     ("perm_anomalies",      "Permission/ownership anomalies",false, ScanInterval::OnDemand),
     ("attacker_tools",      "Attacker tool detection",       false, ScanInterval::Frequent),
+    ("c2_detection",        "C2/implant detection",          false, ScanInterval::Continuous),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +159,10 @@ pub struct App {
     pub tools_cursor: usize,
     /// Currently open TUI wizard overlay, if any.
     pub active_wizard: Option<crate::wizards::ActiveWizard>,
+    /// Currently logged-in sessions, polled every 5s.
+    pub sessions: Vec<SessionInfo>,
+    /// Recent auth log events, polled every 5s.
+    pub auth_events: Vec<String>,
     /// Whether auto-scan (continuous + frequent) is running in the background.
     pub auto_scan_enabled: bool,
     /// When each module was last auto-scanned.
@@ -201,6 +208,8 @@ impl App {
             download_status: None,
             tools_cursor: 0,
             active_wizard: None,
+            sessions: poll_sessions(),
+            auth_events: poll_auth_events(),
             auto_scan_enabled: false,
             auto_scan_last_run: HashMap::new(),
             auto_scan_running: HashSet::new(),
@@ -236,6 +245,8 @@ impl App {
         }
         if self.last_service_check.elapsed() >= Duration::from_secs(5) {
             self.services = poll_services(self.box_type.services());
+            self.sessions = poll_sessions();
+            self.auth_events = poll_auth_events();
             self.last_service_check = Instant::now();
         }
     }
@@ -629,6 +640,8 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
                 &app.services,
                 &app.findings,
                 app.nft_config.as_deref(),
+                &app.sessions,
+                &app.auth_events,
             );
         }
         Tab::Logs => {

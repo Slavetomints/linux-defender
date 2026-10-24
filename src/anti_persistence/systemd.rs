@@ -5,6 +5,7 @@
 //! the ones flagged are stopped and then disabled so they do not return after
 //! a reboot.
 
+use std::path::Path;
 use std::process::Command;
 
 use crate::core::{Action, DefenderContext, DefenderError, Finding, Result, Severity, prompt_yes};
@@ -54,6 +55,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
     }
 
     ctx.log_msg("[✓] All systemd services checked");
+    check_suspicious_units(ctx, &services)?;
     Ok(())
 }
 
@@ -122,6 +124,85 @@ fn disable_service(name: &str) -> Result {
         .map_err(|e| DefenderError::Command(format!("systemctl disable {}: {}", name, e)))?;
 
     println!("[+] Disabled {}", name);
+    Ok(())
+}
+
+/// Exec paths that indicate a unit was planted by an attacker rather than
+/// installed by a package manager.
+const SUSPICIOUS_EXEC_PATHS: &[&str] = &["/tmp/", "/dev/shm/", "/var/tmp/", "/run/shm/"];
+
+/// Ask systemd for the on-disk path of a unit file.
+fn get_fragment_path(name: &str) -> Option<String> {
+    let out = Command::new("systemctl")
+        .args(["show", "--property=FragmentPath", "--value", name])
+        .output()
+        .ok()?;
+    let s = String::from_utf8(out.stdout).ok()?;
+    let s = s.trim().to_string();
+    if s.is_empty() || s == "(null)" {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// Return the first `ExecStart=` value found in a unit file's text.
+fn extract_exec_start(unit_content: &str) -> Option<String> {
+    unit_content
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("ExecStart=").map(str::to_string))
+}
+
+/// True when the ExecStart path points into a temp/volatile directory.
+fn is_suspicious_exec(exec_start: &str) -> bool {
+    SUSPICIOUS_EXEC_PATHS.iter().any(|p| exec_start.contains(p))
+}
+
+/// For every service whose unit file has a suspicious `ExecStart=` path:
+/// capture the unit file as evidence, stop and disable the service, delete the
+/// unit file, then emit a Critical finding with proof-of-removal context.
+fn check_suspicious_units(ctx: &DefenderContext, services: &[Service]) -> Result {
+    for service in services {
+        let Some(unit_path_str) = get_fragment_path(&service.name) else {
+            continue;
+        };
+        let unit_path = Path::new(&unit_path_str);
+        let Ok(content) = std::fs::read_to_string(unit_path) else {
+            continue;
+        };
+        let Some(exec_start) = extract_exec_start(&content) else {
+            continue;
+        };
+        if !is_suspicious_exec(&exec_start) {
+            continue;
+        }
+
+        // Log the full unit file as evidence for IR.
+        ctx.log_evidence_file(unit_path);
+
+        // Stop and disable before removing the file.
+        ctx.run_remediation(&["systemctl", "stop", &service.name]);
+        ctx.run_remediation(&["systemctl", "disable", &service.name]);
+        let removed = ctx.remove_path_logged(unit_path);
+
+        ctx.emit(
+            Finding::new(
+                Severity::Critical,
+                "systemd",
+                format!(
+                    "Suspicious unit {} has ExecStart in a temp/volatile path",
+                    service.name
+                ),
+                format!(
+                    "unit: {}\nexec_start: {}\nunit_path: {}",
+                    service.name, exec_start, unit_path_str
+                ),
+            )
+            .with_context("removed", removed.to_string())
+            .with_context("unit_path", unit_path_str)
+            .with_context("exec_start", exec_start),
+        );
+    }
     Ok(())
 }
 

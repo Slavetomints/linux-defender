@@ -107,6 +107,29 @@ fn report_flags(ctx: &DefenderContext, path: &Path, flags: libc::c_long) {
         path.display()
     );
 
+    // Capture file content as evidence before attempting flag removal.
+    ctx.log_evidence_file(path);
+
+    // Remove the immutable/append-only flag.
+    let path_str = path.to_str().unwrap_or("");
+    let chattr_arg = format!("-{}", chattr_flag);
+    let cmd_ok = ctx.run_remediation(&["chattr", &chattr_arg, path_str]);
+
+    // Verify by re-reading the filesystem flags.
+    let flag_cleared = if cmd_ok {
+        get_flags(path)
+            .map(|f| (f & FS_IMMUTABLE_FL) == 0 && (f & FS_APPEND_FL) == 0)
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    let proof = format!(
+        "  chattr -{} verification: flag_cleared={}",
+        chattr_flag, flag_cleared
+    );
+    ctx.log_msg(&proof);
+    let _ = ctx.log(&proof);
+
     ctx.emit(
         Finding::new(
             severity,
@@ -124,6 +147,7 @@ fn report_flags(ctx: &DefenderContext, path: &Path, flags: libc::c_long) {
         .with_context("path", path.display().to_string())
         .with_context("flags", flag_str)
         .with_context("remove with", format!("chattr -{} {}", chattr_flag, path.display()))
+        .with_context("flag_cleared", flag_cleared.to_string())
         .with_context("note", note)
         .with_verdict(verdict, recommendation)
         .with_action(Action::RemoveImmutable(PathBuf::from(path))),

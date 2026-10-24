@@ -10,7 +10,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::core::scan::{effective_line, read_text_file};
-use crate::core::{Action, DefenderContext, Finding, Result, Severity, prompt_yes, require_root};
+use crate::core::{DefenderContext, Finding, Result, Severity, prompt_yes, require_root};
 
 const PRELOAD_FILE: &str = "/etc/ld.so.preload";
 
@@ -51,19 +51,37 @@ fn check_preload_file(ctx: &DefenderContext) -> Result {
 
     if ctx.in_tui() {
         let is_root = require_root().is_ok();
-        let finding = Finding::new(
-            Severity::Critical,
-            "ld_preload",
-            format!("{} preloads {} library(s) into every process", PRELOAD_FILE, entries.len()),
-            detail,
-        )
-        .with_path(path.to_path_buf());
-        let finding = if is_root {
-            finding.with_action(Action::Delete(path.to_path_buf()))
-        } else {
-            finding
-        };
-        ctx.emit(finding);
+
+        // Capture the preload file content as evidence before any changes.
+        ctx.log_evidence_file(path);
+
+        let mut removed = false;
+        if is_root {
+            let mut all_ok = true;
+            for entry in &entries {
+                let lib_path = Path::new(entry.as_str());
+                if lib_path.exists() {
+                    if !ctx.remove_path_logged(lib_path) {
+                        all_ok = false;
+                    }
+                }
+                if !ctx.remove_line_from_file_logged(path, entry) {
+                    all_ok = false;
+                }
+            }
+            removed = all_ok;
+        }
+
+        ctx.emit(
+            Finding::new(
+                Severity::Critical,
+                "ld_preload",
+                format!("{} preloads {} library(s) into every process", PRELOAD_FILE, entries.len()),
+                detail,
+            )
+            .with_path(path.to_path_buf())
+            .with_context("removed", removed.to_string()),
+        );
     } else {
         println!(
             "[!] {} preloads {} library(s) into every process:",

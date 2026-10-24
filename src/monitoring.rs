@@ -11,6 +11,7 @@ use crate::core::{DefenderContext, DefenderError, Result};
 pub mod ai_artifacts;
 pub mod attacker_tools;
 pub mod auth_log;
+pub mod c2_detection;
 pub mod elf_disguise;
 pub mod deleted_binaries;
 pub mod fail2ban;
@@ -85,6 +86,10 @@ pub struct CliArgs {
     #[arg(long)]
     pub attacker_tools: bool,
 
+    /// Detect C2 implants and beacons (memfd execution, deleted-temp exe, C2 ports, Go implants)
+    #[arg(long)]
+    pub c2_detection: bool,
+
     // ── Legacy stub flags (maintained for backwards compatibility) ────────
 
     /// Watch the web server access log (not yet implemented)
@@ -156,6 +161,9 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
     if args.all || args.attacker_tools {
         run_module("attacker_tools", ctx)?;
     }
+    if args.all || args.c2_detection {
+        run_module("c2_detection", ctx)?;
+    }
 
     // Legacy stubs — print a placeholder so existing integration tests pass.
     if args.access_log {
@@ -194,6 +202,7 @@ pub fn run_module(name: &str, ctx: &DefenderContext) -> Result {
         "elf_disguise"           => elf_disguise::run(ctx),
         "perm_anomalies"         => perm_anomalies::run(ctx),
         "attacker_tools"         => attacker_tools::run(ctx),
+        "c2_detection"           => c2_detection::run(ctx),
         _ => Err(DefenderError::Command(format!(
             "unknown monitoring module: {}",
             name

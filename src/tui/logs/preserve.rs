@@ -4,6 +4,7 @@ use std::process::Command;
 
 use chrono::Local;
 
+/// Root directory under which snapshots and live log copies are stored.
 const BASE: &str = "/etc/linux-defender/logs";
 
 pub struct PreserveConfig {
@@ -57,5 +58,8 @@ pub fn setup(sources: &[&str]) -> PreserveConfig {
         .args(["+a", &live_dir.to_string_lossy()])
         .status();
 
-    PreserveConfig { snapshot_dir, live_dir }
+    PreserveConfig {
+        snapshot_dir,
+        live_dir,
+    }
 }

@@ -12,8 +12,8 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use crate::core::{DefenderContext, DefenderError, Result, prompt_yes};
 use super::distro::ensure_root_or_reexec;
+use crate::core::{DefenderContext, DefenderError, Result, prompt_yes};
 
 /// Canonical Splunk installation directory.
 const SPLUNK_HOME: &str = "/opt/splunk";
@@ -32,9 +32,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
         )));
     }
 
-    println!(
-        "[!] This will wipe all files in {LOCAL_DIR} and restart Splunk."
-    );
+    println!("[!] This will wipe all files in {LOCAL_DIR} and restart Splunk.");
     if !prompt_yes("[?] Continue? (y/N)")? {
         println!("[-] Skipping Splunk restore");
         return Ok(());

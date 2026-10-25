@@ -11,8 +11,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use crate::core::{
-    DefenderContext, DefenderError, Finding, Result, Severity, Verdict, collect_users,
-    require_root,
+    DefenderContext, DefenderError, Finding, Result, Severity, Verdict, collect_users, require_root,
 };
 
 /// A pattern that distinguishes cron-based persistence from routine jobs.
@@ -23,24 +22,76 @@ struct CronPattern {
     needle: &'static str,
 }
 
+/// Patterns used to flag suspicious cron job commands.
 const SUSPICIOUS_PATTERNS: &[CronPattern] = &[
-    CronPattern { name: "wget download",       needle: "wget" },
-    CronPattern { name: "curl download",       needle: "curl" },
-    CronPattern { name: "pipe to bash",        needle: "| bash" },
-    CronPattern { name: "pipe to sh",          needle: "| sh " },
-    CronPattern { name: "tmp execution",       needle: "/tmp/" },
-    CronPattern { name: "shm execution",       needle: "/dev/shm/" },
-    CronPattern { name: "var/tmp execution",   needle: "/var/tmp/" },
-    CronPattern { name: "base64 decode",       needle: "base64 -d" },
-    CronPattern { name: "base64 decode",       needle: "base64 --decode" },
-    CronPattern { name: "netcat backdoor",     needle: "nc -" },
-    CronPattern { name: "tcp redirect",        needle: "/dev/tcp/" },
-    CronPattern { name: "mkfifo backdoor",     needle: "mkfifo" },
-    CronPattern { name: "python one-liner",    needle: "python -c" },
-    CronPattern { name: "python3 one-liner",   needle: "python3 -c" },
-    CronPattern { name: "perl one-liner",      needle: "perl -e" },
-    CronPattern { name: "nohup background",    needle: "nohup" },
-    CronPattern { name: "chmod +x",            needle: "chmod +x" },
+    CronPattern {
+        name: "wget download",
+        needle: "wget",
+    },
+    CronPattern {
+        name: "curl download",
+        needle: "curl",
+    },
+    CronPattern {
+        name: "pipe to bash",
+        needle: "| bash",
+    },
+    CronPattern {
+        name: "pipe to sh",
+        needle: "| sh ",
+    },
+    CronPattern {
+        name: "tmp execution",
+        needle: "/tmp/",
+    },
+    CronPattern {
+        name: "shm execution",
+        needle: "/dev/shm/",
+    },
+    CronPattern {
+        name: "var/tmp execution",
+        needle: "/var/tmp/",
+    },
+    CronPattern {
+        name: "base64 decode",
+        needle: "base64 -d",
+    },
+    CronPattern {
+        name: "base64 decode",
+        needle: "base64 --decode",
+    },
+    CronPattern {
+        name: "netcat backdoor",
+        needle: "nc -",
+    },
+    CronPattern {
+        name: "tcp redirect",
+        needle: "/dev/tcp/",
+    },
+    CronPattern {
+        name: "mkfifo backdoor",
+        needle: "mkfifo",
+    },
+    CronPattern {
+        name: "python one-liner",
+        needle: "python -c",
+    },
+    CronPattern {
+        name: "python3 one-liner",
+        needle: "python3 -c",
+    },
+    CronPattern {
+        name: "perl one-liner",
+        needle: "perl -e",
+    },
+    CronPattern {
+        name: "nohup background",
+        needle: "nohup",
+    },
+    CronPattern {
+        name: "chmod +x",
+        needle: "chmod +x",
+    },
 ];
 
 /// Walk every user's crontab.  Suspicious entries are logged as evidence and
@@ -72,7 +123,10 @@ pub fn run(ctx: &DefenderContext) -> Result {
         let all_jobs: Vec<String> = lines
             .iter()
             .map(|s| s.as_str())
-            .filter(|l| { let t = l.trim(); !t.is_empty() && !t.starts_with('#') })
+            .filter(|l| {
+                let t = l.trim();
+                !t.is_empty() && !t.starts_with('#')
+            })
             .map(str::to_string)
             .collect();
 
@@ -96,10 +150,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
             // Phase 1: log evidence for each suspicious job
             for job in &suspicious {
                 ctx.log_msg(&format!("[!] Suspicious cron job for {}: {}", user, job));
-                ctx.log_evidence_line(
-                    &format!("crontab:{}", user),
-                    job,
-                );
+                ctx.log_evidence_line(&format!("crontab:{}", user), job);
             }
 
             // Phase 2: rewrite crontab with only the benign jobs
@@ -112,7 +163,9 @@ pub fn run(ctx: &DefenderContext) -> Result {
                 let still_present = proof_lines.iter().any(|l| l.contains(job.as_str()));
                 let proof_msg = format!(
                     "══ PROOF: '{}' still_present={} in crontab:{} ══",
-                    &job[..job.len().min(50)], still_present, user
+                    &job[..job.len().min(50)],
+                    still_present,
+                    user
                 );
                 ctx.log_msg(&proof_msg);
                 let _ = ctx.log(&proof_msg);
@@ -126,11 +179,17 @@ pub fn run(ctx: &DefenderContext) -> Result {
                             "Cron backdoor REMOVED for {}: {} ({})",
                             user,
                             &job[..job.len().min(60)],
-                            if rewrite_ok && !still_present { "removed" } else { "NOT removed" },
+                            if rewrite_ok && !still_present {
+                                "removed"
+                            } else {
+                                "NOT removed"
+                            },
                         ),
                         format!(
                             "user: {}\njob: {}\npatterns: {}\nremoved: {}",
-                            user, job, patterns.join(", "),
+                            user,
+                            job,
+                            patterns.join(", "),
                             rewrite_ok && !still_present,
                         ),
                     )
@@ -144,7 +203,8 @@ pub fn run(ctx: &DefenderContext) -> Result {
                         format!(
                             "Suspicious cron job for {} matched patterns [{}]. \
                              Crontab was rewritten to remove it. Evidence and proof logged.",
-                            user, patterns.join(", ")
+                            user,
+                            patterns.join(", ")
                         ),
                     ),
                 );
@@ -165,7 +225,10 @@ pub fn run(ctx: &DefenderContext) -> Result {
                 .with_context("crontab mtime", mtime_label.clone())
                 .with_verdict(
                     Verdict::Investigate,
-                    format!("No malicious patterns matched — verify this job is expected for '{}'.", user),
+                    format!(
+                        "No malicious patterns matched — verify this job is expected for '{}'.",
+                        user
+                    ),
                 ),
             );
         }
@@ -264,7 +327,10 @@ mod tests {
     fn pattern_names_are_deduplicated() {
         // Two base64 patterns have the same name; should only appear once.
         let patterns = matched_patterns("* * * * * echo dGVzdA== | base64 -d | base64 --decode");
-        let count = patterns.iter().filter(|p| p.as_str() == "base64 decode").count();
+        let count = patterns
+            .iter()
+            .filter(|p| p.as_str() == "base64 decode")
+            .count();
         assert_eq!(count, 1);
     }
 }

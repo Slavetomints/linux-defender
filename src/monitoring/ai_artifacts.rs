@@ -18,8 +18,10 @@ use walkdir::WalkDir;
 
 use crate::core::{DefenderContext, Finding, Result, Severity, Verdict};
 
+/// Maximum file size to read when scanning for AI artifacts.
 const MAX_FILE_BYTES: u64 = 512 * 1024; // 512 KB
 
+/// Directory roots to walk when scanning for AI-generated scripts.
 const SCAN_ROOTS: &[&str] = &[
     "/etc",
     "/opt",
@@ -35,13 +37,20 @@ const SCAN_ROOTS: &[&str] = &[
 ];
 
 // UTF-8 byte sequences for typographic characters AI tools emit.
-const EM_DASH: &[u8]      = &[0xE2, 0x80, 0x94]; // — U+2014
-const EN_DASH: &[u8]      = &[0xE2, 0x80, 0x93]; // – U+2013
-const LSQUO:   &[u8]      = &[0xE2, 0x80, 0x98]; // ' U+2018
-const RSQUO:   &[u8]      = &[0xE2, 0x80, 0x99]; // ' U+2019
-const LDQUO:   &[u8]      = &[0xE2, 0x80, 0x9C]; // " U+201C
-const RDQUO:   &[u8]      = &[0xE2, 0x80, 0x9D]; // " U+201D
+/// UTF-8 encoding of the em dash — (U+2014).
+const EM_DASH: &[u8] = &[0xE2, 0x80, 0x94]; // — U+2014
+/// UTF-8 encoding of the en dash – (U+2013).
+const EN_DASH: &[u8] = &[0xE2, 0x80, 0x93]; // – U+2013
+/// UTF-8 encoding of the left single quotation mark ' (U+2018).
+const LSQUO: &[u8] = &[0xE2, 0x80, 0x98]; // ' U+2018
+/// UTF-8 encoding of the right single quotation mark ' (U+2019).
+const RSQUO: &[u8] = &[0xE2, 0x80, 0x99]; // ' U+2019
+/// UTF-8 encoding of the left double quotation mark " (U+201C).
+const LDQUO: &[u8] = &[0xE2, 0x80, 0x9C]; // " U+201C
+/// UTF-8 encoding of the right double quotation mark " (U+201D).
+const RDQUO: &[u8] = &[0xE2, 0x80, 0x9D]; // " U+201D
 
+/// Comment phrases frequently produced by AI code generators.
 const AI_COMMENT_PATTERNS: &[&str] = &[
     "# Note:",
     "# Note that",
@@ -54,13 +63,18 @@ const AI_COMMENT_PATTERNS: &[&str] = &[
     "# don't forget",
 ];
 
+/// Comment lines longer than this are considered unusually verbose (AI tell).
 const LONG_COMMENT_THRESHOLD: usize = 120;
+/// Minimum count of long comment lines to trigger a finding.
 const LONG_COMMENT_MIN_COUNT: usize = 3;
+/// Minimum number of `AI_COMMENT_PATTERNS` matches to flag a file.
 const AI_PATTERN_MIN_MATCHES: usize = 2;
+/// Base64 character ratio above which a line is considered encoded payload.
 const BASE64_RATIO_THRESHOLD: f64 = 0.85;
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+/// Scan for AI-generated scripts and artifacts left by attackers.
 pub fn run(ctx: &DefenderContext) -> Result {
     ctx.log_msg("[+] Scanning for AI-generated scripts and artifacts...");
 
@@ -91,7 +105,9 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
             // Decide whether this file is worth scanning.
             let is_script_ext = has_script_extension(path);
-            let Ok(bytes) = std::fs::read(path) else { continue };
+            let Ok(bytes) = std::fs::read(path) else {
+                continue;
+            };
             let has_shebang = bytes.starts_with(b"#!");
             let text_like = is_text_like(&bytes);
 
@@ -106,7 +122,8 @@ pub fn run(ctx: &DefenderContext) -> Result {
                         format!(
                             "path: {}\nsize: {} bytes\n>85% of content is base64 alphabet — \
                              likely a staged payload or obfuscated script.",
-                            path.display(), bytes.len()
+                            path.display(),
+                            bytes.len()
                         ),
                     )
                     .with_path(path.to_path_buf())
@@ -131,7 +148,11 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
             // Check 1: em/en dash.
             if contains_sequence(&bytes, EM_DASH) || contains_sequence(&bytes, EN_DASH) {
-                let which = if contains_sequence(&bytes, EM_DASH) { "em dash (—)" } else { "en dash (–)" };
+                let which = if contains_sequence(&bytes, EM_DASH) {
+                    "em dash (—)"
+                } else {
+                    "en dash (–)"
+                };
                 findings += 1;
                 ctx.emit(
                     Finding::new(
@@ -141,7 +162,8 @@ pub fn run(ctx: &DefenderContext) -> Result {
                         format!(
                             "path: {}\ntell: {}\nEm/en dashes never appear in hand-typed \
                              shell scripts — strong indicator of AI-generated content.",
-                            path.display(), which
+                            path.display(),
+                            which
                         ),
                     )
                     .with_path(path.to_path_buf())
@@ -191,7 +213,9 @@ pub fn run(ctx: &DefenderContext) -> Result {
             if !text_like {
                 continue;
             }
-            let Ok(text) = std::str::from_utf8(&bytes) else { continue };
+            let Ok(text) = std::str::from_utf8(&bytes) else {
+                continue;
+            };
 
             // Check 3: AI comment patterns.
             let matched_ai_patterns = count_ai_patterns(text);
@@ -210,7 +234,8 @@ pub fn run(ctx: &DefenderContext) -> Result {
                             "path: {}\nmatched AI comment patterns: {}\nPatterns like \
                              '# Note:', '# This script', '# Make sure' are characteristic \
                              of LLM-generated code.",
-                            path.display(), matched_ai_patterns
+                            path.display(),
+                            matched_ai_patterns
                         ),
                     )
                     .with_path(path.to_path_buf())
@@ -241,7 +266,8 @@ pub fn run(ctx: &DefenderContext) -> Result {
                         format!(
                             "path: {}\ncomment lines >120 chars: {}\nAI models write \
                              long explanatory comments; human shell authors write terse ones.",
-                            path.display(), long_comment_count
+                            path.display(),
+                            long_comment_count
                         ),
                     )
                     .with_path(path.to_path_buf())
@@ -268,12 +294,15 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/// Return true if `path` has a script-like extension (sh, py, rb, etc.).
 fn has_script_extension(path: &Path) -> bool {
     path.extension()
-        .map(|e| matches!(
-            e.to_string_lossy().to_lowercase().as_str(),
-            "sh" | "bash" | "py" | "pl" | "rb" | "zsh" | "fish"
-        ))
+        .map(|e| {
+            matches!(
+                e.to_string_lossy().to_lowercase().as_str(),
+                "sh" | "bash" | "py" | "pl" | "rb" | "zsh" | "fish"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -285,9 +314,12 @@ fn has_script_extension(path: &Path) -> bool {
 /// containing em dashes, smart quotes, and other multi-byte sequences pass.
 fn is_text_like(bytes: &[u8]) -> bool {
     let sample = &bytes[..bytes.len().min(512)];
-    let non_text = sample.iter().filter(|&&b| {
-        b < 0x80 && b != b'\t' && b != b'\n' && b != b'\r' && !(0x20..=0x7E).contains(&b)
-    }).count();
+    let non_text = sample
+        .iter()
+        .filter(|&&b| {
+            b < 0x80 && b != b'\t' && b != b'\n' && b != b'\r' && !(0x20..=0x7E).contains(&b)
+        })
+        .count();
     non_text * 20 <= sample.len()
 }
 
@@ -347,7 +379,8 @@ mod tests {
     #[test]
     fn detects_em_dash() {
         // "# This is a test — value" contains an em dash.
-        let bytes: Vec<u8> = b"#!/bin/bash\n# This is a test ".iter()
+        let bytes: Vec<u8> = b"#!/bin/bash\n# This is a test "
+            .iter()
             .chain(EM_DASH)
             .chain(b" value\necho hi\n")
             .copied()
@@ -358,7 +391,8 @@ mod tests {
 
     #[test]
     fn detects_en_dash() {
-        let bytes: Vec<u8> = b"#!/bin/sh\n# range 1 ".iter()
+        let bytes: Vec<u8> = b"#!/bin/sh\n# range 1 "
+            .iter()
             .chain(EN_DASH)
             .chain(b" 10\n")
             .copied()
@@ -369,7 +403,8 @@ mod tests {
     #[test]
     fn detects_smart_quotes() {
         // Right single quotation mark (U+2019)
-        let bytes: Vec<u8> = b"#!/bin/bash\n# don".iter()
+        let bytes: Vec<u8> = b"#!/bin/bash\n# don"
+            .iter()
             .chain(RSQUO)
             .chain(b"t forget\n")
             .copied()
@@ -377,7 +412,8 @@ mod tests {
         assert!(contains_sequence(&bytes, RSQUO));
 
         // Left double quotation mark (U+201C)
-        let bytes2: Vec<u8> = b"echo ".iter()
+        let bytes2: Vec<u8> = b"echo "
+            .iter()
             .chain(LDQUO)
             .chain(b"hello")
             .chain(RDQUO)
@@ -444,7 +480,8 @@ mod tests {
     #[test]
     fn text_like_accepts_utf8_em_dash() {
         // A script containing an em dash should still be treated as text-like.
-        let bytes: Vec<u8> = b"#!/bin/bash\n# test ".iter()
+        let bytes: Vec<u8> = b"#!/bin/bash\n# test "
+            .iter()
             .chain(EM_DASH)
             .chain(b" end\n")
             .copied()

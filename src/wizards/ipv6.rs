@@ -13,15 +13,21 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::WizardAction;
 
+/// Detected network management stack on the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NetStack {
-    NetworkManager, // nmcli
-    Netplan,        // netplan apply
-    Interfaces,     // /etc/network/interfaces
-    Sysconfig,      // /etc/sysconfig/network-scripts/
+    /// Uses `nmcli` (NetworkManager).
+    NetworkManager,
+    /// Uses `netplan apply`.
+    Netplan,
+    /// Uses `/etc/network/interfaces` (ifupdown).
+    Interfaces,
+    /// Uses `/etc/sysconfig/network-scripts/` (RHEL/CentOS).
+    Sysconfig,
 }
 
 impl NetStack {
+    /// Human-readable label for the detected stack.
     fn label(self) -> &'static str {
         match self {
             NetStack::NetworkManager => "NetworkManager (nmcli)",
@@ -32,18 +38,31 @@ impl NetStack {
     }
 }
 
+/// A form field in the IPv6 configuration wizard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
+    /// Network interface selector.
     Interface,
+    /// IPv6 address input.
     Address,
+    /// Prefix length input (default 64).
     Prefix,
+    /// Gateway input (optional).
     Gateway,
+    /// DNS server input (optional).
     Dns,
 }
 
 impl Field {
-    const ALL: &'static [Field] =
-        &[Field::Interface, Field::Address, Field::Prefix, Field::Gateway, Field::Dns];
+    /// All fields in display order.
+    const ALL: &'static [Field] = &[
+        Field::Interface,
+        Field::Address,
+        Field::Prefix,
+        Field::Gateway,
+        Field::Dns,
+    ];
+    /// Human-readable label for the field.
     fn label(self) -> &'static str {
         match self {
             Field::Interface => "Interface",
@@ -53,6 +72,7 @@ impl Field {
             Field::Dns => "DNS server (optional)",
         }
     }
+    /// Zero-based index of the field in the form layout.
     fn idx(self) -> usize {
         match self {
             Field::Interface => 0,
@@ -64,26 +84,42 @@ impl Field {
     }
 }
 
+/// Wizard progress step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
+    /// Filling in the address form.
     Form,
+    /// Reviewing the configuration before applying.
     Summary,
+    /// Running the network stack commands.
     Executing,
 }
 
 /// IPv6 static address configuration wizard state.
 pub struct Ipv6Wizard {
+    /// Current wizard step.
     step: Step,
+    /// Detected network interface names.
     ifaces: Vec<String>,
+    /// Index of the selected interface.
     iface_cursor: usize,
+    /// IPv6 address entered by the user.
     address: String,
+    /// Prefix length entered by the user (default `"64"`).
     prefix: String,
+    /// Optional gateway entered by the user.
     gateway: String,
+    /// Optional DNS server entered by the user.
     dns: String,
+    /// Currently focused form field.
     field: Field,
+    /// Detected network management stack.
     stack: NetStack,
+    /// Shared log lines streamed from the background thread.
     exec_log: Option<Arc<Mutex<Vec<String>>>>,
+    /// Set to `true` by the background thread when execution finishes.
     exec_done: Arc<Mutex<bool>>,
+    /// Scroll offset for the execution log.
     log_scroll: usize,
 }
 
@@ -107,7 +143,15 @@ impl Ipv6Wizard {
             log_scroll: 0,
         }
     }
+}
 
+impl Default for Ipv6Wizard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Ipv6Wizard {
     /// Render the wizard modal over `area`.
     pub fn render(&self, f: &mut Frame, area: Rect) {
         let inner = super::modal_popup(f, area, 70, 85, " Configure Static IPv6 ");
@@ -118,6 +162,7 @@ impl Ipv6Wizard {
         }
     }
 
+    /// Render step 1: the address entry form.
     fn render_form(&self, f: &mut Frame, area: Rect) {
         // header: detected stack + interface list
         // then 4 text input fields
@@ -197,6 +242,7 @@ impl Ipv6Wizard {
         );
     }
 
+    /// Render step 2: configuration summary before applying.
     fn render_summary(&self, f: &mut Frame, area: Rect) {
         let iface = self
             .ifaces
@@ -254,6 +300,7 @@ impl Ipv6Wizard {
         );
     }
 
+    /// Render step 3: live execution log.
     fn render_executing(&self, f: &mut Frame, area: Rect) {
         if let Some(ref log) = self.exec_log {
             let done = *self.exec_done.lock().unwrap();
@@ -292,6 +339,7 @@ impl Ipv6Wizard {
         WizardAction::Continue
     }
 
+    /// Handle a keypress while the form is active.
     fn key_form(&mut self, key: KeyCode) {
         let idx = self.field.idx();
         let last = Field::ALL.len() - 1;
@@ -300,8 +348,7 @@ impl Ipv6Wizard {
                 self.field = Field::ALL[(idx + 1) % Field::ALL.len()];
             }
             KeyCode::BackTab | KeyCode::Up => {
-                self.field =
-                    Field::ALL[if idx == 0 { last } else { idx - 1 }];
+                self.field = Field::ALL[if idx == 0 { last } else { idx - 1 }];
             }
             KeyCode::Left => {
                 if self.field == Field::Interface && !self.ifaces.is_empty() {
@@ -325,15 +372,14 @@ impl Ipv6Wizard {
             KeyCode::Backspace if self.field != Field::Interface => {
                 self.active_text_field().pop();
             }
-            KeyCode::Enter => {
-                if !self.address.is_empty() && !self.ifaces.is_empty() {
-                    self.step = Step::Summary;
-                }
+            KeyCode::Enter if !self.address.is_empty() && !self.ifaces.is_empty() => {
+                self.step = Step::Summary;
             }
             _ => {}
         }
     }
 
+    /// Return a mutable reference to the currently focused text input field.
     fn active_text_field(&mut self) -> &mut String {
         match self.field {
             Field::Address => &mut self.address,
@@ -344,6 +390,7 @@ impl Ipv6Wizard {
         }
     }
 
+    /// Spawn a background thread that applies the IPv6 config and streams output.
     fn start_execution(&mut self) {
         let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let done = Arc::clone(&self.exec_done);
@@ -404,6 +451,7 @@ impl Ipv6Wizard {
 
 // ── Stack-specific helpers ────────────────────────────────────────────────────
 
+/// Apply the IPv6 config using `nmcli` (NetworkManager).
 fn apply_nmcli(
     iface: &str,
     addr: &str,
@@ -414,9 +462,14 @@ fn apply_nmcli(
 ) {
     let cidr = format!("{}/{}", addr, prefix);
     let mut args = vec![
-        "nmcli", "connection", "modify", iface,
-        "ipv6.method", "manual",
-        "ipv6.addresses", cidr.as_str(),
+        "nmcli",
+        "connection",
+        "modify",
+        iface,
+        "ipv6.method",
+        "manual",
+        "ipv6.addresses",
+        cidr.as_str(),
     ];
     if !gw.is_empty() {
         args.extend_from_slice(&["ipv6.gateway", gw]);
@@ -428,6 +481,7 @@ fn apply_nmcli(
     super::run_cmd_to_log(&["nmcli", "connection", "up", iface], log);
 }
 
+/// Apply the IPv6 config by writing a netplan YAML file and running `netplan apply`.
 fn apply_netplan(
     iface: &str,
     addr: &str,
@@ -451,21 +505,18 @@ fn apply_netplan(
         ));
     }
     let path = format!("/etc/netplan/99-ipv6-{}.yaml", iface);
-    log.lock()
-        .unwrap()
-        .push(format!("→ Writing {}…", path));
+    log.lock().unwrap().push(format!("→ Writing {}…", path));
     match std::fs::write(&path, &yaml) {
         Ok(_) => log.lock().unwrap().push("  ✓ Written".into()),
         Err(e) => {
-            log.lock()
-                .unwrap()
-                .push(format!("  ERROR: {}", e));
+            log.lock().unwrap().push(format!("  ERROR: {}", e));
             return;
         }
     }
     super::run_cmd_to_log(&["netplan", "apply"], log);
 }
 
+/// Apply the IPv6 config by appending a stanza to `/etc/network/interfaces`.
 fn apply_interfaces(
     iface: &str,
     addr: &str,
@@ -491,18 +542,32 @@ fn apply_interfaces(
     match std::fs::write("/etc/network/interfaces", existing + &stanza) {
         Ok(_) => log.lock().unwrap().push("  ✓ Written".into()),
         Err(e) => {
-            log.lock()
-                .unwrap()
-                .push(format!("  ERROR: {}", e));
+            log.lock().unwrap().push(format!("  ERROR: {}", e));
             return;
         }
     }
-    super::run_cmd_to_log(&["ip", "addr", "add", &format!("{}/{}", addr, prefix), "dev", iface], log);
+    super::run_cmd_to_log(
+        &[
+            "ip",
+            "addr",
+            "add",
+            &format!("{}/{}", addr, prefix),
+            "dev",
+            iface,
+        ],
+        log,
+    );
     if !gw.is_empty() {
-        super::run_cmd_to_log(&["ip", "-6", "route", "add", "default", "via", gw, "dev", iface], log);
+        super::run_cmd_to_log(
+            &[
+                "ip", "-6", "route", "add", "default", "via", gw, "dev", iface,
+            ],
+            log,
+        );
     }
 }
 
+/// Apply the IPv6 config by writing an `ifcfg-*` file under `/etc/sysconfig/network-scripts/`.
 fn apply_sysconfig(
     iface: &str,
     addr: &str,
@@ -514,9 +579,7 @@ fn apply_sysconfig(
     let path = format!("/etc/sysconfig/network-scripts/ifcfg-{}", iface);
     let mut conf = format!(
         "IPV6INIT=yes\nIPV6ADDR={}/{}\nIPV6_DEFAULTGW={}\n",
-        addr,
-        prefix,
-        gw
+        addr, prefix, gw
     );
     if !dns.is_empty() {
         conf.push_str(&format!("DNS2={}\n", dns));
@@ -529,17 +592,26 @@ fn apply_sysconfig(
     match std::fs::write(&path, existing + "\n" + &conf) {
         Ok(_) => log.lock().unwrap().push("  ✓ Written".into()),
         Err(e) => {
-            log.lock()
-                .unwrap()
-                .push(format!("  ERROR: {}", e));
+            log.lock().unwrap().push(format!("  ERROR: {}", e));
             return;
         }
     }
-    super::run_cmd_to_log(&["ip", "addr", "add", &format!("{}/{}", addr, prefix), "dev", iface], log);
+    super::run_cmd_to_log(
+        &[
+            "ip",
+            "addr",
+            "add",
+            &format!("{}/{}", addr, prefix),
+            "dev",
+            iface,
+        ],
+        log,
+    );
 }
 
 // ── Detection helpers ─────────────────────────────────────────────────────────
 
+/// Return a list of non-loopback network interface names from `/proc/net/dev`.
 fn detect_interfaces() -> Vec<String> {
     let mut ifaces: Vec<String> = std::fs::read_dir("/sys/class/net")
         .map(|rd| {
@@ -556,6 +628,7 @@ fn detect_interfaces() -> Vec<String> {
     ifaces
 }
 
+/// Probe the host and return the active network management stack.
 fn detect_net_stack() -> NetStack {
     if super::cmd_succeeds("which nmcli") {
         NetStack::NetworkManager

@@ -19,9 +19,12 @@ use crate::core::{Action, DefenderContext, Finding, Result, Severity, Verdict};
 // FS_IOC_GETFLAGS = _IOR('f', 1, long)
 ioctl_read!(ext2_getflags, b'f', 1, libc::c_long);
 
+/// ioctl flag bit for the immutable (i) attribute.
 const FS_IMMUTABLE_FL: libc::c_long = 0x0010;
+/// ioctl flag bit for the append-only (a) attribute.
 const FS_APPEND_FL: libc::c_long = 0x0020;
 
+/// Files checked for immutable/append-only flags.
 const SENSITIVE_FILES: &[&str] = &[
     "/etc/passwd",
     "/etc/shadow",
@@ -58,6 +61,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
     Ok(())
 }
 
+/// Read the ext2 filesystem flags for `path` via ioctl.
 fn get_flags(path: &Path) -> std::result::Result<libc::c_long, nix::Error> {
     let file = File::open(path).map_err(|_| nix::Error::EACCES)?;
     let mut flags: libc::c_long = 0;
@@ -66,6 +70,7 @@ fn get_flags(path: &Path) -> std::result::Result<libc::c_long, nix::Error> {
     Ok(flags)
 }
 
+/// Emit findings for immutable or append-only flags on `path`.
 fn report_flags(ctx: &DefenderContext, path: &Path, flags: libc::c_long) {
     let immutable = (flags & FS_IMMUTABLE_FL) != 0;
     let append_only = (flags & FS_APPEND_FL) != 0;
@@ -88,8 +93,16 @@ fn report_flags(ctx: &DefenderContext, path: &Path, flags: libc::c_long) {
     };
 
     let is_critical = CRITICAL_FILES.contains(&path.to_str().unwrap_or(""));
-    let severity = if is_critical { Severity::Critical } else { Severity::High };
-    let verdict = if is_critical { Verdict::Remove } else { Verdict::Investigate };
+    let severity = if is_critical {
+        Severity::Critical
+    } else {
+        Severity::High
+    };
+    let verdict = if is_critical {
+        Verdict::Remove
+    } else {
+        Verdict::Investigate
+    };
 
     let note: &'static str = if immutable {
         "chattr +i prevents even root from modifying or deleting this file. \
@@ -134,7 +147,11 @@ fn report_flags(ctx: &DefenderContext, path: &Path, flags: libc::c_long) {
         Finding::new(
             severity,
             "immutable",
-            format!("{} has {} flag set — chattr needed to modify", path.display(), flag_str),
+            format!(
+                "{} has {} flag set — chattr needed to modify",
+                path.display(),
+                flag_str
+            ),
             format!(
                 "path: {}\nflags: {}\nto remove: chattr -{} {}",
                 path.display(),
@@ -146,7 +163,10 @@ fn report_flags(ctx: &DefenderContext, path: &Path, flags: libc::c_long) {
         .with_path(path.to_path_buf())
         .with_context("path", path.display().to_string())
         .with_context("flags", flag_str)
-        .with_context("remove with", format!("chattr -{} {}", chattr_flag, path.display()))
+        .with_context(
+            "remove with",
+            format!("chattr -{} {}", chattr_flag, path.display()),
+        )
         .with_context("flag_cleared", flag_cleared.to_string())
         .with_context("note", note)
         .with_verdict(verdict, recommendation)

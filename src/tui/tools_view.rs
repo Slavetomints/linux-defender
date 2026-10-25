@@ -52,6 +52,7 @@ pub fn render(f: &mut Frame, area: Rect, selected: SelectedTool, download_status
     render_help(f, rows[1], selected);
 }
 
+/// Render the list of downloadable tools with download-status annotation.
 fn render_tool_list(
     f: &mut Frame,
     area: Rect,
@@ -78,7 +79,7 @@ fn render_tool_list(
         } else {
             stored.chars().take(12).collect::<String>() + "…"
         };
-        let hash_ok = tool.known_sha256.map_or(false, |k| stored == k);
+        let hash_ok = tool.known_sha256.is_some_and(|k| stored == k);
         let hash_tag = if stored == "—" {
             Span::styled(" hash:—", Style::default().fg(Color::DarkGray))
         } else if hash_ok {
@@ -86,9 +87,7 @@ fn render_tool_list(
         } else {
             Span::styled(
                 " hash:MISMATCH",
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             )
         };
 
@@ -115,7 +114,9 @@ fn render_tool_list(
         }
 
         let base = if is_sel {
-            Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
@@ -145,21 +146,23 @@ fn render_tool_list(
     for (idx, wizard) in ALL_WIZARDS.iter().enumerate() {
         let is_sel = selected == SelectedTool::Wizard(idx);
         let base = if is_sel {
-            Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
 
         let line = Line::from(vec![
-            Span::styled(
-                " [wiz] ",
-                base.fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(" [wiz] ", base.fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::styled(
                 format!("{:<24}", wizard.name),
                 base.add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("  {}", wizard.description), base.fg(Color::DarkGray)),
+            Span::styled(
+                format!("  {}", wizard.description),
+                base.fg(Color::DarkGray),
+            ),
         ]);
         items.push(maybe_highlight(ListItem::new(line), is_sel));
     }
@@ -172,6 +175,7 @@ fn render_tool_list(
     f.render_widget(List::new(items).block(block), area);
 }
 
+/// Apply a highlight background to `item` if `selected` is true.
 fn maybe_highlight(item: ListItem, selected: bool) -> ListItem {
     if selected {
         item.style(Style::default().bg(Color::DarkGray))
@@ -180,17 +184,22 @@ fn maybe_highlight(item: ListItem, selected: bool) -> ListItem {
     }
 }
 
+/// Render contextual key-binding help for the currently selected tool.
 fn render_help(f: &mut Frame, area: Rect, selected: SelectedTool) {
     let lines = match selected {
         SelectedTool::Binary(_) => vec![Line::from(vec![
             Span::styled(
                 " [↑↓] ",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled("navigate   ", Style::default().fg(Color::White)),
             Span::styled(
                 "[d] ",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled("download/update   ", Style::default().fg(Color::White)),
             Span::styled(
@@ -205,12 +214,16 @@ fn render_help(f: &mut Frame, area: Rect, selected: SelectedTool) {
         SelectedTool::Wizard(_) => vec![Line::from(vec![
             Span::styled(
                 " [↑↓] ",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled("navigate   ", Style::default().fg(Color::White)),
             Span::styled(
                 "[r] ",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "open wizard (interactive, stays in TUI)",

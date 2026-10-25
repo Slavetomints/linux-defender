@@ -163,8 +163,7 @@ fn parse_ss_ports(output: &str) -> HashSet<u16> {
         }
 
         // `netstat` output: lines starting with "tcp" and containing "LISTEN"
-        if (trimmed.starts_with("tcp") || trimmed.starts_with("tcp6"))
-            && trimmed.contains("LISTEN")
+        if (trimmed.starts_with("tcp") || trimmed.starts_with("tcp6")) && trimmed.contains("LISTEN")
         {
             let fields: Vec<&str> = trimmed.split_whitespace().collect();
             // tcp  recv-q  send-q  local:port  foreign:port  state  ...
@@ -191,7 +190,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
     // ── Check 1: Hidden processes ────────────────────────────────────────────
     let proc_pids = pids_from_proc();
-    let ps_pids   = pids_from_ps();
+    let ps_pids = pids_from_ps();
 
     // PIDs in /proc but hidden from ps
     for &pid in proc_pids.difference(&ps_pids) {
@@ -200,10 +199,10 @@ pub fn run(ctx: &DefenderContext) -> Result {
             continue;
         }
 
-        let exe     = read_exe(pid);
+        let exe = read_exe(pid);
         let cmdline = read_cmdline(pid);
-        let name    = read_status_field(pid, "Name");
-        let uid     = read_status_field(pid, "Uid");
+        let name = read_status_field(pid, "Name");
+        let uid = read_status_field(pid, "Uid");
 
         findings += 1;
         ctx.emit(
@@ -288,7 +287,10 @@ pub fn run(ctx: &DefenderContext) -> Result {
             Finding::new(
                 Severity::Critical,
                 "rootkit_cross_check",
-                format!("Port {} in LISTEN state in /proc/net but hidden from ss/netstat", port),
+                format!(
+                    "Port {} in LISTEN state in /proc/net but hidden from ss/netstat",
+                    port
+                ),
                 format!(
                     "port: {}\nvisible_in: /proc/net/tcp[6]\nhidden_from: ss/netstat",
                     port
@@ -315,7 +317,10 @@ pub fn run(ctx: &DefenderContext) -> Result {
             Finding::new(
                 Severity::Critical,
                 "rootkit_cross_check",
-                format!("Port {} reported by ss/netstat but absent from /proc/net", port),
+                format!(
+                    "Port {} reported by ss/netstat but absent from /proc/net",
+                    port
+                ),
                 format!(
                     "port: {}\nvisible_in: ss/netstat\nhidden_from: /proc/net/tcp[6]",
                     port
@@ -363,7 +368,7 @@ mod tests {
     #[test]
     fn pid_hidden_from_ps_is_detected() {
         let proc_set: HashSet<u32> = [1, 2, 100, 999].iter().copied().collect();
-        let ps_set:   HashSet<u32> = [1, 2, 100].iter().copied().collect();
+        let ps_set: HashSet<u32> = [1, 2, 100].iter().copied().collect();
 
         // 999 is in proc but not ps
         let hidden: Vec<u32> = proc_set.difference(&ps_set).copied().collect();
@@ -373,7 +378,7 @@ mod tests {
     #[test]
     fn pid_hidden_from_proc_is_detected() {
         let proc_set: HashSet<u32> = [1, 2, 100].iter().copied().collect();
-        let ps_set:   HashSet<u32> = [1, 2, 100, 555].iter().copied().collect();
+        let ps_set: HashSet<u32> = [1, 2, 100, 555].iter().copied().collect();
 
         let ghost: Vec<u32> = ps_set.difference(&proc_set).copied().collect();
         assert_eq!(ghost, vec![555]);
@@ -382,7 +387,7 @@ mod tests {
     #[test]
     fn matching_pid_sets_have_no_discrepancy() {
         let proc_set: HashSet<u32> = [1, 2, 100].iter().copied().collect();
-        let ps_set: HashSet<u32>   = [1, 2, 100].iter().copied().collect();
+        let ps_set: HashSet<u32> = [1, 2, 100].iter().copied().collect();
 
         assert!(proc_set.difference(&ps_set).next().is_none());
         assert!(ps_set.difference(&proc_set).next().is_none());
@@ -425,7 +430,7 @@ mod tests {
     fn proc_net_listen_parses_two_ports() {
         let ports = ports_from_proc_net(SAMPLE_TCP);
         assert_eq!(ports.len(), 2, "should find exactly two LISTEN entries");
-        assert!(ports.contains(&22),  "port 22 should be found (0x0016)");
+        assert!(ports.contains(&22), "port 22 should be found (0x0016)");
         assert!(ports.contains(&443), "port 443 should be found (0x01BB)");
     }
 
@@ -482,7 +487,7 @@ tcp6       0      0 :::80          :::*             LISTEN
     #[test]
     fn hidden_port_detected() {
         let proc_ports: HashSet<u16> = [22, 80, 31337].iter().copied().collect();
-        let ss_ports:   HashSet<u16> = [22, 80].iter().copied().collect();
+        let ss_ports: HashSet<u16> = [22, 80].iter().copied().collect();
 
         let hidden: Vec<u16> = proc_ports.difference(&ss_ports).copied().collect();
         assert_eq!(hidden, vec![31337]);
@@ -494,5 +499,52 @@ tcp6       0      0 :::80          :::*             LISTEN
         let b: HashSet<u16> = [22, 443].iter().copied().collect();
         assert!(a.difference(&b).next().is_none());
         assert!(b.difference(&a).next().is_none());
+    }
+
+    #[test]
+    fn ghost_port_in_ss_but_not_proc() {
+        let proc_ports: HashSet<u16> = [22, 80].iter().copied().collect();
+        let ss_ports: HashSet<u16> = [22, 80, 9999].iter().copied().collect();
+        let ghost: HashSet<u16> = ss_ports.difference(&proc_ports).copied().collect();
+        assert!(ghost.contains(&9999));
+    }
+
+    #[test]
+    fn pid1_filtered_from_hidden_list() {
+        let proc_set: HashSet<u32> = [1, 2, 999].iter().copied().collect();
+        let ps_set: HashSet<u32> = [2].iter().copied().collect();
+        // Filter out PID 1, same as the run() logic
+        let hidden: Vec<u32> = proc_set
+            .difference(&ps_set)
+            .copied()
+            .filter(|&p| p != 1)
+            .collect();
+        assert!(hidden.contains(&999));
+        assert!(!hidden.contains(&1));
+    }
+
+    #[test]
+    fn ss_output_with_ipv6_port() {
+        let sample = "LISTEN 0 128 [::]:443 [::]:*\n";
+        let ports = parse_ss_ports(sample);
+        assert!(ports.contains(&443));
+    }
+
+    #[test]
+    fn ss_output_non_listen_line_ignored() {
+        let sample = "ESTAB  0  0  127.0.0.1:12345  127.0.0.1:54321\n";
+        let ports = parse_ss_ports(sample);
+        assert!(ports.is_empty());
+    }
+
+    #[test]
+    fn parse_hex_port_zero() {
+        assert_eq!(parse_hex_port("00000000:0000"), Some(0));
+    }
+
+    #[test]
+    fn parse_hex_port_max() {
+        // 0xFFFF = 65535
+        assert_eq!(parse_hex_port("00000000:FFFF"), Some(65535));
     }
 }

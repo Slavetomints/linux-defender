@@ -81,7 +81,9 @@ pub fn run(ctx: &DefenderContext) -> Result {
         // Log the suspicious line as evidence before emitting the finding.
         ctx.log_msg(&format!(
             "[!] Suspicious line in {}: {}  [{}]",
-            hit.file.display(), hit.line, hit.reasons.join(", ")
+            hit.file.display(),
+            hit.line,
+            hit.reasons.join(", ")
         ));
         ctx.log_evidence_line(&hit.file.display().to_string(), &hit.line);
 
@@ -100,7 +102,10 @@ pub fn run(ctx: &DefenderContext) -> Result {
                 ),
                 format!(
                     "file: {}\nline: {}\nreasons: {}\nremoved: {}",
-                    hit.file.display(), hit.line, hit.reasons.join(", "), removed
+                    hit.file.display(),
+                    hit.line,
+                    hit.reasons.join(", "),
+                    removed
                 ),
             )
             .with_path(hit.file.clone())
@@ -108,9 +113,14 @@ pub fn run(ctx: &DefenderContext) -> Result {
             .with_context("flags", hit.reasons.join(", "))
             .with_context("removed", removed.to_string())
             .with_verdict(
-                if removed { Verdict::Remove } else { Verdict::Investigate },
                 if removed {
-                    "The malicious line was automatically removed. Evidence and proof logged.".to_string()
+                    Verdict::Remove
+                } else {
+                    Verdict::Investigate
+                },
+                if removed {
+                    "The malicious line was automatically removed. Evidence and proof logged."
+                        .to_string()
                 } else {
                     format!(
                         "Could not automatically remove line from {} — remove manually: \
@@ -154,10 +164,15 @@ fn scan_skel(ctx: &DefenderContext) -> usize {
         // An executable binary in skel is unconditionally malicious — auto-remove.
         if is_executable(&path) && !looks_like_shell_script(&path) {
             count += 1;
-            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
 
             ctx.log_msg(&format!(
-                "[!] CRITICAL: Executable binary in /etc/skel/{} — auto-removing", name
+                "[!] CRITICAL: Executable binary in /etc/skel/{} — auto-removing",
+                name
             ));
             ctx.log_evidence_file(&path);
             let removed = ctx.remove_path_logged(&path);
@@ -179,7 +194,7 @@ fn scan_skel(ctx: &DefenderContext) -> usize {
                     "A non-script executable in /etc/skel is never legitimate. \
                      It would be copied into every new user's home directory. \
                      Evidence and proof of removal logged."
-                    .to_string(),
+                        .to_string(),
                 ),
             );
         }
@@ -188,7 +203,12 @@ fn scan_skel(ctx: &DefenderContext) -> usize {
         let hits = inspect_file(&path);
         for hit in hits {
             count += 1;
-            let fname = hit.file.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let fname = hit
+                .file
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
 
             ctx.log_msg(&format!(
                 "[!] CRITICAL: Backdoor line in /etc/skel/{} — auto-removing line",
@@ -207,7 +227,10 @@ fn scan_skel(ctx: &DefenderContext) -> usize {
                     ),
                     format!(
                         "file: {}\nline: {}\nreasons: {}\nremoved: {}",
-                        hit.file.display(), hit.line, hit.reasons.join(", "), removed
+                        hit.file.display(),
+                        hit.line,
+                        hit.reasons.join(", "),
+                        removed
                     ),
                 )
                 .with_path(hit.file.clone())
@@ -219,7 +242,7 @@ fn scan_skel(ctx: &DefenderContext) -> usize {
                     "/etc/skel files are copied into every new user's home directory. \
                      This backdoor line has been automatically removed. Audit any accounts \
                      created since this file was modified — their dotfiles may still contain it."
-                    .to_string(),
+                        .to_string(),
                 ),
             );
         }
@@ -243,6 +266,7 @@ fn inspect_file(path: &Path) -> Vec<Hit> {
         .collect()
 }
 
+/// Return true if the file at `path` has any execute permission bit set.
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     path.metadata()
@@ -250,6 +274,7 @@ fn is_executable(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Return true if `path` looks like a shell script based on extension or shebang.
 fn looks_like_shell_script(path: &Path) -> bool {
     // Shell scripts have a text extension or shebang; binaries typically don't.
     if let Some(ext) = path.extension() {

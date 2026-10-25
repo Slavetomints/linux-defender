@@ -100,11 +100,11 @@ pub fn run(ctx: &DefenderContext) -> Result {
                 "Authorized keys were deleted. Evidence and proof logged. \
                  In CCDC all authorized_keys are red team backdoors — they survive \
                  password changes and must be purged."
-                .to_string()
+                    .to_string()
             } else {
                 "Authorized keys were found but deletion failed — check the log and \
                  remove manually."
-                .to_string()
+                    .to_string()
             },
         );
 

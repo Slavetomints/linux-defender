@@ -12,8 +12,11 @@ use crate::core::{Action, DefenderContext, DefenderError, Finding, Result, Sever
 
 /// One unit as `systemctl list-units` describes it.
 struct Service {
+    /// Unit name, e.g. `ssh.service`.
     name: String,
+    /// Short description from the unit file.
     description: String,
+    /// Active state reported by systemd (active, inactive, failed, etc.).
     status: String,
 }
 
@@ -21,7 +24,10 @@ struct Service {
 pub fn run(ctx: &DefenderContext) -> Result {
     ctx.log_msg("[+] Collecting systemd services...");
     let services = collect_services()?;
-    ctx.log_msg(&format!("[✓] {} systemd services collected", services.len()));
+    ctx.log_msg(&format!(
+        "[✓] {} systemd services collected",
+        services.len()
+    ));
 
     ctx.debug(&format!("Parsed {} services", services.len()));
 
@@ -31,7 +37,10 @@ pub fn run(ctx: &DefenderContext) -> Result {
                 Finding::new(
                     Severity::Info,
                     "systemd",
-                    format!("{} — {} ({})", service.name, service.description, service.status),
+                    format!(
+                        "{} — {} ({})",
+                        service.name, service.description, service.status
+                    ),
                     format!(
                         "unit: {}\ndescription: {}\nstatus: {}",
                         service.name, service.description, service.status

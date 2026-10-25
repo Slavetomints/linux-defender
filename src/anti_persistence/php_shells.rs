@@ -9,18 +9,20 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
-use crate::core::{
-    Action, DefenderContext, Finding, Result, Severity, Verdict, require_root,
-};
+use crate::core::{Action, DefenderContext, Finding, Result, Severity, Verdict, require_root};
 
+/// Default web root directory to scan for webshells.
 const WEB_ROOT: &str = "/var/www/html";
 
 /// A named shell family: every pattern must match (case-insensitive AND).
 struct ShellSignature {
+    /// Human-readable name identifying the shell family.
     name: &'static str,
+    /// Substrings that must all appear in the file (case-insensitive) to match.
     patterns: &'static [&'static str],
 }
 
+/// Known webshell signatures checked against PHP file contents.
 const KNOWN_SHELLS: &[ShellSignature] = &[
     ShellSignature {
         name: "p0wny-shell",
@@ -88,7 +90,10 @@ pub struct SuspiciousFile {
 pub fn run(ctx: &DefenderContext) -> Result {
     let web_root = Path::new(WEB_ROOT);
     if !web_root.exists() {
-        ctx.log_msg(&format!("[!] {} does not exist, skipping web shell check", WEB_ROOT));
+        ctx.log_msg(&format!(
+            "[!] {} does not exist, skipping web shell check",
+            WEB_ROOT
+        ));
         return Ok(());
     }
 
@@ -155,7 +160,8 @@ pub fn run(ctx: &DefenderContext) -> Result {
                 .with_verdict(
                     Verdict::Remove,
                     if removed {
-                        "File was automatically deleted. Evidence and proof logged above.".to_string()
+                        "File was automatically deleted. Evidence and proof logged above."
+                            .to_string()
                     } else {
                         "Deletion attempted but file may still exist — check the log.".to_string()
                     },

@@ -99,13 +99,18 @@ fn fmt_cmdline(args: &[String]) -> String {
 
 // ─── /proc/net/tcp helpers (mirrored from outbound_connections) ──────────────
 
+/// An established TCP connection read from `/proc/net/tcp[6]`.
 #[derive(Debug)]
 struct Conn {
+    /// Remote IP address.
     remote_addr: IpAddr,
+    /// Remote port number.
     remote_port: u16,
+    /// Socket inode number used to map back to a PID.
     inode: u64,
 }
 
+/// Parse a `<hex_ip>:<hex_port>` entry from `/proc/net/tcp` into an `(IpAddr, port)`.
 fn parse_hex_addr_v4(addr: &str) -> (IpAddr, u16) {
     let mut parts = addr.splitn(2, ':');
     let ip_hex = parts.next().unwrap_or("00000000");
@@ -116,6 +121,7 @@ fn parse_hex_addr_v4(addr: &str) -> (IpAddr, u16) {
     (IpAddr::V4(ip), port)
 }
 
+/// Parse a `<hex_ip6>:<hex_port>` entry from `/proc/net/tcp6` into an `(IpAddr, port)`.
 fn parse_hex_addr_v6(addr: &str) -> (IpAddr, u16) {
     let mut parts = addr.splitn(2, ':');
     let zero_padding = "0".repeat(32);
@@ -155,11 +161,17 @@ fn parse_c2_connections(contents: &str, is_v6: bool) -> Vec<Conn> {
         if !C2_PORTS.contains(&remote_port) {
             continue;
         }
-        let Ok(inode) = fields[9].parse::<u64>() else { continue };
+        let Ok(inode) = fields[9].parse::<u64>() else {
+            continue;
+        };
         if inode == 0 {
             continue;
         }
-        out.push(Conn { remote_addr, remote_port, inode });
+        out.push(Conn {
+            remote_addr,
+            remote_port,
+            inode,
+        });
     }
     out
 }
@@ -167,17 +179,22 @@ fn parse_c2_connections(contents: &str, is_v6: bool) -> Vec<Conn> {
 /// Build inode → pid map from `/proc/*/fd`.
 fn inode_to_pid(target_inodes: &HashMap<u64, ()>) -> HashMap<u64, u32> {
     let mut result = HashMap::new();
-    let Ok(procs) = std::fs::read_dir("/proc") else { return result };
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return result;
+    };
     for entry in procs.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else { continue };
-        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else { continue };
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
+            continue;
+        };
         for fd in fds.flatten() {
-            let Ok(link) = std::fs::read_link(fd.path()) else { continue };
+            let Ok(link) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
             let s = link.to_string_lossy();
-            if let Some(inode_str) = s
-                .strip_prefix("socket:[")
-                .and_then(|s| s.strip_suffix(']'))
-            {
+            if let Some(inode_str) = s.strip_prefix("socket:[").and_then(|s| s.strip_suffix(']')) {
                 if let Ok(inode) = inode_str.parse::<u64>() {
                     if target_inodes.contains_key(&inode) {
                         result.insert(inode, pid);
@@ -191,15 +208,22 @@ fn inode_to_pid(target_inodes: &HashMap<u64, ()>) -> HashMap<u64, u32> {
 
 // ─── Check 1: memfd execution ────────────────────────────────────────────────
 
+/// Check `/proc/*/exe` for processes whose executable path starts with `memfd:`.
 fn check_memfd(ctx: &DefenderContext) {
     ctx.log_msg("[+] Scanning for memfd-executed processes...");
-    let Ok(procs) = std::fs::read_dir("/proc") else { return };
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return;
+    };
     let mut count = 0u32;
 
     for entry in procs.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else { continue };
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
         let exe_link = entry.path().join("exe");
-        let Ok(exe_path) = std::fs::read_link(&exe_link) else { continue };
+        let Ok(exe_path) = std::fs::read_link(&exe_link) else {
+            continue;
+        };
         let exe_str = exe_path.to_string_lossy().into_owned();
 
         if !exe_str.starts_with("/memfd:") {
@@ -251,15 +275,22 @@ fn check_memfd(ctx: &DefenderContext) {
 
 // ─── Check 2: deleted-from-temp executables ──────────────────────────────────
 
+/// Check `/proc/*/exe` for processes running from deleted files in temp directories.
 fn check_deleted_temp(ctx: &DefenderContext) {
     ctx.log_msg("[+] Scanning for processes run from deleted temp files...");
-    let Ok(procs) = std::fs::read_dir("/proc") else { return };
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return;
+    };
     let mut count = 0u32;
 
     for entry in procs.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else { continue };
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
         let exe_link = entry.path().join("exe");
-        let Ok(exe_path) = std::fs::read_link(&exe_link) else { continue };
+        let Ok(exe_path) = std::fs::read_link(&exe_link) else {
+            continue;
+        };
         let exe_str = exe_path.to_string_lossy().into_owned();
 
         if !exe_str.ends_with(" (deleted)") {
@@ -314,6 +345,7 @@ fn check_deleted_temp(ctx: &DefenderContext) {
 
 // ─── Check 3: C2 signature ports ─────────────────────────────────────────────
 
+/// Scan established connections for ports associated with known C2 frameworks.
 fn check_c2_ports(ctx: &DefenderContext) {
     ctx.log_msg("[+] Scanning for connections to known C2 ports...");
 
@@ -334,12 +366,13 @@ fn check_c2_ports(ctx: &DefenderContext) {
 
     let mut count = 0u32;
     for conn in &conns {
-        let pid = match inode_pid.get(&conn.inode) {
-            Some(&p) => p,
-            None => {
-                // Could not resolve inode → pid; still emit a finding with
-                // what we know.
-                ctx.emit(
+        let pid =
+            match inode_pid.get(&conn.inode) {
+                Some(&p) => p,
+                None => {
+                    // Could not resolve inode → pid; still emit a finding with
+                    // what we know.
+                    ctx.emit(
                     Finding::new(
                         Severity::Critical,
                         "c2_detection",
@@ -365,10 +398,10 @@ fn check_c2_ports(ctx: &DefenderContext) {
                         ),
                     ),
                 );
-                count += 1;
-                continue;
-            }
-        };
+                    count += 1;
+                    continue;
+                }
+            };
 
         count += 1;
         let (name, uid) = proc_name_uid(pid);
@@ -394,7 +427,10 @@ fn check_c2_ports(ctx: &DefenderContext) {
             .with_context("pid", pid.to_string())
             .with_context("process", name.clone())
             .with_context("exe", exe_str.clone())
-            .with_context("remote", format!("{}:{}", conn.remote_addr, conn.remote_port))
+            .with_context(
+                "remote",
+                format!("{}:{}", conn.remote_addr, conn.remote_port),
+            )
             .with_verdict(
                 Verdict::Investigate,
                 format!(
@@ -402,8 +438,13 @@ fn check_c2_ports(ctx: &DefenderContext) {
                      known C2 framework port. This is a strong indicator of an active C2 \
                      beacon or reverse shell. Kill PID {} immediately and block {}:{} at \
                      the firewall.",
-                    pid, name, conn.remote_addr, conn.remote_port,
-                    pid, conn.remote_addr, conn.remote_port
+                    pid,
+                    name,
+                    conn.remote_addr,
+                    conn.remote_port,
+                    pid,
+                    conn.remote_addr,
+                    conn.remote_port
                 ),
             ),
         );
@@ -418,19 +459,29 @@ fn check_c2_ports(ctx: &DefenderContext) {
 
 // ─── Check 4: Go binary fingerprinting ───────────────────────────────────────
 
+/// Scan running process binaries for Go runtime string signatures indicating compiled implants.
 fn check_go_binaries(ctx: &DefenderContext) {
     ctx.log_msg("[+] Scanning running processes for Go-compiled implants...");
-    let Ok(procs) = std::fs::read_dir("/proc") else { return };
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return;
+    };
     let mut count = 0u32;
 
     for entry in procs.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else { continue };
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
         let exe_link = entry.path().join("exe");
-        let Ok(exe_path) = std::fs::read_link(&exe_link) else { continue };
+        let Ok(exe_path) = std::fs::read_link(&exe_link) else {
+            continue;
+        };
         let exe_str = exe_path.to_string_lossy().into_owned();
 
         // Skip known-good system paths
-        if KNOWN_GOOD_GO_PATHS.iter().any(|prefix| exe_str.starts_with(prefix)) {
+        if KNOWN_GOOD_GO_PATHS
+            .iter()
+            .any(|prefix| exe_str.starts_with(prefix))
+        {
             continue;
         }
 
@@ -445,12 +496,16 @@ fn check_go_binaries(ctx: &DefenderContext) {
                 }
             }
         };
-        let slice = if bytes.len() > GO_SCAN_LIMIT { &bytes[..GO_SCAN_LIMIT] } else { &bytes };
+        let slice = if bytes.len() > GO_SCAN_LIMIT {
+            &bytes[..GO_SCAN_LIMIT]
+        } else {
+            &bytes
+        };
 
         // Search for Go runtime strings
-        let found_go = GO_BINARY_STRINGS.iter().any(|sig| {
-            contains_bytes(slice, sig.as_bytes())
-        });
+        let found_go = GO_BINARY_STRINGS
+            .iter()
+            .any(|sig| contains_bytes(slice, sig.as_bytes()));
 
         if !found_go {
             continue;
@@ -506,13 +561,18 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
 
 // ─── Check 5: high-entropy / cleared argv processes ──────────────────────────
 
+/// Flag processes that have cleared their argv (empty `/proc/<pid>/cmdline`) to hide activity.
 fn check_empty_cmdline(ctx: &DefenderContext) {
     ctx.log_msg("[+] Scanning for processes with cleared argv...");
-    let Ok(procs) = std::fs::read_dir("/proc") else { return };
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return;
+    };
     let mut count = 0u32;
 
     for entry in procs.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else { continue };
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
 
         // Check cmdline — implants often clear argv entirely (empty or single NUL)
         let cmdline_bytes = match std::fs::read(format!("/proc/{}/cmdline", pid)) {
@@ -527,7 +587,9 @@ fn check_empty_cmdline(ctx: &DefenderContext) {
 
         // Must have a resolvable exe (kernel threads don't have a readable /proc/<pid>/exe)
         let exe_link = entry.path().join("exe");
-        let Ok(exe_path) = std::fs::read_link(&exe_link) else { continue };
+        let Ok(exe_path) = std::fs::read_link(&exe_link) else {
+            continue;
+        };
         let exe_str = exe_path.to_string_lossy().into_owned();
 
         // Skip kernel threads (exe link resolves to nothing useful, but
@@ -537,7 +599,10 @@ fn check_empty_cmdline(ctx: &DefenderContext) {
         }
 
         // Skip known-good system paths
-        if KNOWN_GOOD_PATHS.iter().any(|prefix| exe_str.starts_with(prefix)) {
+        if KNOWN_GOOD_PATHS
+            .iter()
+            .any(|prefix| exe_str.starts_with(prefix))
+        {
             continue;
         }
 
@@ -584,6 +649,7 @@ fn check_empty_cmdline(ctx: &DefenderContext) {
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
+/// Detect C2 implants and beacons running on the host.
 pub fn run(ctx: &DefenderContext) -> Result {
     ctx.log_msg("[*] Starting C2 implant / beacon detection...");
     check_memfd(ctx);
@@ -676,7 +742,9 @@ mod tests {
 
     #[test]
     fn all_c2_ports_present() {
-        let expected: &[u16] = &[50050, 4444, 8888, 9001, 9002, 1337, 31337, 4443, 8443, 2222, 7777];
+        let expected: &[u16] = &[
+            50050, 4444, 8888, 9001, 9002, 1337, 31337, 4443, 8443, 2222, 7777,
+        ];
         for port in expected {
             assert!(C2_PORTS.contains(port), "missing C2 port {}", port);
         }
@@ -699,9 +767,9 @@ mod tests {
     #[test]
     fn non_go_binary_not_flagged() {
         let fake_binary = b"ELF\x7f...main...some_function...";
-        let found_go = GO_BINARY_STRINGS.iter().any(|sig| {
-            contains_bytes(fake_binary, sig.as_bytes())
-        });
+        let found_go = GO_BINARY_STRINGS
+            .iter()
+            .any(|sig| contains_bytes(fake_binary, sig.as_bytes()));
         assert!(!found_go);
     }
 
@@ -760,5 +828,89 @@ mod tests {
     fn opt_path_is_suspicious() {
         let exe = "/opt/implant";
         assert!(!KNOWN_GOOD_PATHS.iter().any(|p| exe.starts_with(p)));
+    }
+
+    // ── fmt_cmdline ───────────────────────────────────────────────────────
+
+    #[test]
+    fn fmt_cmdline_empty_vec() {
+        let result = fmt_cmdline(&[]);
+        assert_eq!(result, "<empty>");
+    }
+
+    #[test]
+    fn fmt_cmdline_single_arg() {
+        let args = vec!["/usr/bin/python3".to_string()];
+        assert_eq!(fmt_cmdline(&args), "/usr/bin/python3");
+    }
+
+    #[test]
+    fn fmt_cmdline_multiple_args() {
+        let args = vec!["python3".to_string(), "server.py".to_string(), "--port".to_string(), "4444".to_string()];
+        assert_eq!(fmt_cmdline(&args), "python3 server.py --port 4444");
+    }
+
+    // ── contains_bytes ────────────────────────────────────────────────────
+
+    #[test]
+    fn contains_bytes_empty_needle_always_true() {
+        assert!(contains_bytes(b"anything", b""));
+        assert!(contains_bytes(b"", b""));
+    }
+
+    #[test]
+    fn contains_bytes_not_found() {
+        assert!(!contains_bytes(b"hello world", b"xyz"));
+    }
+
+    #[test]
+    fn contains_bytes_found_at_start() {
+        assert!(contains_bytes(b"Go build ID: abc", b"Go build ID:"));
+    }
+
+    #[test]
+    fn contains_bytes_found_in_middle() {
+        assert!(contains_bytes(b"ELF\x7fruntime.gopanicmore", b"runtime.gopanic"));
+    }
+
+    // ── parse_hex_addr_v6 ─────────────────────────────────────────────────
+
+    #[test]
+    fn parse_hex_addr_v6_unspecified_on_short_input() {
+        let (addr, _) = parse_hex_addr_v6("0000:1234");
+        assert_eq!(addr, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn parse_c2_connection_non_established_skipped() {
+        // State 0A = LISTEN, not ESTABLISHED (01) — should not appear
+        let sample = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+   0: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 11111 1 0000000000000000 100 0 0 10 0\n";
+        let conns = parse_c2_connections(sample, false);
+        assert_eq!(conns.len(), 0);
+    }
+
+    #[test]
+    fn parse_c2_connection_zero_inode_skipped() {
+        // inode=0 should be skipped even if port matches
+        let sample = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+   0: 0101A8C0:1234 0202A8C0:C382 01 00000000:00000000 00:00000000 00000000    33        0 0 1 0000000000000000 100 0 0 10 0\n";
+        let conns = parse_c2_connections(sample, false);
+        assert_eq!(conns.len(), 0, "zero inode must be skipped");
+    }
+
+    #[test]
+    fn go_binary_strings_all_nonempty() {
+        for s in GO_BINARY_STRINGS {
+            assert!(!s.is_empty());
+        }
+    }
+
+    #[test]
+    fn snap_path_is_known_good_for_go() {
+        let exe = "/snap/go/current/bin/go";
+        assert!(KNOWN_GOOD_GO_PATHS.iter().any(|p| exe.starts_with(p)));
     }
 }

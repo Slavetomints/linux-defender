@@ -12,7 +12,9 @@ use std::process::Command;
 use crate::core::scan::{effective_line, read_text_file, read_text_files};
 use crate::core::{DefenderContext, DefenderError, Finding, Result, Severity};
 
+/// Files that list modules to load at boot.
 const LOAD_CONFIG_FILES: &[&str] = &["/etc/modules"];
+/// Directories containing drop-in module-load configuration files.
 const LOAD_CONFIG_DIRS: &[&str] = &["/etc/modules-load.d", "/usr/lib/modules-load.d"];
 
 /// A module currently loaded into the kernel.
@@ -62,7 +64,10 @@ fn report_untracked(ctx: &DefenderContext, modules: &[Module]) -> Result {
         ctx.emit(Finding::new(
             Severity::Medium,
             "kernel_modules",
-            format!("{} does not exist — on-disk module check skipped", tree.display()),
+            format!(
+                "{} does not exist — on-disk module check skipped",
+                tree.display()
+            ),
             "",
         ));
         return Ok(());
@@ -81,7 +86,10 @@ fn report_untracked(ctx: &DefenderContext, modules: &[Module]) -> Result {
         .collect();
 
     if untracked.is_empty() {
-        ctx.log_msg(&format!("[✓] Every loaded module has a file in {}", tree.display()));
+        ctx.log_msg(&format!(
+            "[✓] Every loaded module has a file in {}",
+            tree.display()
+        ));
         return Ok(());
     }
 
@@ -130,27 +138,37 @@ fn report_load_config(ctx: &DefenderContext) {
     }
 
     for (path, names) in entries {
-        ctx.emit(Finding::new(
-            Severity::Medium,
-            "kernel_modules",
-            format!("Boot-load config {} enables: {}", path.display(), names.join(", ")),
-            format!("file: {}\nmodules: {}", path.display(), names.join(", ")),
-        ).with_path(path));
+        ctx.emit(
+            Finding::new(
+                Severity::Medium,
+                "kernel_modules",
+                format!(
+                    "Boot-load config {} enables: {}",
+                    path.display(),
+                    names.join(", ")
+                ),
+                format!("file: {}\nmodules: {}", path.display(), names.join(", ")),
+            )
+            .with_path(path),
+        );
     }
 }
 
+/// Read and parse the currently loaded modules from `/proc/modules`.
 fn loaded_modules() -> Result<Vec<Module>> {
     let contents = read_text_file(Path::new("/proc/modules"))
         .ok_or_else(|| DefenderError::Command("could not read /proc/modules".to_string()))?;
     Ok(parse_proc_modules(&contents))
 }
 
+/// Return the running kernel release string from `uname -r`.
 fn kernel_release() -> Option<String> {
     let output = Command::new("uname").arg("-r").output().ok()?;
     let release = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!release.is_empty()).then_some(release)
 }
 
+/// Walk the kernel module tree and return all normalised module names present on disk.
 fn available_modules(tree: &Path) -> HashSet<String> {
     walkdir::WalkDir::new(tree)
         .into_iter()
@@ -162,6 +180,7 @@ fn available_modules(tree: &Path) -> HashSet<String> {
         .collect()
 }
 
+/// Strip compression and `.ko` suffixes from a module filename, returning the bare stem.
 fn module_stem(filename: &str) -> Option<&str> {
     let stem = filename
         .strip_suffix(".zst")
@@ -172,10 +191,12 @@ fn module_stem(filename: &str) -> Option<&str> {
     stem.strip_suffix(".ko")
 }
 
+/// Replace hyphens with underscores so module names compare consistently.
 fn normalise(name: &str) -> String {
     name.replace('-', "_")
 }
 
+/// Parse `/proc/modules` text into a list of `Module` structs.
 fn parse_proc_modules(contents: &str) -> Vec<Module> {
     contents
         .lines()
@@ -204,6 +225,7 @@ fn parse_proc_modules(contents: &str) -> Vec<Module> {
         .collect()
 }
 
+/// Parse a module-load config file, returning the list of module names to load.
 fn config_modules(contents: &str) -> Vec<String> {
     contents
         .lines()

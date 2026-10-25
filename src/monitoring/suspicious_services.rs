@@ -11,12 +11,14 @@ use walkdir::WalkDir;
 use crate::core::scan::SUSPICIOUS_PATTERNS;
 use crate::core::{DefenderContext, Finding, Result, Severity};
 
+/// Systemd unit directories searched for service files.
 const UNIT_DIRS: &[&str] = &[
     "/etc/systemd/system",
     "/lib/systemd/system",
     "/usr/lib/systemd/system",
 ];
 
+/// Directories whose presence in an `ExecStart` path is immediately suspicious.
 const SUSPICIOUS_DIRS: &[&str] = &["/tmp/", "/dev/shm/", "/var/tmp/", "/home/"];
 
 /// A systemd unit whose `ExecStart` looks suspicious.
@@ -36,10 +38,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
     let count = found.len();
 
     for s in found {
-        let severity = if SUSPICIOUS_DIRS
-            .iter()
-            .any(|d| s.exec_start.starts_with(d))
-        {
+        let severity = if SUSPICIOUS_DIRS.iter().any(|d| s.exec_start.starts_with(d)) {
             Severity::Critical
         } else {
             Severity::High
@@ -51,7 +50,10 @@ pub fn run(ctx: &DefenderContext) -> Result {
                 "suspicious_services",
                 format!(
                     "Suspicious service in {}: ExecStart={}",
-                    s.unit_file.file_name().unwrap_or_default().to_string_lossy(),
+                    s.unit_file
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy(),
                     s.exec_start
                 ),
                 format!(
@@ -128,6 +130,7 @@ fn parse_exec_starts(content: &str) -> Vec<String> {
         .collect()
 }
 
+/// Return a human-readable reason string if `exec` is suspicious, otherwise `None`.
 fn classify_exec(exec: &str, unit_content: &str) -> Option<String> {
     if exec.is_empty() {
         return None;
@@ -148,7 +151,10 @@ fn classify_exec(exec: &str, unit_content: &str) -> Option<String> {
         .collect();
 
     if !reasons.is_empty() {
-        return Some(format!("suspicious patterns in unit: {}", reasons.join(", ")));
+        return Some(format!(
+            "suspicious patterns in unit: {}",
+            reasons.join(", ")
+        ));
     }
 
     None

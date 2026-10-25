@@ -56,6 +56,7 @@ fn walk_all_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Emit a finding for a suspicious configuration line.
+#[allow(clippy::too_many_arguments)]
 fn flag_line(
     ctx: &DefenderContext,
     file_path: &Path,
@@ -426,22 +427,20 @@ fn check_php_ini(ctx: &DefenderContext, path: &Path) {
                     );
                 }
             }
-            "open_basedir" => {
-                if value.is_empty() {
-                    flag_line(
-                        ctx,
-                        path,
-                        trimmed,
-                        Severity::Medium,
-                        "webserver_config",
-                        format!(
-                            "PHP open_basedir is empty in {} — no filesystem restriction",
-                            path.display()
-                        ),
-                        "open_basedir = (empty) means PHP scripts can read any file the web server user can access, including /etc/passwd and application secrets.",
-                        "Set open_basedir to the web root, e.g. open_basedir = /var/www/html:/tmp",
-                    );
-                }
+            "open_basedir" if value.is_empty() => {
+                flag_line(
+                    ctx,
+                    path,
+                    trimmed,
+                    Severity::Medium,
+                    "webserver_config",
+                    format!(
+                        "PHP open_basedir is empty in {} — no filesystem restriction",
+                        path.display()
+                    ),
+                    "open_basedir = (empty) means PHP scripts can read any file the web server user can access, including /etc/passwd and application secrets.",
+                    "Set open_basedir to the web root, e.g. open_basedir = /var/www/html:/tmp",
+                );
             }
             _ => {}
         }
@@ -498,11 +497,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
             check_php_ini(ctx, php_path);
         } else if php_path.is_dir() {
             for ini in walk_all_files(php_path) {
-                if ini
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map_or(false, |e| e == "ini")
-                {
+                if ini.extension().and_then(|e| e.to_str()) == Some("ini") {
                     check_php_ini(ctx, &ini);
                 }
             }

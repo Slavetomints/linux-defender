@@ -85,6 +85,7 @@ impl LogPane {
     }
 }
 
+/// Return a display style for `line` based on severity keywords.
 fn classify_line(line: &str) -> Style {
     let l = line.to_lowercase();
     if l.contains("error") || l.contains("crit") || l.contains("emerg") || l.contains("fail") {

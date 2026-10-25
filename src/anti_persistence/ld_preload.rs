@@ -12,6 +12,7 @@ use std::path::Path;
 use crate::core::scan::{effective_line, read_text_file};
 use crate::core::{DefenderContext, Finding, Result, Severity, prompt_yes, require_root};
 
+/// Path to the system-wide loader preload configuration file.
 const PRELOAD_FILE: &str = "/etc/ld.so.preload";
 
 /// Check `/etc/ld.so.preload` and `$LD_PRELOAD` for loader hijacking.
@@ -21,6 +22,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
     Ok(())
 }
 
+/// Inspect `/etc/ld.so.preload` for injected library paths and offer removal.
 fn check_preload_file(ctx: &DefenderContext) -> Result {
     let path = Path::new(PRELOAD_FILE);
 
@@ -46,7 +48,11 @@ fn check_preload_file(ctx: &DefenderContext) -> Result {
     let detail = format!(
         "Libraries: {}\nMissing from disk: {}",
         entries.join(", "),
-        if missing.is_empty() { "none".to_string() } else { missing.join(", ") }
+        if missing.is_empty() {
+            "none".to_string()
+        } else {
+            missing.join(", ")
+        }
     );
 
     if ctx.in_tui() {
@@ -60,10 +66,8 @@ fn check_preload_file(ctx: &DefenderContext) -> Result {
             let mut all_ok = true;
             for entry in &entries {
                 let lib_path = Path::new(entry.as_str());
-                if lib_path.exists() {
-                    if !ctx.remove_path_logged(lib_path) {
-                        all_ok = false;
-                    }
+                if lib_path.exists() && !ctx.remove_path_logged(lib_path) {
+                    all_ok = false;
                 }
                 if !ctx.remove_line_from_file_logged(path, entry) {
                     all_ok = false;
@@ -76,7 +80,11 @@ fn check_preload_file(ctx: &DefenderContext) -> Result {
             Finding::new(
                 Severity::Critical,
                 "ld_preload",
-                format!("{} preloads {} library(s) into every process", PRELOAD_FILE, entries.len()),
+                format!(
+                    "{} preloads {} library(s) into every process",
+                    PRELOAD_FILE,
+                    entries.len()
+                ),
                 detail,
             )
             .with_path(path.to_path_buf())
@@ -89,7 +97,11 @@ fn check_preload_file(ctx: &DefenderContext) -> Result {
             entries.len()
         );
         for entry in &entries {
-            let exists_tag = if Path::new(entry).exists() { "" } else { "  (missing from disk)" };
+            let exists_tag = if Path::new(entry).exists() {
+                ""
+            } else {
+                "  (missing from disk)"
+            };
             println!("    - {}{}", entry, exists_tag);
         }
         println!("[!] This file is empty or absent on a stock system.");
@@ -108,6 +120,7 @@ fn check_preload_file(ctx: &DefenderContext) -> Result {
     Ok(())
 }
 
+/// Check whether `$LD_PRELOAD` is set in the current process environment.
 fn check_environment(ctx: &DefenderContext) {
     match env::var("LD_PRELOAD") {
         Ok(value) if !value.trim().is_empty() => {
@@ -122,6 +135,7 @@ fn check_environment(ctx: &DefenderContext) {
     }
 }
 
+/// Parse non-comment lines from a preload file into a list of library paths.
 fn parse_preload(contents: &str) -> Vec<String> {
     contents
         .lines()

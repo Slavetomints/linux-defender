@@ -27,10 +27,7 @@ use crate::core::{
 };
 
 /// Directories containing modern `.rules` (JavaScript) files.
-const RULES_DIRS: &[&str] = &[
-    "/etc/polkit-1/rules.d",
-    "/usr/share/polkit-1/rules.d",
-];
+const RULES_DIRS: &[&str] = &["/etc/polkit-1/rules.d", "/usr/share/polkit-1/rules.d"];
 
 /// Root of the legacy `.pkla` directory tree.
 const PKLA_ROOT: &str = "/etc/polkit-1/localauthority";
@@ -69,6 +66,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
 // ── Modern .rules (JavaScript) ────────────────────────────────────────────────
 
+/// Scan a polkit rules directory for `.rules` files and check each one.
 fn scan_rules_directory(ctx: &DefenderContext, dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -205,7 +203,8 @@ fn scan_pkla_file(ctx: &DefenderContext, path: &Path) {
 // ── Detection helpers ─────────────────────────────────────────────────────────
 
 /// A single suspicious finding inside a polkit file.
-struct PolkitIssue {
+pub(crate) struct PolkitIssue {
+    /// Severity level of the finding.
     severity: Severity,
     /// Short label used in the finding summary and context.
     label: &'static str,
@@ -216,7 +215,7 @@ struct PolkitIssue {
 }
 
 /// Analyse a `.rules` file's content and return all detected issues.
-pub fn rules_file_issues(content: &str) -> Vec<PolkitIssue> {
+pub(crate) fn rules_file_issues(content: &str) -> Vec<PolkitIssue> {
     let mut issues = Vec::new();
 
     let has_return_yes = content.contains("return polkit.Result.YES");
@@ -242,8 +241,7 @@ pub fn rules_file_issues(content: &str) -> Vec<PolkitIssue> {
             severity: Severity::Critical,
             label: "unconditional polkit.Result.YES",
             detail,
-            recommendation:
-                "This rule may grant unconditional privilege escalation. \
+            recommendation: "This rule may grant unconditional privilege escalation. \
                  Review the full file and check whether any subject/action guard is present",
         });
     }
@@ -256,8 +254,7 @@ pub fn rules_file_issues(content: &str) -> Vec<PolkitIssue> {
             detail: "contains a rule matching 'org.freedesktop.policykit' actions, \
                      which control the policy engine itself"
                 .to_string(),
-            recommendation:
-                "Rules matching org.freedesktop.policykit can alter authentication \
+            recommendation: "Rules matching org.freedesktop.policykit can alter authentication \
                  requirements for polkit itself — verify this is an authorised system file",
         });
     }
@@ -266,7 +263,7 @@ pub fn rules_file_issues(content: &str) -> Vec<PolkitIssue> {
 }
 
 /// Analyse a `.pkla` file's content and return all detected issues.
-pub fn pkla_file_issues(content: &str) -> Vec<PolkitIssue> {
+pub(crate) fn pkla_file_issues(content: &str) -> Vec<PolkitIssue> {
     let mut issues = Vec::new();
 
     // Collect suspicious key=value lines
@@ -308,7 +305,11 @@ pub fn pkla_file_issues(content: &str) -> Vec<PolkitIssue> {
     }
 
     if result_any_yes || result_active_yes {
-        let key = if result_any_yes { "ResultAny=yes" } else { "ResultActive=yes" };
+        let key = if result_any_yes {
+            "ResultAny=yes"
+        } else {
+            "ResultActive=yes"
+        };
         issues.push(PolkitIssue {
             severity: Severity::High,
             label: key,
@@ -316,10 +317,13 @@ pub fn pkla_file_issues(content: &str) -> Vec<PolkitIssue> {
                 "{} grants the action to unauthenticated ({}) or active (ResultActive) sessions \
                  without prompting for a password",
                 key,
-                if result_any_yes { "ResultAny" } else { "ResultActive" },
+                if result_any_yes {
+                    "ResultAny"
+                } else {
+                    "ResultActive"
+                },
             ),
-            recommendation:
-                "ResultAny=yes or ResultActive=yes bypasses password authentication. \
+            recommendation: "ResultAny=yes or ResultActive=yes bypasses password authentication. \
                  Verify the action and identity scope are intentional and minimal",
         });
     }

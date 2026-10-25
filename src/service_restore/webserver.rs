@@ -44,10 +44,7 @@ pub fn download_file(url: &str, dest: &Path, distro: &Distro) -> Result<()> {
 
     // Neither worked — offer to install curl.
     eprintln!("[!] Neither curl nor wget succeeded.");
-    if prompt_yes(&format!(
-        "[?] Install curl via {}? (y/N)",
-        distro.name()
-    ))? {
+    if prompt_yes(&format!("[?] Install curl via {}? (y/N)", distro.name()))? {
         install_package(distro, &["curl"])?;
         if try_curl(url, dest_str) {
             println!("[✓] Download complete");
@@ -116,8 +113,8 @@ pub fn extract_zip(
     ));
 
     let file = fs::File::open(zip_path)?;
-    let mut archive = ZipArchive::new(file)
-        .map_err(|e| DefenderError::Other(format!("cannot open zip: {e}")))?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|e| DefenderError::Other(format!("cannot open zip: {e}")))?;
 
     let total = archive.len();
     let mut extracted = 0usize;
@@ -318,10 +315,7 @@ pub fn reload_webserver(ctx: &DefenderContext) -> Result<()> {
 pub fn resolve_web_root(path: &Path) -> Result<PathBuf> {
     if !path.exists() {
         eprintln!("[!] {} does not exist.", path.display());
-        if prompt_yes(&format!(
-            "[?] Create {} now? (y/N)",
-            path.display()
-        ))? {
+        if prompt_yes(&format!("[?] Create {} now? (y/N)", path.display()))? {
             fs::create_dir_all(path)?;
             println!("[✓] Created {}", path.display());
         } else {
@@ -352,10 +346,7 @@ pub fn find_php(distro: &Distro) -> Result<String> {
     // PHP not found — offer to install it.
     let pkg = distro.php_package();
     eprintln!("[!] PHP not found on this system.");
-    if prompt_yes(&format!(
-        "[?] Install {pkg} via {}? (y/N)",
-        distro.name()
-    ))? {
+    if prompt_yes(&format!("[?] Install {pkg} via {}? (y/N)", distro.name()))? {
         install_package(distro, &[pkg])?;
         if let Some(bin) = probe_php() {
             println!("[✓] PHP is now available: {bin}");

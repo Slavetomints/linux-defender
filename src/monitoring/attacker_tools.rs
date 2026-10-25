@@ -8,27 +8,53 @@ use crate::core::{DefenderContext, Finding, Result, Severity, Verdict};
 
 /// Filenames (or substrings) that indicate attacker tooling.
 const KNOWN_TOOL_NAMES: &[&str] = &[
-    "nc", "ncat", "netcat", "socat", "chisel", "pspy", "pspy32", "pspy64",
-    "ligolo", "ligolo-ng", "frp", "frps", "frpc", "fscan", "nmap", "masscan",
-    "mimikatz", "meterpreter", "msf", "msfvenom", "cobalt", "sliver", "havoc",
-    "mythic", "empire", "sqlmap", "hydra", "john", "hashcat", "proxychains",
-    "revsocks", "stowaway", "goproxy", "ngrok", "bore", "rathole",
+    "nc",
+    "ncat",
+    "netcat",
+    "socat",
+    "chisel",
+    "pspy",
+    "pspy32",
+    "pspy64",
+    "ligolo",
+    "ligolo-ng",
+    "frp",
+    "frps",
+    "frpc",
+    "fscan",
+    "nmap",
+    "masscan",
+    "mimikatz",
+    "meterpreter",
+    "msf",
+    "msfvenom",
+    "cobalt",
+    "sliver",
+    "havoc",
+    "mythic",
+    "empire",
+    "sqlmap",
+    "hydra",
+    "john",
+    "hashcat",
+    "proxychains",
+    "revsocks",
+    "stowaway",
+    "goproxy",
+    "ngrok",
+    "bore",
+    "rathole",
 ];
 
 /// Directories scanned for known tool names.
-const TOOL_SCAN_DIRS: &[&str] = &[
-    "/tmp", "/dev/shm", "/var/tmp", "/run/shm",
-];
+const TOOL_SCAN_DIRS: &[&str] = &["/tmp", "/dev/shm", "/var/tmp", "/run/shm"];
 
 /// Hidden subdirectories under a home dir that may hide executables.
-const HIDDEN_HOME_DIRS: &[&str] = &[
-    ".local/bin", ".config", ".cache", ".local/lib",
-];
+const HIDDEN_HOME_DIRS: &[&str] = &[".local/bin", ".config", ".cache", ".local/lib"];
 
 /// Double-extension combinations that are clearly attacker staging.
 const DOUBLE_EXTENSIONS: &[&str] = &[
-    ".sh.sh", ".py.py", ".pl.pl", ".rb.rb", ".php.php",
-    ".sh.py", ".sh.pl", ".sh.rb", ".py.sh",
+    ".sh.sh", ".py.py", ".pl.pl", ".rb.rb", ".php.php", ".sh.py", ".sh.pl", ".sh.rb", ".py.sh",
     ".tar.sh", ".gz.sh", ".zip.sh", ".jpg.sh", ".png.sh", ".pdf.sh",
 ];
 
@@ -44,6 +70,7 @@ const DOUBLE_EXT_SCAN_DIRS: &[&str] = &[
     "/tmp", "/dev/shm", "/var/tmp", "/run/shm", "/home", "/var/www", "/opt",
 ];
 
+/// Scan for known attacker tools and suspicious executables on the host.
 pub fn run(ctx: &DefenderContext) -> Result {
     scan_known_tools(ctx);
     scan_hidden_home_executables(ctx);
@@ -54,6 +81,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
 // ─── Check 1: known tool names in temp dirs ───────────────────────────────────
 
+/// Check temp directories for executables matching known attacker tool names.
 fn scan_known_tools(ctx: &DefenderContext) {
     ctx.log_msg("[+] Scanning temp dirs for known attacker tools...");
     let mut count = 0u32;
@@ -63,7 +91,9 @@ fn scan_known_tools(ctx: &DefenderContext) {
     if let Ok(contents) = std::fs::read_to_string("/etc/passwd") {
         for line in contents.lines() {
             let fields: Vec<&str> = line.split(':').collect();
-            if fields.len() < 6 { continue; }
+            if fields.len() < 6 {
+                continue;
+            }
             let home = fields[5];
             dirs.push(format!("{}/.local/bin", home));
             dirs.push(format!("{}/.cache", home));
@@ -74,14 +104,20 @@ fn scan_known_tools(ctx: &DefenderContext) {
     for dir in &dirs {
         for entry in WalkDir::new(dir).follow_links(false).into_iter().flatten() {
             let path = entry.path();
-            if !path.is_file() { continue; }
-            let fname = path.file_name()
+            if !path.is_file() {
+                continue;
+            }
+            let fname = path
+                .file_name()
                 .map(|n| n.to_string_lossy().to_lowercase())
                 .unwrap_or_default();
 
             let matched = KNOWN_TOOL_NAMES.iter().find(|&&t| fname.contains(t));
             if let Some(&tool) = matched {
-                ctx.log_msg(&format!("[!] Known attacker tool found: {}", path.display()));
+                ctx.log_msg(&format!(
+                    "[!] Known attacker tool found: {}",
+                    path.display()
+                ));
                 ctx.log_evidence_file(path);
                 count += 1;
                 ctx.emit(
@@ -91,7 +127,9 @@ fn scan_known_tools(ctx: &DefenderContext) {
                         format!("Known attacker tool '{}' found: {}", tool, path.display()),
                         format!(
                             "path: {}\nmatched tool: {}\nfilename: {}",
-                            path.display(), tool, fname
+                            path.display(),
+                            tool,
+                            fname
                         ),
                     )
                     .with_path(path.to_path_buf())
@@ -117,6 +155,7 @@ fn scan_known_tools(ctx: &DefenderContext) {
 
 // ─── Check 2: executables in hidden home directories ─────────────────────────
 
+/// Check hidden directories under `/home` and `/root` for executable files.
 fn scan_hidden_home_executables(ctx: &DefenderContext) {
     ctx.log_msg("[+] Scanning hidden home directories for executables...");
     let mut count = 0u32;
@@ -126,14 +165,24 @@ fn scan_hidden_home_executables(ctx: &DefenderContext) {
     for home in &home_dirs {
         for subdir in HIDDEN_HOME_DIRS {
             let target = std::path::PathBuf::from(home).join(subdir);
-            if !target.exists() { continue; }
+            if !target.exists() {
+                continue;
+            }
 
-            for entry in WalkDir::new(&target).follow_links(false).into_iter().flatten() {
+            for entry in WalkDir::new(&target)
+                .follow_links(false)
+                .into_iter()
+                .flatten()
+            {
                 let path = entry.path();
-                if !path.is_file() { continue; }
+                if !path.is_file() {
+                    continue;
+                }
                 let Ok(meta) = path.metadata() else { continue };
                 let mode = meta.permissions().mode();
-                if mode & 0o111 == 0 { continue; } // not executable
+                if mode & 0o111 == 0 {
+                    continue;
+                } // not executable
 
                 count += 1;
                 ctx.emit(
@@ -143,7 +192,10 @@ fn scan_hidden_home_executables(ctx: &DefenderContext) {
                         format!("Executable in hidden home dir: {}", path.display()),
                         format!(
                             "path: {}\nmode: {:o}\nhome: {}\nsubdir: {}",
-                            path.display(), mode, home, subdir
+                            path.display(),
+                            mode,
+                            home,
+                            subdir
                         ),
                     )
                     .with_path(path.to_path_buf())
@@ -169,12 +221,20 @@ fn scan_hidden_home_executables(ctx: &DefenderContext) {
     ctx.log_msg(&format!("[✓] Hidden home exec scan: {} hit(s)", count));
 }
 
+/// Read `/etc/passwd` and return the home directory path for every account.
 fn parse_home_dirs_from_passwd() -> Vec<String> {
-    let Ok(contents) = std::fs::read_to_string("/etc/passwd") else { return vec![] };
-    contents.lines()
+    let Ok(contents) = std::fs::read_to_string("/etc/passwd") else {
+        return vec![];
+    };
+    contents
+        .lines()
         .filter_map(|line| {
             let fields: Vec<&str> = line.split(':').collect();
-            if fields.len() >= 6 { Some(fields[5].to_string()) } else { None }
+            if fields.len() >= 6 {
+                Some(fields[5].to_string())
+            } else {
+                None
+            }
         })
         .filter(|h| !h.is_empty() && h != "/")
         .collect()
@@ -182,6 +242,7 @@ fn parse_home_dirs_from_passwd() -> Vec<String> {
 
 // ─── Check 3: double-extension files ─────────────────────────────────────────
 
+/// Scan writable directories for files with misleading double extensions (e.g. `payload.sh.pdf`).
 fn scan_double_extensions(ctx: &DefenderContext) {
     ctx.log_msg("[+] Scanning for double-extension files...");
     let mut count = 0u32;
@@ -189,13 +250,17 @@ fn scan_double_extensions(ctx: &DefenderContext) {
     for dir in DOUBLE_EXT_SCAN_DIRS {
         for entry in WalkDir::new(dir).follow_links(false).into_iter().flatten() {
             let path = entry.path();
-            if !path.is_file() { continue; }
+            if !path.is_file() {
+                continue;
+            }
             let fname = match path.file_name() {
                 Some(n) => n.to_string_lossy().to_lowercase(),
                 None => continue,
             };
 
-            if !fname.contains('.') { continue; }
+            if !fname.contains('.') {
+                continue;
+            }
 
             let reason = classify_double_ext(&fname);
             if let Some(reason) = reason {
@@ -207,7 +272,9 @@ fn scan_double_extensions(ctx: &DefenderContext) {
                         format!("Double-extension file: {}", path.display()),
                         format!(
                             "path: {}\nfilename: {}\nreason: {}",
-                            path.display(), fname, reason
+                            path.display(),
+                            fname,
+                            reason
                         ),
                     )
                     .with_path(path.to_path_buf())
@@ -257,16 +324,23 @@ fn classify_double_ext(fname: &str) -> Option<&'static str> {
 
 // ─── Check 4: processes running from deleted/anonymous exe ───────────────────
 
+/// Check `/proc/*/exe` for processes running from deleted on-disk files or memfd.
 fn scan_deleted_proc_exe(ctx: &DefenderContext) {
     ctx.log_msg("[+] Scanning /proc for deleted or memfd executables...");
     let mut count = 0u32;
 
-    let Ok(procs) = std::fs::read_dir("/proc") else { return };
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return;
+    };
 
     for entry in procs.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else { continue };
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
         let exe_link = format!("/proc/{}/exe", pid);
-        let Ok(target) = std::fs::read_link(&exe_link) else { continue };
+        let Ok(target) = std::fs::read_link(&exe_link) else {
+            continue;
+        };
         let path_str = target.to_string_lossy();
 
         let is_deleted_temp = path_str.ends_with(" (deleted)")
@@ -277,7 +351,9 @@ fn scan_deleted_proc_exe(ctx: &DefenderContext) {
 
         let is_memfd = path_str.starts_with("/memfd:");
 
-        if !is_deleted_temp && !is_memfd { continue; }
+        if !is_deleted_temp && !is_memfd {
+            continue;
+        }
 
         let cmdline = read_proc_cmdline(pid);
         let (uid, proc_name) = read_proc_status(pid);
@@ -286,12 +362,18 @@ fn scan_deleted_proc_exe(ctx: &DefenderContext) {
 
         let (summary, reason) = if is_memfd {
             (
-                format!("Process {} ({}) running from anonymous memory (memfd)", proc_name, pid),
+                format!(
+                    "Process {} ({}) running from anonymous memory (memfd)",
+                    proc_name, pid
+                ),
                 "memfd: executable never existed on disk — classic in-memory dropper technique",
             )
         } else {
             (
-                format!("Process {} ({}) running from deleted temp executable: {}", proc_name, pid, path_str),
+                format!(
+                    "Process {} ({}) running from deleted temp executable: {}",
+                    proc_name, pid, path_str
+                ),
                 "deleted temp exe: binary was removed after execution — staging cleanup technique",
             )
         };
@@ -318,8 +400,13 @@ fn scan_deleted_proc_exe(ctx: &DefenderContext) {
                     "Process {} (PID {}) is running from {}. \
                      This is a strong indicator of a fileless malware dropper or \
                      in-memory implant. Kill the process immediately: kill -9 {}",
-                    proc_name, pid,
-                    if is_memfd { "anonymous memory (memfd)" } else { "a deleted temp file" },
+                    proc_name,
+                    pid,
+                    if is_memfd {
+                        "anonymous memory (memfd)"
+                    } else {
+                        "a deleted temp file"
+                    },
                     pid,
                 ),
             ),
@@ -329,8 +416,11 @@ fn scan_deleted_proc_exe(ctx: &DefenderContext) {
     ctx.log_msg(&format!("[✓] Deleted/memfd exe scan: {} hit(s)", count));
 }
 
+/// Read the command line for `pid` from `/proc/<pid>/cmdline`, NUL-delimited.
 fn read_proc_cmdline(pid: u32) -> String {
-    let Ok(raw) = std::fs::read(format!("/proc/{}/cmdline", pid)) else { return String::new() };
+    let Ok(raw) = std::fs::read(format!("/proc/{}/cmdline", pid)) else {
+        return String::new();
+    };
     // cmdline separates args with NUL bytes
     raw.split(|&b| b == 0)
         .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
@@ -339,15 +429,20 @@ fn read_proc_cmdline(pid: u32) -> String {
         .join(" ")
 }
 
+/// Read UID and process name for `pid` from `/proc/<pid>/status`.
 fn read_proc_status(pid: u32) -> (u32, String) {
     let Ok(contents) = std::fs::read_to_string(format!("/proc/{}/status", pid)) else {
-        return (u32::MAX, "unknown".into())
+        return (u32::MAX, "unknown".into());
     };
     let mut uid = u32::MAX;
     let mut name = String::from("unknown");
     for line in contents.lines() {
         if let Some(v) = line.strip_prefix("Uid:\t") {
-            uid = v.split_whitespace().next().and_then(|s| s.parse().ok()).unwrap_or(u32::MAX);
+            uid = v
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(u32::MAX);
         } else if let Some(v) = line.strip_prefix("Name:\t") {
             name = v.trim().to_string();
         }
@@ -435,5 +530,81 @@ mod tests {
                 || path.contains("/var/tmp/")
                 || path.contains("/run/shm/"));
         assert!(!is_deleted_temp);
+    }
+
+    #[test]
+    fn parse_home_dirs_extracts_field5() {
+        let passwd = "root:x:0:0:root:/root:/bin/bash\n\
+                      www-data:x:33:33::/var/www:/usr/sbin/nologin\n\
+                      user1:x:1000:1000::/home/user1:/bin/bash\n";
+        let homes: Vec<String> = passwd
+            .lines()
+            .filter_map(|line| {
+                let fields: Vec<&str> = line.split(':').collect();
+                if fields.len() >= 6 {
+                    Some(fields[5].to_string())
+                } else {
+                    None
+                }
+            })
+            .filter(|h| !h.is_empty() && h != "/")
+            .collect();
+        assert!(homes.contains(&"/root".to_string()));
+        assert!(homes.contains(&"/var/www".to_string()));
+        assert!(homes.contains(&"/home/user1".to_string()));
+    }
+
+    #[test]
+    fn parse_home_dirs_skips_short_lines() {
+        let passwd = "bad_line_no_colons\n\
+                      user:x:1000:1000::/home/user:/bin/bash\n";
+        let homes: Vec<String> = passwd
+            .lines()
+            .filter_map(|line| {
+                let fields: Vec<&str> = line.split(':').collect();
+                if fields.len() >= 6 {
+                    Some(fields[5].to_string())
+                } else {
+                    None
+                }
+            })
+            .filter(|h| !h.is_empty() && h != "/")
+            .collect();
+        assert_eq!(homes, vec!["/home/user"]);
+    }
+
+    #[test]
+    fn classify_double_ext_empty_string() {
+        assert!(classify_double_ext("").is_none());
+    }
+
+    #[test]
+    fn classify_double_ext_single_ext() {
+        assert!(classify_double_ext("file.txt").is_none());
+        assert!(classify_double_ext("file.sh").is_none());
+    }
+
+    #[test]
+    fn classify_double_ext_no_ext() {
+        assert!(classify_double_ext("Makefile").is_none());
+    }
+
+    #[test]
+    fn all_known_tool_names_nonempty() {
+        for name in KNOWN_TOOL_NAMES {
+            assert!(!name.is_empty(), "empty tool name in list");
+        }
+    }
+
+    #[test]
+    fn chisel_detected_as_tool() {
+        let fname = "chisel_linux_amd64";
+        assert!(KNOWN_TOOL_NAMES.iter().any(|&t| fname.contains(t)));
+    }
+
+    #[test]
+    fn bash_not_detected_as_tool() {
+        let fname = "bash";
+        assert!(!KNOWN_TOOL_NAMES.iter().any(|&t| fname.contains(t)));
     }
 }

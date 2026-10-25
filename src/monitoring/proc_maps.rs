@@ -30,10 +30,10 @@ use crate::core::{DefenderContext, Finding, Result, Severity, Verdict};
 /// Process names whose anonymous `rwx` pages are expected (JIT engines).
 /// Matching is case-insensitive substring containment.
 const JIT_PROCESS_NAMES: &[&str] = &[
-    "java", "node", "python", "ruby", "perl", "php",
-    "firefox", "chrome", "chromium", "electron",
+    "java", "node", "python", "ruby", "perl", "php", "firefox", "chrome", "chromium", "electron",
 ];
 
+/// Return true if `name` matches a known JIT-using process that legitimately has rwxp mappings.
 fn is_jit_process(name: &str) -> bool {
     let lower = name.to_lowercase();
     JIT_PROCESS_NAMES.iter().any(|jit| lower.contains(jit))
@@ -45,6 +45,7 @@ fn is_jit_process(name: &str) -> bool {
 /// We avoid flagging kernel workers and well-known system daemons.
 const SYSTEM_PREFIXES: &[&str] = &["/usr/", "/bin/", "/sbin/", "/lib/"];
 
+/// Return true if the executable path starts with a well-known system directory prefix.
 fn is_system_exe(exe: &str) -> bool {
     if exe.is_empty() {
         return true; // kernel thread or unreadable — skip
@@ -75,16 +76,20 @@ struct MapsEntry {
 /// ```
 fn parse_maps_line(line: &str) -> Option<MapsEntry> {
     let mut fields = line.split_whitespace();
-    let _address  = fields.next()?;  // "start-end"
-    let perms     = fields.next()?.to_string();
-    let _offset   = fields.next()?;
-    let _dev      = fields.next()?;
+    let _address = fields.next()?; // "start-end"
+    let perms = fields.next()?.to_string();
+    let _offset = fields.next()?;
+    let _dev = fields.next()?;
     let inode_str = fields.next()?;
     let inode: u64 = inode_str.parse().ok()?;
     // Everything after the fifth field is the pathname (may be absent)
     let pathname = fields.next().unwrap_or("").to_string();
 
-    Some(MapsEntry { perms, inode, pathname })
+    Some(MapsEntry {
+        perms,
+        inode,
+        pathname,
+    })
 }
 
 /// Return `true` if this maps entry represents an anonymous executable page.
@@ -93,13 +98,12 @@ fn parse_maps_line(line: &str) -> Option<MapsEntry> {
 /// - permissions contain both `w` (writable) and `x` (executable)
 /// - inode is `0` (no backing file)
 fn is_rwx_anonymous(entry: &MapsEntry) -> bool {
-    entry.inode == 0
-        && entry.perms.contains('w')
-        && entry.perms.contains('x')
+    entry.inode == 0 && entry.perms.contains('w') && entry.perms.contains('x')
 }
 
 // ── Process metadata helpers ─────────────────────────────────────────────────
 
+/// Return the process name and real UID for `pid` by reading `/proc/<pid>/status`.
 fn read_proc_status(pid: u32) -> (String, String) {
     let path = format!("/proc/{}/status", pid);
     let Ok(contents) = std::fs::read_to_string(&path) else {
@@ -107,7 +111,7 @@ fn read_proc_status(pid: u32) -> (String, String) {
     };
 
     let mut name = String::new();
-    let mut uid  = String::new();
+    let mut uid = String::new();
 
     for line in contents.lines() {
         if let Some(v) = line.strip_prefix("Name:\t") {
@@ -123,6 +127,7 @@ fn read_proc_status(pid: u32) -> (String, String) {
     (name, uid)
 }
 
+/// Resolve the executable path for `pid` from `/proc/<pid>/exe`.
 fn read_exe(pid: u32) -> String {
     std::fs::read_link(format!("/proc/{}/exe", pid))
         .map(|p| p.to_string_lossy().into_owned())
@@ -165,9 +170,13 @@ pub fn run(ctx: &DefenderContext) -> Result {
         }
 
         // Collect process metadata
-        let exe               = read_exe(pid);
-        let (name, uid)       = read_proc_status(pid);
-        let display_name      = if name.is_empty() { format!("pid:{}", pid) } else { name.clone() };
+        let exe = read_exe(pid);
+        let (name, uid) = read_proc_status(pid);
+        let display_name = if name.is_empty() {
+            format!("pid:{}", pid)
+        } else {
+            name.clone()
+        };
 
         // Skip processes we cannot meaningfully investigate (kernel threads etc.)
         // read_exe returns empty for kernel threads; is_system_exe returns true → skip
@@ -207,7 +216,9 @@ pub fn run(ctx: &DefenderContext) -> Result {
                  file. This is a strong indicator of shellcode injection or a \
                  memory-resident implant. Take a process memory dump with \
                  `gcore {}` before killing the process, then investigate the dump.",
-                display_name, pid, exe,
+                display_name,
+                pid,
+                exe,
                 rwx_count,
                 if rwx_count == 1 { "" } else { "s" },
                 pid,
@@ -256,7 +267,8 @@ mod tests {
     #[test]
     fn parses_rx_file_backed_line() {
         // A normal code section: r-xp, non-zero inode, and a pathname
-        let line = "7f1234000000-7f1234100000 r-xp 00000000 08:01 123456 /lib/x86_64-linux-gnu/libc.so.6";
+        let line =
+            "7f1234000000-7f1234100000 r-xp 00000000 08:01 123456 /lib/x86_64-linux-gnu/libc.so.6";
         let entry = parse_maps_line(line).expect("should parse");
         assert_eq!(entry.perms, "r-xp");
         assert_eq!(entry.inode, 123456);

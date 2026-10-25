@@ -19,7 +19,9 @@ use std::path::{Path, PathBuf};
 
 use crate::core::{DefenderContext, Finding, Result, Severity, Verdict};
 
+/// Path to the main sudoers file.
 const SUDOERS_FILE: &str = "/etc/sudoers";
+/// Directory containing drop-in sudoers fragments.
 const SUDOERS_DIR: &str = "/etc/sudoers.d";
 
 /// UID threshold for "service account" classification.
@@ -210,18 +212,17 @@ fn inspect(
         // NOPASSWD: ALL for any user — use extract_commands so we match the
         // command list "ALL" specifically, not "(ALL)" in the runas spec.
         if line_lc.contains("nopasswd")
-            && extract_commands(line).iter().any(|c| c.eq_ignore_ascii_case("ALL"))
+            && extract_commands(line)
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case("ALL"))
         {
             // Extract the subject (first token before any whitespace or `ALL`).
             let subject = subject_of_rule(line);
             let is_all_users = subject.eq_ignore_ascii_case("ALL");
             let is_service = is_service_account(&subject, known_uids);
 
-            let severity = if is_all_users || is_service {
-                Severity::Critical
-            } else {
-                Severity::Critical // NOPASSWD ALL is always Critical
-            };
+            let severity = Severity::Critical; // NOPASSWD ALL is always Critical regardless of subject
+            let _ = (is_all_users, is_service);
 
             ctx.log_evidence_line(&path_str, line);
             findings.push(
@@ -588,8 +589,8 @@ fn logical_lines(contents: &str) -> Vec<String> {
             continue;
         }
 
-        if trimmed.ends_with('\\') {
-            current.push_str(&trimmed[..trimmed.len() - 1]);
+        if let Some(cont) = trimmed.strip_suffix('\\') {
+            current.push_str(cont);
             current.push(' ');
         } else {
             current.push_str(trimmed);
@@ -651,7 +652,9 @@ fn extract_commands(line: &str) -> Vec<String> {
 
 /// Parsed entry from /etc/passwd: name and UID.
 struct PasswdEntry {
+    /// Account name from the first field of `/etc/passwd`.
     name: String,
+    /// Numeric user ID from the third field of `/etc/passwd`.
     uid: u32,
 }
 
@@ -685,6 +688,7 @@ fn parse_passwd_entries(contents: &str) -> Vec<PasswdEntry> {
         .collect()
 }
 
+/// Alias for `parse_passwd_entries` — returns name+uid pairs from `/etc/passwd` text.
 fn parse_passwd_uids(contents: &str) -> Vec<PasswdEntry> {
     parse_passwd_entries(contents)
 }
@@ -704,7 +708,7 @@ fn is_known_user(name: &str, known_names: &HashSet<String>) -> bool {
 }
 
 /// True if the subject is a service account (UID < SERVICE_UID_THRESHOLD, not root).
-fn is_service_account(name: &str, known_uids: &HashSet<u32>) -> bool {
+fn is_service_account(name: &str, _known_uids: &HashSet<u32>) -> bool {
     if name.eq_ignore_ascii_case("root") {
         return false;
     }

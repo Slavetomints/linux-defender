@@ -31,11 +31,17 @@ pub fn run(ctx: &DefenderContext) -> Result {
             Severity::Info,
             "port_map",
             format!(":{} — {} (PID {})", lp.port, lp.exe, lp.pid),
-            format!("port: {}\npid: {}\nexe: {}\ncmdline: {}", lp.port, lp.pid, lp.exe, lp.cmdline),
+            format!(
+                "port: {}\npid: {}\nexe: {}\ncmdline: {}",
+                lp.port, lp.pid, lp.exe, lp.cmdline
+            ),
         ));
     }
 
-    ctx.log_msg(&format!("[✓] Port map complete — {} listener(s)", ports.len()));
+    ctx.log_msg(&format!(
+        "[✓] Port map complete — {} listener(s)",
+        ports.len()
+    ));
     Ok(())
 }
 
@@ -97,6 +103,7 @@ fn parse_listen_sockets(contents: &str) -> Vec<(u16, u64)> {
     out
 }
 
+/// Parse the port half of a `<hex_ip>:<hex_port>` field from `/proc/net/tcp`.
 fn parse_hex_port(addr: &str) -> Option<u16> {
     u16::from_str_radix(addr.split(':').nth(1)?, 16).ok()
 }
@@ -138,19 +145,21 @@ fn build_inode_pid_map(target_inodes: &HashMap<u64, u16>) -> HashMap<u64, u32> {
     result
 }
 
+/// Return the basename of the executable for `pid` by reading `/proc/<pid>/exe`.
 fn read_exe(pid: u32) -> String {
     std::fs::read_link(format!("/proc/{}/exe", pid))
         .map(|p| {
             p.to_string_lossy()
                 .trim_end_matches(" (deleted)")
                 .split('/')
-                .last()
+                .next_back()
                 .unwrap_or("unknown")
                 .to_string()
         })
         .unwrap_or_else(|_| "unknown".into())
 }
 
+/// Return a truncated command line string for `pid` from `/proc/<pid>/cmdline`.
 fn read_cmdline(pid: u32) -> String {
     std::fs::read(format!("/proc/{}/cmdline", pid))
         .ok()

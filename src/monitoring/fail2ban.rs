@@ -8,6 +8,7 @@ use std::process::Command;
 
 use crate::core::{DefenderContext, Finding, Result, Severity, Verdict};
 
+/// Check fail2ban installation status and active jails.
 pub fn run(ctx: &DefenderContext) -> Result {
     ctx.log_msg("[+] Checking fail2ban status...");
 
@@ -26,7 +27,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
                 "fail2ban is not installed. Without it, SSH brute-force and web attacks \
                  are unrestricted. Install it with: apt install fail2ban (Debian/Ubuntu) \
                  or dnf install fail2ban (RHEL/Fedora)."
-                .to_string(),
+                    .to_string(),
             ),
         );
         return Ok(());
@@ -49,7 +50,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
                 Verdict::Investigate,
                 "fail2ban is installed but not running. Start it: \
                  systemctl enable --now fail2ban"
-                .to_string(),
+                    .to_string(),
             ),
         );
         return Ok(());
@@ -71,7 +72,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
                 Verdict::Investigate,
                 "fail2ban has no configured jails. Brute-force protection is not \
                  active. Enable at minimum the sshd jail."
-                .to_string(),
+                    .to_string(),
             ),
         );
         return Ok(());
@@ -105,6 +106,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
     Ok(())
 }
 
+/// Return `Some(())` if `fail2ban-client` is on PATH, `None` otherwise.
 fn which_fail2ban() -> Option<()> {
     Command::new("which")
         .arg("fail2ban-client")
@@ -114,11 +116,12 @@ fn which_fail2ban() -> Option<()> {
         .map(|_| ())
 }
 
+/// Run an external command and return its stdout as a `String`.
 fn run_command(cmd: &str, args: &[&str]) -> Result<String> {
     let out = Command::new(cmd)
         .args(args)
         .output()
-        .map_err(|e| crate::core::DefenderError::Io(e))?;
+        .map_err(crate::core::DefenderError::Io)?;
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 

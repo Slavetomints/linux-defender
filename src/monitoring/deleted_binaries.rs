@@ -31,7 +31,10 @@ pub fn run(ctx: &DefenderContext) -> Result {
         ));
     }
 
-    ctx.log_msg(&format!("[✓] Deleted-binary scan complete — {} found", count));
+    ctx.log_msg(&format!(
+        "[✓] Deleted-binary scan complete — {} found",
+        count
+    ));
     Ok(())
 }
 
@@ -69,6 +72,7 @@ pub fn scan() -> Vec<DeletedBinary> {
     results
 }
 
+/// Read the command line for `pid` from `/proc/<pid>/cmdline` as a space-separated string.
 fn read_cmdline(pid: u32) -> String {
     std::fs::read(format!("/proc/{}/cmdline", pid))
         .ok()

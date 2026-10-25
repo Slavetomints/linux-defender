@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 
 use crate::core::{DefenderContext, Finding, Result, Severity, Verdict};
 
+/// Path to the main sshd configuration file.
 const SSHD_CONFIG: &str = "/etc/ssh/sshd_config";
+/// Directory containing sshd drop-in configuration files.
 const SSHD_CONFIG_DIR: &str = "/etc/ssh/sshd_config.d";
 
 /// One parsed directive from an sshd_config file.
@@ -574,8 +576,8 @@ fn parse_directives(contents: &str) -> Vec<Directive> {
         }
 
         // Continuation line.
-        if raw_trim.ends_with('\\') {
-            continued.push_str(&raw_trim[..raw_trim.len() - 1]);
+        if let Some(cont) = raw_trim.strip_suffix('\\') {
+            continued.push_str(cont);
             continued.push(' ');
             continue;
         }

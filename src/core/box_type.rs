@@ -34,26 +34,63 @@ impl BoxType {
     pub fn services(self) -> &'static [ServiceConfig] {
         match self {
             Self::Web => &[
-                ServiceConfig { name: "HTTP",         port: 80  },
-                ServiceConfig { name: "HTTPS",        port: 443 },
-                ServiceConfig { name: "SSH",          port: 22  },
+                ServiceConfig {
+                    name: "HTTP",
+                    port: 80,
+                },
+                ServiceConfig {
+                    name: "HTTPS",
+                    port: 443,
+                },
+                ServiceConfig {
+                    name: "SSH",
+                    port: 22,
+                },
             ],
             Self::Mail => &[
-                ServiceConfig { name: "Postfix SMTP", port: 25  },
-                ServiceConfig { name: "Postfix Subm", port: 587 },
-                ServiceConfig { name: "Dovecot IMAP", port: 143 },
-                ServiceConfig { name: "Dovecot IMAPS",port: 993 },
-                ServiceConfig { name: "Roundcube",    port: 80  },
-                ServiceConfig { name: "SSH",          port: 22  },
+                ServiceConfig {
+                    name: "Postfix SMTP",
+                    port: 25,
+                },
+                ServiceConfig {
+                    name: "Postfix Subm",
+                    port: 587,
+                },
+                ServiceConfig {
+                    name: "Dovecot IMAP",
+                    port: 143,
+                },
+                ServiceConfig {
+                    name: "Dovecot IMAPS",
+                    port: 993,
+                },
+                ServiceConfig {
+                    name: "Roundcube",
+                    port: 80,
+                },
+                ServiceConfig {
+                    name: "SSH",
+                    port: 22,
+                },
             ],
             Self::Splunk => &[
-                ServiceConfig { name: "Splunk Web",  port: 8000 },
-                ServiceConfig { name: "Splunk Mgmt", port: 8089 },
-                ServiceConfig { name: "SSH",         port: 22   },
+                ServiceConfig {
+                    name: "Splunk Web",
+                    port: 8000,
+                },
+                ServiceConfig {
+                    name: "Splunk Mgmt",
+                    port: 8089,
+                },
+                ServiceConfig {
+                    name: "SSH",
+                    port: 22,
+                },
             ],
-            Self::General => &[
-                ServiceConfig { name: "SSH", port: 22 },
-            ],
+            Self::General => &[ServiceConfig {
+                name: "SSH",
+                port: 22,
+            }],
         }
     }
 

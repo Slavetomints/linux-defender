@@ -15,18 +15,26 @@ use crate::core::BoxType;
 
 use super::WizardAction;
 
+/// Path to the Splunk Universal Forwarder binary.
 const SPLUNK_BIN: &str = "/opt/splunkforwarder/bin/splunk";
+/// Path to the Splunk forwarder local configuration directory.
 const SPLUNK_LOCAL: &str = "/opt/splunkforwarder/etc/system/local";
 
+/// Competition box type used to select default Splunk monitored log paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SplunkBoxType {
+    /// Web server box.
     Web,
+    /// Mail server box.
     Mail,
+    /// Splunk indexer box.
     Splunk,
+    /// General workstation box.
     General,
 }
 
 impl SplunkBoxType {
+    /// Human-readable label for the box type.
     fn label(self) -> &'static str {
         match self {
             SplunkBoxType::Web => "web",
@@ -35,6 +43,7 @@ impl SplunkBoxType {
             SplunkBoxType::General => "general",
         }
     }
+    /// Map a `BoxType` to the corresponding `SplunkBoxType`.
     fn from_box_type(bt: BoxType) -> Self {
         match bt {
             BoxType::Web => SplunkBoxType::Web,
@@ -43,6 +52,7 @@ impl SplunkBoxType {
             BoxType::General => SplunkBoxType::General,
         }
     }
+    /// All box types in display order.
     const ALL: &'static [SplunkBoxType] = &[
         SplunkBoxType::Web,
         SplunkBoxType::Mail,
@@ -51,30 +61,50 @@ impl SplunkBoxType {
     ];
 }
 
+/// Wizard progress step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
+    /// Checking whether Splunk is already installed.
     CheckInstall,
+    /// Selecting the `.tgz` / `.deb` / `.rpm` package path.
     PackagePath,
+    /// Entering the indexer IP and port.
     IndexerConfig,
+    /// Selecting the competition box type.
     BoxTypeSelect,
+    /// Reviewing the configuration before execution.
     Summary,
+    /// Running the install/configure commands.
     Executing,
 }
 
 /// Splunk Universal Forwarder deployment wizard state.
 pub struct SplunkForwarderWizard {
+    /// Current wizard step.
     step: Step,
+    /// True if the Splunk forwarder binary is already present on disk.
     already_installed: bool,
+    /// Manually entered package path (used when no package is auto-detected).
     package_path: String,
+    /// Auto-detected `.tgz`/`.deb`/`.rpm` packages found on disk.
     found_packages: Vec<String>,
+    /// Index of the highlighted package in `found_packages`.
     pkg_cursor: usize,
+    /// Indexer IP address entered by the user.
     indexer_ip: String,
+    /// Indexer receiving port (default `"9997"`).
     indexer_port: String,
-    indexer_field: usize, // 0=ip, 1=port
+    /// Which indexer field is focused: 0 = IP, 1 = port.
+    indexer_field: usize,
+    /// Competition box type, determines which log paths are monitored.
     box_type: SplunkBoxType,
+    /// Index of the highlighted box type row.
     box_cursor: usize,
+    /// Shared log lines streamed from the background thread.
     exec_log: Option<Arc<Mutex<Vec<String>>>>,
+    /// Set to `true` by the background thread when execution finishes.
     exec_done: Arc<Mutex<bool>>,
+    /// Scroll offset for the execution log.
     log_scroll: usize,
 }
 
@@ -107,8 +137,7 @@ impl SplunkForwarderWizard {
 
     /// Render the wizard modal over `area`.
     pub fn render(&self, f: &mut Frame, area: Rect) {
-        let inner =
-            super::modal_popup(f, area, 75, 85, " Splunk Universal Forwarder Deployment ");
+        let inner = super::modal_popup(f, area, 75, 85, " Splunk Universal Forwarder Deployment ");
         match self.step {
             Step::CheckInstall => self.render_check(f, inner),
             Step::PackagePath => self.render_package(f, inner),
@@ -119,6 +148,7 @@ impl SplunkForwarderWizard {
         }
     }
 
+    /// Render step 1: display install-check result.
     fn render_check(&self, f: &mut Frame, area: Rect) {
         let rows = Layout::default()
             .direction(Direction::Vertical)
@@ -154,7 +184,10 @@ impl SplunkForwarderWizard {
                 ),
             ]),
             Line::from(""),
-            Line::from(Span::styled(next_step, Style::default().fg(Color::DarkGray))),
+            Line::from(Span::styled(
+                next_step,
+                Style::default().fg(Color::DarkGray),
+            )),
         ];
 
         f.render_widget(
@@ -173,6 +206,7 @@ impl SplunkForwarderWizard {
         );
     }
 
+    /// Render step 2: package selection or manual path input.
     fn render_package(&self, f: &mut Frame, area: Rect) {
         let rows = Layout::default()
             .direction(Direction::Vertical)
@@ -240,6 +274,7 @@ impl SplunkForwarderWizard {
         );
     }
 
+    /// Render step 3: indexer IP and port entry.
     fn render_indexer(&self, f: &mut Frame, area: Rect) {
         let rows = Layout::default()
             .direction(Direction::Vertical)
@@ -279,14 +314,13 @@ impl SplunkForwarderWizard {
         }
 
         f.render_widget(
-            Paragraph::new(
-                " Step 3/6 — Indexer  |  [Tab/↑↓] switch  [Enter] next  [Esc] cancel",
-            )
-            .style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(" Step 3/6 — Indexer  |  [Tab/↑↓] switch  [Enter] next  [Esc] cancel")
+                .style(Style::default().fg(Color::DarkGray)),
             rows[3],
         );
     }
 
+    /// Render step 4: box-type selection list.
     fn render_box_type(&self, f: &mut Frame, area: Rect) {
         let rows = Layout::default()
             .direction(Direction::Vertical)
@@ -328,6 +362,7 @@ impl SplunkForwarderWizard {
         );
     }
 
+    /// Render step 5: review configuration before execution.
     fn render_summary(&self, f: &mut Frame, area: Rect) {
         let rows = Layout::default()
             .direction(Direction::Vertical)
@@ -385,6 +420,7 @@ impl SplunkForwarderWizard {
         );
     }
 
+    /// Render step 6: live execution log.
     fn render_executing(&self, f: &mut Frame, area: Rect) {
         if let Some(ref log) = self.exec_log {
             let done = *self.exec_done.lock().unwrap();
@@ -416,8 +452,7 @@ impl SplunkForwarderWizard {
                 }
                 KeyCode::Down => {
                     if !self.found_packages.is_empty() {
-                        self.pkg_cursor =
-                            (self.pkg_cursor + 1) % self.found_packages.len();
+                        self.pkg_cursor = (self.pkg_cursor + 1) % self.found_packages.len();
                         self.package_path.clear();
                     }
                 }
@@ -444,7 +479,10 @@ impl SplunkForwarderWizard {
                 KeyCode::Char(c) => {
                     if self.indexer_field == 0 && self.indexer_ip.len() < 45 {
                         self.indexer_ip.push(c);
-                    } else if self.indexer_field == 1 && self.indexer_port.len() < 5 && c.is_ascii_digit() {
+                    } else if self.indexer_field == 1
+                        && self.indexer_port.len() < 5
+                        && c.is_ascii_digit()
+                    {
                         self.indexer_port.push(c);
                     }
                 }
@@ -504,6 +542,7 @@ impl SplunkForwarderWizard {
         WizardAction::Continue
     }
 
+    /// Return the package path to install from: selected auto-detected path or manually entered path.
     fn effective_package_path(&self) -> Option<String> {
         if !self.package_path.is_empty() {
             Some(self.package_path.clone())
@@ -512,6 +551,7 @@ impl SplunkForwarderWizard {
         }
     }
 
+    /// Spawn a background thread that installs/configures the Splunk forwarder and streams output.
     fn start_execution(&mut self) {
         let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let done = Arc::clone(&self.exec_done);
@@ -641,6 +681,7 @@ impl SplunkForwarderWizard {
     }
 }
 
+/// Build an `inputs.conf` content string with log monitors appropriate for `bt`.
 fn build_inputs_conf(bt: SplunkBoxType) -> String {
     let mut out = String::new();
     macro_rules! monitor {
@@ -691,10 +732,7 @@ fn build_inputs_conf(bt: SplunkBoxType) -> String {
                 "/opt/splunk/var/log/splunk/web_access.log",
                 "splunk_web_access"
             );
-            monitor!(
-                "/opt/splunk/var/log/splunk/metrics.log",
-                "splunk_metrics"
-            );
+            monitor!("/opt/splunk/var/log/splunk/metrics.log", "splunk_metrics");
             monitor!("/var/log/auth.log", "linux_secure");
         }
         SplunkBoxType::General => {
@@ -712,6 +750,7 @@ fn build_inputs_conf(bt: SplunkBoxType) -> String {
     out
 }
 
+/// Search common locations for Splunk `.tgz`, `.deb`, and `.rpm` packages.
 fn find_packages() -> Vec<String> {
     let search_dirs = ["/tmp", "/root", "/var/cache/apt/archives"];
     let mut found = Vec::new();

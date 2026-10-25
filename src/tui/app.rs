@@ -27,9 +27,12 @@ use super::dashboard::{
 };
 use super::logs::preserve;
 
+/// Which pane of the Scan tab currently has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScanFocus {
+    /// The module checklist on the left.
     Modules,
+    /// The findings list on the right.
     Findings,
 }
 
@@ -44,57 +47,232 @@ pub(crate) enum ScanInterval {
     OnDemand,
 }
 
-/// (id, display label, true = anti_persistence / false = monitoring, auto-scan interval)
+/// Registry of all scan modules: (id, display label, is_anti_persistence, auto-scan interval).
 const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
     // ── Anti-persistence ─────────────────────────────────────────────────
-    ("ssh_keys",        "SSH authorized_keys",      true,  ScanInterval::Continuous),
-    ("cron",            "Cron jobs",                true,  ScanInterval::Continuous),
-    ("at_jobs",         "AT job queue",             true,  ScanInterval::OnDemand),
-    ("users",           "User accounts",            true,  ScanInterval::OnDemand),
-    ("php_shells",      "PHP web shells",           true,  ScanInterval::Frequent),
-    ("suid",            "SUID binaries",            true,  ScanInterval::OnDemand),
-    ("capabilities",    "Binary capabilities",      true,  ScanInterval::OnDemand),
-    ("systemd",         "Systemd services",         true,  ScanInterval::Frequent),
-    ("kernel_modules",  "Kernel modules",           true,  ScanInterval::OnDemand),
-    ("ld_preload",      "LD_PRELOAD hijacking",     true,  ScanInterval::Frequent),
-    ("immutable",       "Immutable file flags",     true,  ScanInterval::OnDemand),
-    ("startup_scripts", "Startup scripts + skel",  true,  ScanInterval::Frequent),
-    ("rc_local",        "rc.local / rc.d scripts", true,  ScanInterval::OnDemand),
-    ("prompt_command",  "PROMPT_COMMAND backdoors", true,  ScanInterval::Frequent),
-    ("pam",             "PAM configuration",        true,  ScanInterval::OnDemand),
-    ("grub",            "GRUB bootloader",          true,  ScanInterval::OnDemand),
-    ("initramfs",       "initramfs integrity",      true,  ScanInterval::OnDemand),
-    ("logrotate",       "logrotate scripts",        true,  ScanInterval::OnDemand),
-    ("udev",            "udev rules",               true,  ScanInterval::OnDemand),
-    ("xdg_autostart",   "XDG autostart entries",   true,  ScanInterval::OnDemand),
-    ("ssh_config",      "sshd_config audit",        true,  ScanInterval::Frequent),
-    ("sudoers",         "sudoers audit",            true,  ScanInterval::Frequent),
-    ("cron_system",     "System cron dirs",         true,  ScanInterval::Continuous),
-    ("systemd_timers",  "Systemd timers",           true,  ScanInterval::Frequent),
-    ("shell_aliases",   "Shell alias backdoors",    true,  ScanInterval::Frequent),
-    ("polkit",          "polkit rules audit",       true,  ScanInterval::OnDemand),
+    (
+        "ssh_keys",
+        "SSH authorized_keys",
+        true,
+        ScanInterval::Continuous,
+    ),
+    ("cron", "Cron jobs", true, ScanInterval::Continuous),
+    ("at_jobs", "AT job queue", true, ScanInterval::OnDemand),
+    ("users", "User accounts", true, ScanInterval::OnDemand),
+    ("php_shells", "PHP web shells", true, ScanInterval::Frequent),
+    ("suid", "SUID binaries", true, ScanInterval::OnDemand),
+    (
+        "capabilities",
+        "Binary capabilities",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    ("systemd", "Systemd services", true, ScanInterval::Frequent),
+    (
+        "kernel_modules",
+        "Kernel modules",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "ld_preload",
+        "LD_PRELOAD hijacking",
+        true,
+        ScanInterval::Frequent,
+    ),
+    (
+        "immutable",
+        "Immutable file flags",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "startup_scripts",
+        "Startup scripts + skel",
+        true,
+        ScanInterval::Frequent,
+    ),
+    (
+        "rc_local",
+        "rc.local / rc.d scripts",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "prompt_command",
+        "PROMPT_COMMAND backdoors",
+        true,
+        ScanInterval::Frequent,
+    ),
+    ("pam", "PAM configuration", true, ScanInterval::OnDemand),
+    ("grub", "GRUB bootloader", true, ScanInterval::OnDemand),
+    (
+        "initramfs",
+        "initramfs integrity",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "logrotate",
+        "logrotate scripts",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    ("udev", "udev rules", true, ScanInterval::OnDemand),
+    (
+        "xdg_autostart",
+        "XDG autostart entries",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "ssh_config",
+        "sshd_config audit",
+        true,
+        ScanInterval::Frequent,
+    ),
+    ("sudoers", "sudoers audit", true, ScanInterval::Frequent),
+    (
+        "cron_system",
+        "System cron dirs",
+        true,
+        ScanInterval::Continuous,
+    ),
+    (
+        "systemd_timers",
+        "Systemd timers",
+        true,
+        ScanInterval::Frequent,
+    ),
+    (
+        "shell_aliases",
+        "Shell alias backdoors",
+        true,
+        ScanInterval::Frequent,
+    ),
+    ("polkit", "polkit rules audit", true, ScanInterval::OnDemand),
     // ── Monitoring ─────────────────────────────────────────────────────────
-    ("hidden_elf",          "Hidden ELF binaries",           false, ScanInterval::Frequent),
-    ("deleted_binaries",    "Deleted running binaries",      false, ScanInterval::Continuous),
-    ("port_map",            "Listening port map",            false, ScanInterval::Continuous),
-    ("suspicious_services", "Suspicious service units",      false, ScanInterval::OnDemand),
-    ("auth_log",            "Auth log analysis",             false, ScanInterval::Frequent),
-    ("process_tree",        "Process tree anomalies",        false, ScanInterval::Continuous),
-    ("recently_modified",   "Recently-modified binaries",    false, ScanInterval::Frequent),
-    ("world_writable",      "World-writable paths",          false, ScanInterval::Frequent),
-    ("outbound_connections","Outbound svc-acct connections", false, ScanInterval::Continuous),
-    ("fail2ban",            "Fail2ban status",               false, ScanInterval::Frequent),
-    ("ai_artifacts",        "AI-generated script tells",     false, ScanInterval::Frequent),
-    ("elf_disguise",        "ELF/script disguise check",     false, ScanInterval::Frequent),
-    ("perm_anomalies",      "Permission/ownership anomalies",false, ScanInterval::OnDemand),
-    ("attacker_tools",      "Attacker tool detection",       false, ScanInterval::Frequent),
-    ("c2_detection",        "C2/implant detection",          false, ScanInterval::Continuous),
-    ("rootkit_cross_check", "Rootkit PID/port cross-check",  false, ScanInterval::Continuous),
-    ("proc_maps",           "RWX anonymous memory maps",     false, ScanInterval::Frequent),
-    ("binary_integrity",    "Binary integrity baseline",     false, ScanInterval::OnDemand),
-    ("git_hooks",           "Malicious git hooks",           false, ScanInterval::Frequent),
-    ("webserver_config",    "Webserver config audit",        false, ScanInterval::Frequent),
-    ("bind_mounts",         "Bind/overlay mount detection",  false, ScanInterval::Continuous),
+    (
+        "hidden_elf",
+        "Hidden ELF binaries",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "deleted_binaries",
+        "Deleted running binaries",
+        false,
+        ScanInterval::Continuous,
+    ),
+    (
+        "port_map",
+        "Listening port map",
+        false,
+        ScanInterval::Continuous,
+    ),
+    (
+        "suspicious_services",
+        "Suspicious service units",
+        false,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "auth_log",
+        "Auth log analysis",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "process_tree",
+        "Process tree anomalies",
+        false,
+        ScanInterval::Continuous,
+    ),
+    (
+        "recently_modified",
+        "Recently-modified binaries",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "world_writable",
+        "World-writable paths",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "outbound_connections",
+        "Outbound svc-acct connections",
+        false,
+        ScanInterval::Continuous,
+    ),
+    ("fail2ban", "Fail2ban status", false, ScanInterval::Frequent),
+    (
+        "ai_artifacts",
+        "AI-generated script tells",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "elf_disguise",
+        "ELF/script disguise check",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "perm_anomalies",
+        "Permission/ownership anomalies",
+        false,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "attacker_tools",
+        "Attacker tool detection",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "c2_detection",
+        "C2/implant detection",
+        false,
+        ScanInterval::Continuous,
+    ),
+    (
+        "rootkit_cross_check",
+        "Rootkit PID/port cross-check",
+        false,
+        ScanInterval::Continuous,
+    ),
+    (
+        "proc_maps",
+        "RWX anonymous memory maps",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "binary_integrity",
+        "Binary integrity baseline",
+        false,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "git_hooks",
+        "Malicious git hooks",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "webserver_config",
+        "Webserver config audit",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "bind_mounts",
+        "Bind/overlay mount detection",
+        false,
+        ScanInterval::Continuous,
+    ),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +287,7 @@ pub enum Tab {
 }
 
 impl Tab {
+    /// All tabs in display order — used to render the tab bar.
     const ALL: &'static [Tab] = &[
         Tab::Dashboard,
         Tab::Logs,
@@ -119,6 +298,7 @@ impl Tab {
         Tab::Tools,
     ];
 
+    /// Human-readable name shown in the tab bar.
     fn label(self) -> &'static str {
         match self {
             Tab::Dashboard => "Dashboard",
@@ -131,6 +311,7 @@ impl Tab {
         }
     }
 
+    /// Map a `1`–`7` digit keypress to the corresponding tab, or `None` for anything else.
     fn from_digit(d: char) -> Option<Tab> {
         match d {
             '1' => Some(Tab::Dashboard),
@@ -161,6 +342,7 @@ pub struct App {
     pub scan_progress_tx: Sender<String>,
     pub scan_selected: Vec<bool>,
     pub scan_cursor: usize,
+    /// Which pane in the Scan tab currently has keyboard focus.
     pub(crate) scan_focus: ScanFocus,
     pub findings_cursor: usize,
     pub show_finding_detail: bool,
@@ -183,7 +365,9 @@ pub struct App {
     pub auto_scan_last_run: HashMap<&'static str, Instant>,
     /// Module IDs currently being scanned in a background auto-scan thread.
     pub auto_scan_running: HashSet<&'static str>,
+    /// Channel used by background auto-scan threads to signal completion.
     auto_scan_done_tx: Sender<&'static str>,
+    /// Receiver end of the auto-scan completion channel.
     auto_scan_done_rx: Receiver<&'static str>,
     /// Automatically restart scored services that go down.
     pub watchdog_enabled: bool,
@@ -198,6 +382,7 @@ pub struct App {
 }
 
 impl App {
+    /// Construct a new [`App`] with the given box type and channel endpoints.
     fn new(
         box_type: BoxType,
         log_dashboard: LogDash,
@@ -249,12 +434,15 @@ impl App {
         }
     }
 
+    /// Process all pending channel messages and trigger periodic service/session polling.
     fn tick(&mut self) {
         while let Ok(f) = self.finding_rx.try_recv() {
             let is_dup = self.findings.iter().rev().take(50).any(|existing| {
                 existing.module == f.module
                     && existing.summary == f.summary
-                    && existing.timestamp.signed_duration_since(f.timestamp)
+                    && existing
+                        .timestamp
+                        .signed_duration_since(f.timestamp)
                         .num_seconds()
                         .abs()
                         < 120
@@ -291,7 +479,9 @@ impl App {
             self.last_service_check = Instant::now();
             // Watchdog: automatically restart scored services that have gone down.
             if self.watchdog_enabled {
-                let down: Vec<&'static str> = self.services.iter()
+                let down: Vec<&'static str> = self
+                    .services
+                    .iter()
                     .filter_map(|&(name, _port, up)| if !up { Some(name) } else { None })
                     .collect();
                 for name in down {
@@ -316,13 +506,14 @@ impl App {
         for (id, _, is_ap, interval) in SCAN_MODULES {
             let threshold = match interval {
                 ScanInterval::Continuous => Duration::from_secs(30),
-                ScanInterval::Frequent   => Duration::from_secs(300),
-                ScanInterval::OnDemand   => continue,
+                ScanInterval::Frequent => Duration::from_secs(300),
+                ScanInterval::OnDemand => continue,
             };
             if self.auto_scan_running.contains(id) {
                 continue;
             }
-            let due = self.auto_scan_last_run
+            let due = self
+                .auto_scan_last_run
                 .get(id)
                 .map(|t| t.elapsed() >= threshold)
                 .unwrap_or(true);
@@ -332,10 +523,10 @@ impl App {
             self.auto_scan_last_run.insert(id, Instant::now());
             self.auto_scan_running.insert(id);
 
-            let finding_tx   = self.finding_tx.clone();
-            let done_tx      = self.auto_scan_done_tx.clone();
+            let finding_tx = self.finding_tx.clone();
+            let done_tx = self.auto_scan_done_tx.clone();
             let id_str: &'static str = id;
-            let is_ap        = *is_ap;
+            let is_ap = *is_ap;
 
             std::thread::spawn(move || {
                 let report = PathBuf::from("/tmp/defender-autoscan.log");
@@ -351,6 +542,7 @@ impl App {
         }
     }
 
+    /// Spawn a background thread that runs every selected scan module in sequence.
     fn start_scan(&mut self) {
         if self.scan_running {
             return;
@@ -401,23 +593,36 @@ impl App {
 
         let path = if nix::unistd::geteuid().is_root() {
             let dir = std::path::Path::new("/etc/linux-defender/reports");
-            std::fs::create_dir_all(dir)
-                .map_err(|e| format!("mkdir failed: {}", e))?;
+            std::fs::create_dir_all(dir).map_err(|e| format!("mkdir failed: {}", e))?;
             dir.join(format!("{}.txt", ts))
         } else {
             std::path::PathBuf::from(format!("/tmp/defender-report-{}.txt", ts))
         };
 
-        let crit = self.findings.iter().filter(|f| !f.resolved && f.severity == Severity::Critical).count();
-        let high = self.findings.iter().filter(|f| !f.resolved && f.severity == Severity::High).count();
-        let med  = self.findings.iter().filter(|f| !f.resolved && f.severity == Severity::Medium).count();
+        let crit = self
+            .findings
+            .iter()
+            .filter(|f| !f.resolved && f.severity == Severity::Critical)
+            .count();
+        let high = self
+            .findings
+            .iter()
+            .filter(|f| !f.resolved && f.severity == Severity::High)
+            .count();
+        let med = self
+            .findings
+            .iter()
+            .filter(|f| !f.resolved && f.severity == Severity::Medium)
+            .count();
 
         let mut report = format!(
             "LINUX-DEFENDER IR REPORT\nGenerated: {}\nBox type: {}\nTotal findings: {} (Critical: {}, High: {}, Medium: {})\n{}\n\n",
             now.format("%Y-%m-%d %H:%M:%S"),
             self.box_type.label(),
             self.findings.len(),
-            crit, high, med,
+            crit,
+            high,
+            med,
             "=".repeat(40),
         );
 
@@ -470,6 +675,7 @@ pub fn run() -> anyhow::Result<()> {
     result
 }
 
+/// Inner event loop — runs after the terminal is already in raw/alternate-screen mode.
 fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> {
     let detected = detect_box_type();
     let box_type = select_box_type(terminal, detected)?;
@@ -531,8 +737,7 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                             app.active_wizard = None;
                         }
                         _ => {
-                            if let crate::wizards::WizardAction::Close =
-                                wizard.handle_key(key.code)
+                            if let crate::wizards::WizardAction::Close = wizard.handle_key(key.code)
                             {
                                 app.active_wizard = None;
                             }
@@ -559,7 +764,8 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                             use crate::tui::tools_view::SelectedTool;
                             let total = SelectedTool::total();
                             if total > 0 {
-                                app.tools_cursor = app.tools_cursor.checked_sub(1).unwrap_or(total - 1);
+                                app.tools_cursor =
+                                    app.tools_cursor.checked_sub(1).unwrap_or(total - 1);
                             }
                         }
                         Tab::Logs => {
@@ -627,15 +833,13 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                 if let Some(action) = finding.actions.first().cloned() {
                                     match execute_action(&action) {
                                         Ok(msg) => {
-                                            app.action_feedback =
-                                                Some(format!("Done: {}", msg));
+                                            app.action_feedback = Some(format!("Done: {}", msg));
                                             if let Some(f) = app.findings.get_mut(cursor) {
                                                 f.resolved = true;
                                             }
                                         }
                                         Err(e) => {
-                                            app.action_feedback =
-                                                Some(format!("Failed: {}", e));
+                                            app.action_feedback = Some(format!("Failed: {}", e));
                                         }
                                     }
                                 }
@@ -689,15 +893,21 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                     KeyCode::Char('e') => {
                         if app.tab == Tab::Scan && app.scan_focus == ScanFocus::Findings {
                             match app.export_ir_report() {
-                                Ok(path) => app.action_feedback = Some(format!("Exported: {}", path)),
-                                Err(e)   => app.action_feedback = Some(format!("Export failed: {}", e)),
+                                Ok(path) => {
+                                    app.action_feedback = Some(format!("Exported: {}", path))
+                                }
+                                Err(e) => {
+                                    app.action_feedback = Some(format!("Export failed: {}", e))
+                                }
                             }
                         }
                     }
                     KeyCode::Char('d') => {
                         if app.tab == Tab::Tools {
                             use crate::tui::tools_view::SelectedTool;
-                            if let SelectedTool::Binary(_) = SelectedTool::from_cursor(app.tools_cursor) {
+                            if let SelectedTool::Binary(_) =
+                                SelectedTool::from_cursor(app.tools_cursor)
+                            {
                                 use crate::tools::catalog::NFTBUILD;
                                 app.download_status = Some("nftbuild: downloading…".into());
                                 let tool = NFTBUILD.clone();
@@ -760,11 +970,9 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                             app.log_dashboard.prev_pane();
                         }
                     }
-                    KeyCode::Char('p') => {
-                        if app.tab == Tab::Logs {
-                            if let Some(p) = app.log_dashboard.active_pane_mut() {
-                                p.paused = !p.paused;
-                            }
+                    KeyCode::Char('p') if app.tab == Tab::Logs => {
+                        if let Some(p) = app.log_dashboard.active_pane_mut() {
+                            p.paused = !p.paused;
                         }
                     }
                     _ => {}
@@ -776,6 +984,7 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
     Ok(())
 }
 
+/// Top-level render function: draws the tab bar, active tab content, and status bar.
 fn render(f: &mut ratatui::Frame, app: &mut App) {
     let size = f.area();
 
@@ -834,6 +1043,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
     render_statusbar(f, rows[2], app);
 }
 
+/// Render the one-line tab bar at the top of the terminal.
 fn render_tabbar(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -884,6 +1094,7 @@ fn render_tabbar(
     );
 }
 
+/// Render the one-line status bar at the bottom of the terminal.
 fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let down = app.services.iter().filter(|(_, _, up)| !up).count();
     let down_str = if down > 0 {
@@ -913,14 +1124,20 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
             .is_some_and(|p| p.paused);
     let pause_str = if paused { "  [PAUSED]" } else { "" };
 
-    let watchdog_str = if app.watchdog_enabled { "  WATCHDOG" } else { "" };
+    let watchdog_str = if app.watchdog_enabled {
+        "  WATCHDOG"
+    } else {
+        ""
+    };
 
     let hint = match app.tab {
         Tab::Dashboard => "  [w] watchdog  [u] users",
         Tab::Logs => "  [Tab] pane  [p] pause  [↑↓] scroll",
         Tab::Scan if app.show_finding_detail => "  [x] execute  [Esc] back",
         Tab::Scan => match app.scan_focus {
-            ScanFocus::Modules => "  [Tab] → findings  [↑↓] move  [Space] toggle  [a] all  [s] scan  [w] auto",
+            ScanFocus::Modules => {
+                "  [Tab] → findings  [↑↓] move  [Space] toggle  [a] all  [s] scan  [w] auto"
+            }
             ScanFocus::Findings => "  [Tab] → modules  [↑↓] move  [Enter] detail  [e] export",
         },
         Tab::Tools => "  [↑↓] navigate   [d] download (binary)   [r] run selected tool/script",
@@ -946,6 +1163,7 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(text).style(style), area);
 }
 
+/// Render the Scan tab: module checklist on the left, findings list on the right.
 fn render_scan(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -972,13 +1190,17 @@ fn render_scan(f: &mut ratatui::Frame, area: Rect, app: &App) {
             let interval_tag = if app.auto_scan_enabled {
                 match interval {
                     ScanInterval::Continuous => " ●",
-                    ScanInterval::Frequent   => " ◑",
-                    ScanInterval::OnDemand   => "",
+                    ScanInterval::Frequent => " ◑",
+                    ScanInterval::OnDemand => "",
                 }
             } else {
                 ""
             };
-            let running_tag = if app.auto_scan_running.contains(id) { " ↻" } else { "" };
+            let running_tag = if app.auto_scan_running.contains(id) {
+                " ↻"
+            } else {
+                ""
+            };
             let line_style = if is_cursor {
                 Style::default()
                     .fg(Color::Yellow)
@@ -1006,7 +1228,12 @@ fn render_scan(f: &mut ratatui::Frame, area: Rect, app: &App) {
     };
 
     f.render_widget(
-        List::new(items).block(Block::default().title(title).borders(Borders::ALL).border_style(modules_border)),
+        List::new(items).block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(modules_border),
+        ),
         cols[0],
     );
 
@@ -1024,9 +1251,15 @@ fn render_scan(f: &mut ratatui::Frame, area: Rect, app: &App) {
         .border_style(findings_border);
 
     if app.findings.is_empty() {
-        let msg = if app.scan_running { "Scanning…" } else { "No findings — [Tab] to module list, [s] to start scan" };
+        let msg = if app.scan_running {
+            "Scanning…"
+        } else {
+            "No findings — [Tab] to module list, [s] to start scan"
+        };
         f.render_widget(
-            Paragraph::new(msg).block(findings_block).style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(msg)
+                .block(findings_block)
+                .style(Style::default().fg(Color::DarkGray)),
             cols[1],
         );
     } else {
@@ -1052,24 +1285,25 @@ fn render_scan(f: &mut ratatui::Frame, area: Rect, app: &App) {
                 let is_cursor = findings_focused && i == app.findings_cursor;
                 let resolved_mark = if finding.resolved { "✓ " } else { "" };
                 let base_style = if is_cursor {
-                    Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
                 let line = Line::from(vec![
                     Span::styled(
                         format!("[{}]", finding.severity.label()),
-                        base_style.fg(finding.severity.color()).add_modifier(Modifier::BOLD),
+                        base_style
+                            .fg(finding.severity.color())
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(" ", base_style),
                     Span::styled(
                         format!("{:<7}", finding.verdict.label()),
                         base_style.fg(finding.verdict.color()),
                     ),
-                    Span::styled(
-                        format!(" {}{}", resolved_mark, finding.summary),
-                        base_style,
-                    ),
+                    Span::styled(format!(" {}{}", resolved_mark, finding.summary), base_style),
                 ]);
                 ListItem::new(line)
             })
@@ -1086,6 +1320,7 @@ fn render_scan(f: &mut ratatui::Frame, area: Rect, app: &App) {
     }
 }
 
+/// Render a centred floating overlay with full details for the selected finding.
 fn render_finding_detail(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -1169,7 +1404,12 @@ fn render_finding_detail(
         )));
         for action in &finding.actions {
             lines.push(Line::from(vec![
-                Span::styled("  [x] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "  [x] ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(action.description()),
             ]));
         }
@@ -1178,15 +1418,33 @@ fn render_finding_detail(
 
     // Feedback from last execution
     if let Some(fb) = feedback {
-        let color = if fb.starts_with("Done") { Color::Green } else { Color::Red };
-        lines.push(Line::from(Span::styled(fb.to_string(), Style::default().fg(color))));
+        let color = if fb.starts_with("Done") {
+            Color::Green
+        } else {
+            Color::Red
+        };
+        lines.push(Line::from(Span::styled(
+            fb.to_string(),
+            Style::default().fg(color),
+        )));
         lines.push(Line::from(""));
     }
 
     // Footer
-    let resolved_str = if finding.resolved { "✓ Resolved" } else { "○ Not resolved" };
+    let resolved_str = if finding.resolved {
+        "✓ Resolved"
+    } else {
+        "○ Not resolved"
+    };
     lines.push(Line::from(vec![
-        Span::styled(resolved_str, Style::default().fg(if finding.resolved { Color::Green } else { Color::DarkGray })),
+        Span::styled(
+            resolved_str,
+            Style::default().fg(if finding.resolved {
+                Color::Green
+            } else {
+                Color::DarkGray
+            }),
+        ),
         Span::raw("    "),
         Span::styled("[Esc] back", Style::default().fg(Color::DarkGray)),
         if !finding.actions.is_empty() {
@@ -1201,7 +1459,9 @@ fn render_finding_detail(
 
 /// Very simple word-wrapper: splits on spaces, respects `width`.
 fn wrap_text(s: &str, width: usize) -> Vec<String> {
-    if width == 0 { return vec![s.to_string()]; }
+    if width == 0 {
+        return vec![s.to_string()];
+    }
     let mut lines = Vec::new();
     let mut current = String::new();
     for word in s.split_whitespace() {
@@ -1221,6 +1481,7 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// Render the Logs tab: tiled panes each showing a live-tailed log file.
 fn render_logs(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let pane_count = app.log_dashboard.panes.len();
     if pane_count == 0 {
@@ -1238,7 +1499,7 @@ fn render_logs(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
         1
     };
 
-    let rows_needed = (pane_count + cols_per_row - 1) / cols_per_row;
+    let rows_needed = pane_count.div_ceil(cols_per_row);
     let row_height = (area.height / rows_needed as u16).max(1);
 
     let row_constraints: Vec<Constraint> = (0..rows_needed)
@@ -1277,10 +1538,7 @@ fn render_logs(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 Style::default().fg(Color::Blue)
             };
 
-            let status = pane
-                .active_path
-                .as_deref()
-                .unwrap_or("(not found)");
+            let status = pane.active_path.as_deref().unwrap_or("(not found)");
             let paused_tag = if pane.paused { " [PAUSED]" } else { "" };
             let title = format!(" {} — {}{} ", pane.title, status, paused_tag);
 
@@ -1318,6 +1576,7 @@ fn render_logs(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     }
 }
 
+/// Render a "coming soon" placeholder for tabs that are not yet implemented.
 fn render_placeholder(f: &mut ratatui::Frame, area: Rect, name: &str) {
     let block = Block::default()
         .title(format!(" {} ", name))
@@ -1329,6 +1588,7 @@ fn render_placeholder(f: &mut ratatui::Frame, area: Rect, name: &str) {
     f.render_widget(p, area);
 }
 
+/// Render the "Add Authorized User" text-input modal overlay.
 fn render_user_input_modal(f: &mut ratatui::Frame, area: Rect, buf: &str) {
     let w = 44u16.min(area.width.saturating_sub(4));
     let h = 5u16;
@@ -1341,15 +1601,24 @@ fn render_user_input_modal(f: &mut ratatui::Frame, area: Rect, buf: &str) {
     let block = Block::default()
         .title(" Add Authorized User ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        .border_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
     let inner = block.inner(popup);
     f.render_widget(block, popup);
 
     let lines = vec![
-        Line::from(Span::styled("Username:", Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled(
+            "Username:",
+            Style::default().fg(Color::DarkGray),
+        )),
         Line::from(Span::styled(
             format!("> {}_", buf),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
             "[Enter] confirm  [Esc] cancel",
@@ -1359,6 +1628,7 @@ fn render_user_input_modal(f: &mut ratatui::Frame, area: Rect, buf: &str) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Run an interactive selection loop to pick the competition box type.
 fn select_box_type(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     detected: BoxType,
@@ -1392,6 +1662,7 @@ fn select_box_type(
     }
 }
 
+/// Draw the box-type selection overlay on `f`.
 fn draw_box_select(
     f: &mut ratatui::Frame,
     options: &[BoxType],
@@ -1445,9 +1716,17 @@ fn draw_box_select(
             let is_det = bt == detected;
             let prefix = if is_sel { "▶ " } else { "  " };
             let det_tag = if is_det { " (detected)" } else { "" };
-            let label = format!("{}{:<8}  {}{}", prefix, bt.label(), bt.description(), det_tag);
+            let label = format!(
+                "{}{:<8}  {}{}",
+                prefix,
+                bt.label(),
+                bt.description(),
+                det_tag
+            );
             let style = if is_sel {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };

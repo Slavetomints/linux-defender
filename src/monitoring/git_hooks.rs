@@ -115,10 +115,18 @@ fn find_repos(root: &Path, max_depth: u32) -> Vec<(PathBuf, PathBuf)> {
 // ── Hook analysis ─────────────────────────────────────────────────────────────
 
 /// Classification of a hook file.
+/// Result of inspecting a git hook file.
 #[derive(Debug)]
 enum HookVerdict {
+    /// Hook looks benign.
     Clean,
-    Suspicious { severity: Severity, reason: String },
+    /// Hook matched a suspicious pattern.
+    Suspicious {
+        /// Severity of the most serious pattern matched.
+        severity: Severity,
+        /// Human-readable description of what was found.
+        reason: String,
+    },
 }
 
 /// Inspect the content of a hook file and return the worst issue found, if any.
@@ -143,7 +151,7 @@ fn analyse_hook(content: &[u8], path: &Path) -> HookVerdict {
 
     for (pattern, sev) in SUSPICIOUS_STRINGS {
         if text.contains(pattern) {
-            let is_worse = worst_severity.map_or(true, |prev: Severity| *sev < prev); // Critical < High < Medium < Info
+            let is_worse = worst_severity.is_none_or(|prev: Severity| *sev < prev); // Critical < High < Medium < Info
             if is_worse {
                 worst_severity = Some(*sev);
                 worst_reason = format!(

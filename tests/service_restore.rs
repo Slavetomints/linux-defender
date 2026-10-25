@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{run_cli, stdout, stderr};
+use common::{run_cli, stderr, stdout};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -47,7 +47,13 @@ fn non_root_is_reported_gracefully() {
         return; // can't test this path as root
     }
     let dir = tempfile::TempDir::new().unwrap();
-    for flag in &["--postfix", "--dovecot", "--splunk", "--opencart", "--prestashop"] {
+    for flag in &[
+        "--postfix",
+        "--dovecot",
+        "--splunk",
+        "--opencart",
+        "--prestashop",
+    ] {
         let out = run_cli(dir.path(), &["service-restore", flag]);
         let combined = format!("{}{}", stdout(&out), stderr(&out));
         assert!(

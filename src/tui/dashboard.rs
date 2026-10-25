@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
-use crate::core::{BoxType, Finding, Severity, ServiceConfig};
+use crate::core::{BoxType, Finding, ServiceConfig, Severity};
 
 /// One logged-in user session from `who`.
 #[derive(Debug, Clone)]
@@ -23,6 +23,7 @@ pub struct SessionInfo {
 }
 
 /// Render the dashboard.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     f: &mut Frame,
     area: ratatui::layout::Rect,
@@ -76,6 +77,7 @@ pub fn render(
     }
 }
 
+/// Render the service health list panel.
 fn render_services(
     f: &mut Frame,
     area: ratatui::layout::Rect,
@@ -107,13 +109,16 @@ fn render_services(
     f.render_widget(list, area);
 }
 
-fn render_sessions(f: &mut Frame, area: ratatui::layout::Rect, sessions: &[SessionInfo], _authorized_users: &[String]) {
+/// Render the active login sessions panel.
+fn render_sessions(
+    f: &mut Frame,
+    area: ratatui::layout::Rect,
+    sessions: &[SessionInfo],
+    _authorized_users: &[String],
+) {
     let any_flagged = sessions.iter().any(|s| s.flagged);
     let border_color = if any_flagged { Color::Red } else { Color::Blue };
-    let title = format!(
-        " Active Sessions ({}) ",
-        sessions.len()
-    );
+    let title = format!(" Active Sessions ({}) ", sessions.len());
 
     let items: Vec<ListItem> = if sessions.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
@@ -133,7 +138,10 @@ fn render_sessions(f: &mut Frame, area: ratatui::layout::Rect, sessions: &[Sessi
                 let flag = if s.flagged { "⚠ " } else { "  " };
                 let flag_color = if s.flagged { Color::Red } else { Color::Green };
                 let line = Line::from(vec![
-                    Span::styled(flag, Style::default().fg(flag_color).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        flag,
+                        Style::default().fg(flag_color).add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(
                         format!("{:<10}", s.username),
                         Style::default().fg(if s.flagged { Color::Red } else { Color::White }),
@@ -144,12 +152,13 @@ fn render_sessions(f: &mut Frame, area: ratatui::layout::Rect, sessions: &[Sessi
                     ),
                     Span::styled(
                         format!(" {:>6}", dur),
-                        Style::default().fg(if s.duration_secs > 15 { Color::Yellow } else { Color::White }),
+                        Style::default().fg(if s.duration_secs > 15 {
+                            Color::Yellow
+                        } else {
+                            Color::White
+                        }),
                     ),
-                    Span::styled(
-                        format!(" {}", src),
-                        Style::default().fg(Color::Cyan),
-                    ),
+                    Span::styled(format!(" {}", src), Style::default().fg(Color::Cyan)),
                 ]);
                 ListItem::new(line)
             })
@@ -164,10 +173,20 @@ fn render_sessions(f: &mut Frame, area: ratatui::layout::Rect, sessions: &[Sessi
     f.render_widget(list, area);
 }
 
+/// Render the findings summary panel with severity counts.
 fn render_findings(f: &mut Frame, area: ratatui::layout::Rect, findings: &[Finding]) {
-    let crit  = findings.iter().filter(|f| f.severity == Severity::Critical).count();
-    let high  = findings.iter().filter(|f| f.severity == Severity::High).count();
-    let med   = findings.iter().filter(|f| f.severity == Severity::Medium).count();
+    let crit = findings
+        .iter()
+        .filter(|f| f.severity == Severity::Critical)
+        .count();
+    let high = findings
+        .iter()
+        .filter(|f| f.severity == Severity::High)
+        .count();
+    let med = findings
+        .iter()
+        .filter(|f| f.severity == Severity::Medium)
+        .count();
 
     let recent: Vec<&Finding> = findings.iter().rev().take(20).collect();
 
@@ -176,10 +195,16 @@ fn render_findings(f: &mut Frame, area: ratatui::layout::Rect, findings: &[Findi
     // Severity summary header
     if !findings.is_empty() {
         let summary = Line::from(vec![
-            Span::styled(format!(" ✖{} ", crit), Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(" ✖{} ", crit),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(format!("▲{} ", high), Style::default().fg(Color::LightRed)),
-            Span::styled(format!("◆{} ", med),  Style::default().fg(Color::Yellow)),
-            Span::styled(format!("({} total)", findings.len()), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("◆{} ", med), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("({} total)", findings.len()),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]);
         items.push(ListItem::new(summary));
     }
@@ -230,6 +255,7 @@ fn render_findings(f: &mut Frame, area: ratatui::layout::Rect, findings: &[Findi
     }
 }
 
+/// Render the system information panel (hostname, uptime, kernel).
 fn render_sysinfo(f: &mut Frame, area: ratatui::layout::Rect) {
     let hostname = std::fs::read_to_string("/etc/hostname")
         .unwrap_or_else(|_| "unknown".into())
@@ -278,6 +304,7 @@ fn render_sysinfo(f: &mut Frame, area: ratatui::layout::Rect) {
     f.render_widget(p, area);
 }
 
+/// Render the recent authentication events panel.
 fn render_auth_events(f: &mut Frame, area: ratatui::layout::Rect, events: &[String]) {
     let items: Vec<ListItem> = if events.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
@@ -288,16 +315,33 @@ fn render_auth_events(f: &mut Frame, area: ratatui::layout::Rect, events: &[Stri
         events
             .iter()
             .map(|line| {
-                let is_fail = line.contains("Failed") || line.contains("Invalid") || line.contains("BREAK-IN");
-                let is_ok   = line.contains("Accepted") || line.contains("session opened");
-                let color = if is_fail { Color::Red } else if is_ok { Color::Green } else { Color::White };
-                ListItem::new(Line::from(Span::styled(line.clone(), Style::default().fg(color))))
+                let is_fail = line.contains("Failed")
+                    || line.contains("Invalid")
+                    || line.contains("BREAK-IN");
+                let is_ok = line.contains("Accepted") || line.contains("session opened");
+                let color = if is_fail {
+                    Color::Red
+                } else if is_ok {
+                    Color::Green
+                } else {
+                    Color::White
+                };
+                ListItem::new(Line::from(Span::styled(
+                    line.clone(),
+                    Style::default().fg(color),
+                )))
             })
             .collect()
     };
 
-    let has_failures = events.iter().any(|l| l.contains("Failed") || l.contains("Invalid"));
-    let border_color = if has_failures { Color::Red } else { Color::Blue };
+    let has_failures = events
+        .iter()
+        .any(|l| l.contains("Failed") || l.contains("Invalid"));
+    let border_color = if has_failures {
+        Color::Red
+    } else {
+        Color::Blue
+    };
 
     let block = Block::default()
         .title(" Auth Events ")
@@ -307,15 +351,18 @@ fn render_auth_events(f: &mut Frame, area: ratatui::layout::Rect, events: &[Stri
     f.render_widget(list, area);
 }
 
+/// Render a preview of the active firewall (nftables) ruleset.
 fn render_firewall(f: &mut Frame, area: ratatui::layout::Rect, config: &str) {
     let preview_lines = 10usize;
     let lines: Vec<ratatui::text::Line> = config
         .lines()
         .take(preview_lines)
-        .map(|l| ratatui::text::Line::from(Span::styled(
-            l.to_string(),
-            Style::default().fg(Color::Cyan),
-        )))
+        .map(|l| {
+            ratatui::text::Line::from(Span::styled(
+                l.to_string(),
+                Style::default().fg(Color::Cyan),
+            ))
+        })
         .collect();
 
     let total = config.lines().count();
@@ -336,7 +383,10 @@ fn render_firewall(f: &mut Frame, area: ratatui::layout::Rect, config: &str) {
     let mut display = lines;
     if more > 0 {
         display.push(ratatui::text::Line::from(Span::styled(
-            format!("  … {} more lines — see /etc/nftables.conf for full ruleset", more),
+            format!(
+                "  … {} more lines — see /etc/nftables.conf for full ruleset",
+                more
+            ),
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -354,28 +404,35 @@ pub fn poll_services(configs: &'static [ServiceConfig]) -> Vec<(&'static str, u1
 
 /// Read currently logged-in sessions from `who`.
 pub fn poll_sessions(authorized_users: &[String]) -> Vec<SessionInfo> {
-    let Ok(out) = Command::new("who").output() else { return vec![] };
+    let Ok(out) = Command::new("who").output() else {
+        return vec![];
+    };
     let stdout = String::from_utf8_lossy(&out.stdout);
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    stdout.lines()
+    stdout
+        .lines()
         .filter_map(|line| parse_who_line(line, now_secs, authorized_users))
         .collect()
 }
 
+/// Parse one line of `who` output into a `SessionInfo`, returning `None` on parse failure.
 fn parse_who_line(line: &str, now_secs: u64, authorized_users: &[String]) -> Option<SessionInfo> {
     // Format: "user  tty  YYYY-MM-DD HH:MM  (source)"
     let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() < 4 { return None; }
+    if parts.len() < 4 {
+        return None;
+    }
 
     let username = parts[0].to_string();
-    let tty      = parts[1].to_string();
+    let tty = parts[1].to_string();
     let date_str = parts[2];
     let time_str = parts[3];
-    let source = parts.get(4)
+    let source = parts
+        .get(4)
         .map(|s| s.trim_matches(|c| c == '(' || c == ')').to_string())
         .unwrap_or_default();
 
@@ -389,7 +446,14 @@ fn parse_who_line(line: &str, now_secs: u64, authorized_users: &[String]) -> Opt
     let authorized = authorized_users.contains(&username);
     let flagged = if authorized { duration_secs > 15 } else { true };
 
-    Some(SessionInfo { username, tty, login_time: login_str, source, duration_secs, flagged })
+    Some(SessionInfo {
+        username,
+        tty,
+        login_time: login_str,
+        source,
+        duration_secs,
+        flagged,
+    })
 }
 
 /// Shell out to `date -d` to parse a login datetime into a Unix timestamp.
@@ -409,9 +473,18 @@ pub fn poll_auth_events() -> Vec<String> {
         .copied();
     let Some(path) = log_path else { return vec![] };
 
-    let Ok(contents) = std::fs::read_to_string(path) else { return vec![] };
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return vec![];
+    };
 
-    let keywords = ["Failed", "Accepted", "Invalid user", "session opened", "session closed", "BREAK-IN"];
+    let keywords = [
+        "Failed",
+        "Accepted",
+        "Invalid user",
+        "session opened",
+        "session closed",
+        "BREAK-IN",
+    ];
 
     let matching: Vec<&str> = contents
         .lines()
@@ -431,6 +504,7 @@ pub fn poll_auth_events() -> Vec<String> {
         .collect()
 }
 
+/// Format a duration in seconds as a human-readable string (e.g. `"2h 5m"`).
 fn format_duration(secs: u64) -> String {
     if secs < 60 {
         format!("{}s", secs)

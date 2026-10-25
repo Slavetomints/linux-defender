@@ -20,9 +20,13 @@ use crate::core::{
 
 /// Parsed fields from one `/etc/passwd` line.
 struct Account {
+    /// Login name.
     name: String,
+    /// Numeric user ID.
     uid: u32,
+    /// Home directory path.
     home: PathBuf,
+    /// Login shell path.
     shell: String,
     /// The raw line from `/etc/passwd`, used for evidence logging.
     raw_line: String,
@@ -48,7 +52,10 @@ pub fn run(ctx: &DefenderContext) -> Result {
     let accounts = parse_passwd()?;
 
     for acct in &accounts {
-        ctx.debug(&format!("Reviewing account {} (uid={})", acct.name, acct.uid));
+        ctx.debug(&format!(
+            "Reviewing account {} (uid={})",
+            acct.name, acct.uid
+        ));
 
         // Check for a second UID-0 account — always Critical.
         if acct.uid == 0 && acct.name != "root" {
@@ -76,13 +83,17 @@ pub fn run(ctx: &DefenderContext) -> Result {
     Ok(())
 }
 
+/// Emit a Critical finding for a non-root UID-0 account and attempt removal.
 fn emit_uid0_finding(ctx: &DefenderContext, acct: &Account) {
     // 1. Log the /etc/passwd entry as evidence before touching anything.
     ctx.log_evidence_line("/etc/passwd", &acct.raw_line);
 
     // 2. If /etc/shadow is readable, log the shadow entry too.
     if let Ok(shadow) = fs::read_to_string("/etc/shadow") {
-        if let Some(shadow_line) = shadow.lines().find(|l| l.split(':').next() == Some(&acct.name)) {
+        if let Some(shadow_line) = shadow
+            .lines()
+            .find(|l| l.split(':').next() == Some(&acct.name))
+        {
             ctx.log_evidence_line("/etc/shadow", shadow_line);
         }
     }
@@ -93,18 +104,28 @@ fn emit_uid0_finding(ctx: &DefenderContext, acct: &Account) {
 
     // 4. Verify: re-read /etc/passwd and check whether the entry is still there.
     let still_present = fs::read_to_string("/etc/passwd")
-        .map(|contents| contents.lines().any(|l| l.split(':').next() == Some(&acct.name)))
+        .map(|contents| {
+            contents
+                .lines()
+                .any(|l| l.split(':').next() == Some(&acct.name))
+        })
         .unwrap_or(false);
 
     // 5. Log proof.
-    ctx.log_msg(&format!("PROOF: {} still in /etc/passwd: {}", acct.name, still_present));
+    ctx.log_msg(&format!(
+        "PROOF: {} still in /etc/passwd: {}",
+        acct.name, still_present
+    ));
 
     // 6. Emit the finding with the required context fields.
     ctx.emit(
         Finding::new(
             Severity::Critical,
             "users",
-            format!("UID-0 account '{}' is not root — backdoor account", acct.name),
+            format!(
+                "UID-0 account '{}' is not root — backdoor account",
+                acct.name
+            ),
             format!(
                 "Account '{}' has UID 0, granting full root privileges without being the \
                  canonical root account. This is a textbook red-team persistence technique.",
@@ -130,6 +151,7 @@ fn emit_uid0_finding(ctx: &DefenderContext, acct: &Account) {
     );
 }
 
+/// Emit a TUI finding for a normal (non-UID-0) account, rated by risk flags.
 fn emit_account_finding(
     ctx: &DefenderContext,
     acct: &Account,
@@ -154,7 +176,10 @@ fn emit_account_finding(
         severity,
         "users",
         summary,
-        format!("account: {}\nuid: {}\nshell: {}", acct.name, acct.uid, acct.shell),
+        format!(
+            "account: {}\nuid: {}\nshell: {}",
+            acct.name, acct.uid, acct.shell
+        ),
     )
     .with_context("account", acct.name.clone())
     .with_context("uid", acct.uid.to_string())
@@ -171,11 +196,15 @@ fn emit_account_finding(
         );
     }
 
-    finding = finding.with_action(Action::Manual(format!("usermod -s /usr/sbin/nologin {}", acct.name)));
+    finding = finding.with_action(Action::Manual(format!(
+        "usermod -s /usr/sbin/nologin {}",
+        acct.name
+    )));
 
     ctx.emit(finding);
 }
 
+/// Print a legacy (non-TUI) summary line for an account.
 fn print_account_legacy(
     ctx: &DefenderContext,
     acct: &Account,
@@ -205,6 +234,7 @@ fn print_account_legacy(
     }
 }
 
+/// Choose severity, verdict, and recommendation text based on account risk flags.
 fn risk_verdict(name: &str, nopasswd: bool, service_shell: bool) -> (Severity, Verdict, String) {
     if nopasswd {
         (
@@ -245,11 +275,7 @@ fn risk_verdict(name: &str, nopasswd: bool, service_shell: bool) -> (Severity, V
 fn is_nologin_shell(shell: &str) -> bool {
     matches!(
         shell,
-        "/usr/sbin/nologin"
-            | "/sbin/nologin"
-            | "/bin/false"
-            | "/usr/bin/false"
-            | "/dev/null"
+        "/usr/sbin/nologin" | "/sbin/nologin" | "/bin/false" | "/usr/bin/false" | "/dev/null"
     )
 }
 
@@ -261,6 +287,7 @@ fn has_nopasswd_sudo(name: &str) -> bool {
             .any(|path| check_sudoers_file(path, name))
 }
 
+/// Return true if `name` appears in the sudoers file at `path` with a NOPASSWD rule.
 fn check_sudoers_file(path: &str, name: &str) -> bool {
     let Ok(contents) = fs::read_to_string(path) else {
         return false;
@@ -271,6 +298,7 @@ fn check_sudoers_file(path: &str, name: &str) -> bool {
         .any(|l| l.contains(name) && l.contains("NOPASSWD"))
 }
 
+/// Return the paths of all files inside `/etc/sudoers.d`.
 fn read_sudoers_d() -> Vec<String> {
     let Ok(entries) = fs::read_dir("/etc/sudoers.d") else {
         return Vec::new();
@@ -282,7 +310,7 @@ fn read_sudoers_d() -> Vec<String> {
 }
 
 /// Number of public keys in `home/.ssh/authorized_keys`.
-fn count_ssh_keys(home: &PathBuf) -> usize {
+fn count_ssh_keys(home: &std::path::Path) -> usize {
     let path = home.join(".ssh").join("authorized_keys");
     let Ok(contents) = fs::read_to_string(path) else {
         return 0;
@@ -332,6 +360,21 @@ mod tests {
     }
 
     #[test]
+    fn all_nologin_variants_recognised() {
+        assert!(is_nologin_shell("/sbin/nologin"));
+        assert!(is_nologin_shell("/usr/bin/false"));
+        assert!(is_nologin_shell("/dev/null"));
+    }
+
+    #[test]
+    fn common_login_shells_not_nologin() {
+        assert!(!is_nologin_shell("/bin/sh"));
+        assert!(!is_nologin_shell("/usr/bin/fish"));
+        assert!(!is_nologin_shell("/usr/bin/tcsh"));
+        assert!(!is_nologin_shell(""));
+    }
+
+    #[test]
     fn passwd_parse_extracts_uid_and_shell() {
         let contents = "root:x:0:0:root:/root:/bin/bash\n\
                         nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n";
@@ -339,7 +382,9 @@ mod tests {
             .lines()
             .filter_map(|line| {
                 let f: Vec<&str> = line.split(':').collect();
-                if f.len() < 7 { return None; }
+                if f.len() < 7 {
+                    return None;
+                }
                 let uid: u32 = f[2].parse().ok()?;
                 Some(Account {
                     name: f[0].to_string(),
@@ -353,5 +398,88 @@ mod tests {
         assert_eq!(accounts[0].uid, 0);
         assert_eq!(accounts[0].shell, "/bin/bash");
         assert_eq!(accounts[1].uid, 65534);
+    }
+
+    #[test]
+    fn passwd_parse_skips_short_lines() {
+        // Lines with fewer than 7 fields must be skipped.
+        let contents = "bad_line:x:0\nroot:x:0:0:root:/root:/bin/bash\n";
+        let accounts: Vec<Account> = contents
+            .lines()
+            .filter_map(|line| {
+                let f: Vec<&str> = line.split(':').collect();
+                if f.len() < 7 {
+                    return None;
+                }
+                let uid: u32 = f[2].parse().ok()?;
+                Some(Account {
+                    name: f[0].to_string(),
+                    uid,
+                    home: PathBuf::from(f[5]),
+                    shell: f[6].to_string(),
+                    raw_line: line.to_string(),
+                })
+            })
+            .collect();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].name, "root");
+    }
+
+    #[test]
+    fn passwd_parse_skips_non_numeric_uid() {
+        let contents = "broken:x:notanumber:0::/home/broken:/bin/sh\nroot:x:0:0:root:/root:/bin/bash\n";
+        let accounts: Vec<Account> = contents
+            .lines()
+            .filter_map(|line| {
+                let f: Vec<&str> = line.split(':').collect();
+                if f.len() < 7 {
+                    return None;
+                }
+                let uid: u32 = f[2].parse().ok()?;
+                Some(Account {
+                    name: f[0].to_string(),
+                    uid,
+                    home: PathBuf::from(f[5]),
+                    shell: f[6].to_string(),
+                    raw_line: line.to_string(),
+                })
+            })
+            .collect();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].name, "root");
+    }
+
+    #[test]
+    fn risk_verdict_nopasswd_is_high() {
+        let (sev, verdict, msg) = risk_verdict("attacker", true, false);
+        assert_eq!(sev, Severity::High);
+        assert_eq!(verdict, Verdict::Remove);
+        assert!(msg.contains("attacker"));
+        assert!(msg.contains("NOPASSWD"));
+    }
+
+    #[test]
+    fn risk_verdict_service_shell_is_medium() {
+        let (sev, verdict, msg) = risk_verdict("www-data", false, true);
+        assert_eq!(sev, Severity::Medium);
+        assert_eq!(verdict, Verdict::Disable);
+        assert!(msg.contains("www-data"));
+        assert!(msg.contains("nologin"));
+    }
+
+    #[test]
+    fn risk_verdict_clean_account_is_info() {
+        let (sev, verdict, msg) = risk_verdict("alice", false, false);
+        assert_eq!(sev, Severity::Info);
+        assert_eq!(verdict, Verdict::Investigate);
+        assert!(msg.contains("alice"));
+    }
+
+    #[test]
+    fn risk_verdict_nopasswd_takes_priority_over_service_shell() {
+        // When both flags are set, nopasswd wins (first branch).
+        let (sev, verdict, _) = risk_verdict("svc", true, true);
+        assert_eq!(sev, Severity::High);
+        assert_eq!(verdict, Verdict::Remove);
     }
 }

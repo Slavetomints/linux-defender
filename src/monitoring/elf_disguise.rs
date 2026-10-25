@@ -14,7 +14,9 @@ use walkdir::WalkDir;
 
 use crate::core::{DefenderContext, Finding, Result, Severity, Verdict};
 
+/// Magic bytes at the start of every ELF file.
 const ELF_MAGIC: [u8; 4] = [0x7F, 0x45, 0x4C, 0x46];
+/// Magic bytes at the start of a POSIX shell script (`#!`).
 const SHEBANG: [u8; 2] = [0x23, 0x21]; // #!
 
 /// Directories where a staged ELF is almost always malicious.
@@ -22,8 +24,17 @@ const TEMP_DIRS: &[&str] = &["/tmp", "/dev/shm", "/var/tmp", "/run/shm"];
 
 /// Roots walked for checks 2, 3, and 4.
 const GENERAL_ROOTS: &[&str] = &[
-    "/tmp", "/dev/shm", "/var/tmp", "/run/shm",
-    "/home", "/root", "/etc", "/opt", "/var/www", "/srv", "/usr/local",
+    "/tmp",
+    "/dev/shm",
+    "/var/tmp",
+    "/run/shm",
+    "/home",
+    "/root",
+    "/etc",
+    "/opt",
+    "/var/www",
+    "/srv",
+    "/usr/local",
 ];
 
 /// Web roots — ELF here is unconditionally bad.
@@ -37,15 +48,13 @@ const WEB_ROOTS: &[&str] = &[
 
 /// Extensions that should never contain an ELF binary.
 const TEXT_EXTENSIONS: &[&str] = &[
-    "sh", "py", "pl", "rb", "txt", "log", "conf", "cfg", "ini",
-    "md", "html", "php", "json", "yaml", "yml",
+    "sh", "py", "pl", "rb", "txt", "log", "conf", "cfg", "ini", "md", "html", "php", "json",
+    "yaml", "yml",
 ];
 
 /// Extensions that should never contain a shell script.
 const BINARY_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "bmp",
-    "tar", "gz", "zip", "pdf",
-    "mp3", "mp4", "avi",
+    "png", "jpg", "jpeg", "gif", "bmp", "tar", "gz", "zip", "pdf", "mp3", "mp4", "avi",
 ];
 
 /// Read the first `N` bytes of a file; returns `None` on any error or short read.
@@ -56,19 +65,22 @@ fn read_magic(path: &Path) -> Option<[u8; 4]> {
     Some(buf)
 }
 
+/// Return true if `path` begins with the ELF magic bytes.
 fn is_elf(path: &Path) -> bool {
     read_magic(path).map(|m| m == ELF_MAGIC).unwrap_or(false)
 }
 
+/// Return true if `path` begins with the `#!` shebang sequence.
 fn is_shebang(path: &Path) -> bool {
     read_magic(path).map(|m| m[..2] == SHEBANG).unwrap_or(false)
 }
 
+/// Return the lowercased extension of `path`, or `None` if there is none.
 fn ext(path: &Path) -> Option<String> {
-    path.extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
+    path.extension().map(|e| e.to_string_lossy().to_lowercase())
 }
 
+/// Scan for disguised ELF binaries and scripts with misleading extensions.
 pub fn run(ctx: &DefenderContext) -> Result {
     ctx.log_msg("[+] Scanning for disguised ELF binaries and scripts...");
 
@@ -95,7 +107,10 @@ pub fn run(ctx: &DefenderContext) -> Result {
                         Severity::Critical,
                         "elf_disguise",
                         format!("ELF binary in temp dir: {}", path.display()),
-                        format!("path: {}\nreason: ELF executable staged in volatile directory", path.display()),
+                        format!(
+                            "path: {}\nreason: ELF executable staged in volatile directory",
+                            path.display()
+                        ),
                     )
                     .with_path(path.to_path_buf())
                     .with_context("path", path.display().to_string())
@@ -127,10 +142,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
             .filter(|e| e.file_type().is_file())
         {
             let path = entry.path();
-            let fname = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy();
+            let fname = path.file_name().unwrap_or_default().to_string_lossy();
 
             if fname.starts_with('.') && is_elf(path) {
                 // Skip if already caught by check 1
@@ -284,7 +296,8 @@ pub fn run(ctx: &DefenderContext) -> Result {
                         format!("ELF binary in web root: {}", path.display()),
                         format!(
                             "path: {}\nroot: {}\nreason: ELF executable in web-served directory",
-                            path.display(), root
+                            path.display(),
+                            root
                         ),
                     )
                     .with_path(path.to_path_buf())
@@ -381,5 +394,53 @@ mod tests {
         assert!(BINARY_EXTENSIONS.contains(&"png"));
         assert!(BINARY_EXTENSIONS.contains(&"tar"));
         assert!(BINARY_EXTENSIONS.contains(&"pdf"));
+    }
+
+    #[test]
+    fn ext_returns_none_for_no_extension() {
+        let p = Path::new("/tmp/Makefile");
+        assert_eq!(ext(p), None);
+    }
+
+    #[test]
+    fn ext_returns_last_component_only() {
+        // For "payload.tar.sh" the extension is "sh"
+        let p = Path::new("/tmp/payload.tar.sh");
+        assert_eq!(ext(p), Some("sh".to_string()));
+    }
+
+    #[test]
+    fn elf_in_text_extension_would_be_flagged() {
+        let f = write_bytes(&[0x7F, 0x45, 0x4C, 0x46, 0, 0]);
+        // Write to a path with .sh extension
+        let sh_path = std::env::temp_dir().join("test_elf.sh");
+        std::fs::copy(f.path(), &sh_path).unwrap();
+        let file_ext = ext(&sh_path).unwrap_or_default();
+        let is_text = TEXT_EXTENSIONS.iter().any(|&e| e == file_ext);
+        let has_elf = is_elf(&sh_path);
+        assert!(is_text && has_elf, "should be flagged as ELF in text ext");
+        std::fs::remove_file(sh_path).unwrap();
+    }
+
+    #[test]
+    fn shebang_in_png_would_be_flagged() {
+        let f = write_bytes(b"#!/bin/sh\nmalicious\n");
+        let png_path = std::env::temp_dir().join("test_script.png");
+        std::fs::copy(f.path(), &png_path).unwrap();
+        let file_ext = ext(&png_path).unwrap_or_default();
+        let is_binary = BINARY_EXTENSIONS.iter().any(|&e| e == file_ext);
+        let has_shebang = is_shebang(&png_path);
+        assert!(is_binary && has_shebang, "should be flagged as shebang in binary ext");
+        std::fs::remove_file(png_path).unwrap();
+    }
+
+    #[test]
+    fn web_roots_include_var_www() {
+        assert!(WEB_ROOTS.contains(&"/var/www"));
+    }
+
+    #[test]
+    fn temp_dirs_include_dev_shm() {
+        assert!(TEMP_DIRS.contains(&"/dev/shm"));
     }
 }

@@ -36,7 +36,11 @@ pub fn run(ctx: &DefenderContext) -> Result {
         return Ok(());
     }
 
-    println!("[+] Reinstalling {} ({})...", packages.join(" "), distro.name());
+    println!(
+        "[+] Reinstalling {} ({})...",
+        packages.join(" "),
+        distro.name()
+    );
     let output = distro
         .reinstall_cmd(packages)
         .output()

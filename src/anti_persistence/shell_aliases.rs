@@ -18,11 +18,11 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::core::scan::{effective_line, suspicious_matches};
 use crate::core::{
     DefenderContext, DefenderError, Finding, Result, Severity, Verdict, collect_accounts,
     require_root,
 };
-use crate::core::scan::{effective_line, suspicious_matches};
 
 /// System-wide files that may contain `alias` definitions.
 const SYSTEM_ALIAS_FILES: &[&str] = &[
@@ -52,20 +52,32 @@ const SECURITY_COMMANDS: &[&str] = &["sudo", "su", "passwd", "ssh", "scp"];
 /// Commands defenders and operators depend on during incident response.
 /// Overriding these warrants a Medium finding when the content looks clean.
 const COMMON_COMMANDS: &[&str] = &[
-    "git", "python", "python3", "pip", "apt", "yum", "dnf", "systemctl",
-    "iptables", "nft", "chmod", "chown", "rm", "mv", "cp", "ls", "ps",
-    "netstat", "ss", "id", "whoami",
+    "git",
+    "python",
+    "python3",
+    "pip",
+    "apt",
+    "yum",
+    "dnf",
+    "systemctl",
+    "iptables",
+    "nft",
+    "chmod",
+    "chown",
+    "rm",
+    "mv",
+    "cp",
+    "ls",
+    "ps",
+    "netstat",
+    "ss",
+    "id",
+    "whoami",
 ];
 
 /// Extra patterns relevant in alias command bodies but not caught by the shared
 /// scanner (which focuses on shell-expansion and exec patterns).
-const ALIAS_EXTRA: &[&str] = &[
-    "/tmp/",
-    "/dev/shm/",
-    "nc ",
-    "mkfifo",
-    "exec ",
-];
+const ALIAS_EXTRA: &[&str] = &["/tmp/", "/dev/shm/", "nc ", "mkfifo", "exec "];
 
 /// Scan system-wide and per-user shell config files for malicious aliases.
 pub fn run(ctx: &DefenderContext) -> Result {
@@ -114,6 +126,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
 // ── Per-file scanner ──────────────────────────────────────────────────────────
 
+/// Scan a single shell dotfile for suspicious alias definitions.
 fn scan_file_for_aliases(ctx: &DefenderContext, path: &Path) {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return;
@@ -135,10 +148,7 @@ fn scan_file_for_aliases(ctx: &DefenderContext, path: &Path) {
         };
 
         // The command value is everything after the first '='.
-        let command_part = line
-            .find('=')
-            .map(|p| &line[p + 1..])
-            .unwrap_or("");
+        let command_part = line.find('=').map(|p| &line[p + 1..]).unwrap_or("");
 
         let (severity, reason) = classify_alias(&alias_name, line, command_part);
 
@@ -181,7 +191,11 @@ fn scan_file_for_aliases(ctx: &DefenderContext, path: &Path) {
             .with_context("reason", reason.clone())
             .with_context("removed", removed.to_string())
             .with_verdict(
-                if removed { Verdict::Remove } else { Verdict::Investigate },
+                if removed {
+                    Verdict::Remove
+                } else {
+                    Verdict::Investigate
+                },
                 if removed {
                     format!(
                         "The malicious alias definition for '{}' was automatically removed \
@@ -242,10 +256,7 @@ fn classify_alias(name: &str, line: &str, command_part: &str) -> (Option<Severit
     if is_common_command(name) {
         return (
             Some(Severity::Medium),
-            format!(
-                "alias overrides common command '{}': {}",
-                name, line
-            ),
+            format!("alias overrides common command '{}': {}", name, line),
         );
     }
 
@@ -262,10 +273,12 @@ pub fn parse_alias_name(line: &str) -> Option<&str> {
     Some(rest[..eq_pos].trim())
 }
 
+/// Returns true if `name` is a security-critical command that should not be aliased.
 pub fn is_security_command(name: &str) -> bool {
     SECURITY_COMMANDS.contains(&name)
 }
 
+/// Returns true if `name` is a common system command that should not be aliased.
 pub fn is_common_command(name: &str) -> bool {
     COMMON_COMMANDS.contains(&name)
 }
@@ -281,13 +294,19 @@ mod tests {
     #[test]
     fn parse_simple_alias() {
         assert_eq!(parse_alias_name("alias ll='ls -la'"), Some("ll"));
-        assert_eq!(parse_alias_name("alias grep='grep --color=auto'"), Some("grep"));
+        assert_eq!(
+            parse_alias_name("alias grep='grep --color=auto'"),
+            Some("grep")
+        );
     }
 
     #[test]
     fn parse_alias_security_command() {
         assert_eq!(parse_alias_name("alias sudo='sudo -E bash'"), Some("sudo"));
-        assert_eq!(parse_alias_name("alias ssh='ssh -o StrictHostKeyChecking=no'"), Some("ssh"));
+        assert_eq!(
+            parse_alias_name("alias ssh='ssh -o StrictHostKeyChecking=no'"),
+            Some("ssh")
+        );
     }
 
     #[test]

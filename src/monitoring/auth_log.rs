@@ -11,6 +11,7 @@ use chrono::Local;
 
 use crate::core::{Action, DefenderContext, Finding, Result, Severity, Verdict};
 
+/// Candidate paths for the authentication log file, tried in order.
 const AUTH_LOG_CANDIDATES: &[&str] = &[
     "/var/log/auth.log",
     "/var/log/secure",
@@ -24,17 +25,26 @@ const BRUTE_FORCE_THRESHOLD: usize = 10;
 /// credential-stuffing success — flag it Critical regardless of the overall count.
 const STUFF_FAIL_THRESHOLD: usize = 3;
 
+/// One parsed authentication event from the auth log.
 struct AuthEvent {
+    /// IP address that initiated the authentication attempt.
     source_ip: String,
+    /// Whether the authentication succeeded.
     success: bool,
+    /// Username targeted by the authentication attempt.
     user: String,
+    /// Authentication method used.
     method: AuthMethod,
 }
 
+/// SSH authentication method.
 #[derive(Clone, PartialEq)]
 enum AuthMethod {
+    /// Password-based authentication.
     Password,
+    /// Public-key authentication.
     Publickey,
+    /// Authentication method not recognised in the log line.
     Unknown,
 }
 
@@ -46,35 +56,63 @@ fn parse_events(contents: &str) -> Vec<AuthEvent> {
         // Accepted password for <user> from <ip>
         if let Some(rest) = line.find("Accepted password for ").map(|i| &line[i + 22..]) {
             if let Some((user, ip)) = parse_for_from(rest) {
-                events.push(AuthEvent { source_ip: ip, success: true, user, method: AuthMethod::Password });
+                events.push(AuthEvent {
+                    source_ip: ip,
+                    success: true,
+                    user,
+                    method: AuthMethod::Password,
+                });
                 continue;
             }
         }
         // Accepted publickey for <user> from <ip>
-        if let Some(rest) = line.find("Accepted publickey for ").map(|i| &line[i + 23..]) {
+        if let Some(rest) = line
+            .find("Accepted publickey for ")
+            .map(|i| &line[i + 23..])
+        {
             if let Some((user, ip)) = parse_for_from(rest) {
-                events.push(AuthEvent { source_ip: ip, success: true, user, method: AuthMethod::Publickey });
+                events.push(AuthEvent {
+                    source_ip: ip,
+                    success: true,
+                    user,
+                    method: AuthMethod::Publickey,
+                });
                 continue;
             }
         }
         // Failed password for <user> from <ip>
         if let Some(rest) = line.find("Failed password for ").map(|i| &line[i + 20..]) {
             if let Some((user, ip)) = parse_for_from(rest) {
-                events.push(AuthEvent { source_ip: ip, success: false, user, method: AuthMethod::Password });
+                events.push(AuthEvent {
+                    source_ip: ip,
+                    success: false,
+                    user,
+                    method: AuthMethod::Password,
+                });
                 continue;
             }
         }
         // Invalid user <user> from <ip>
         if let Some(rest) = line.find("Invalid user ").map(|i| &line[i + 13..]) {
             if let Some((user, ip)) = parse_user_from(rest) {
-                events.push(AuthEvent { source_ip: ip, success: false, user, method: AuthMethod::Unknown });
+                events.push(AuthEvent {
+                    source_ip: ip,
+                    success: false,
+                    user,
+                    method: AuthMethod::Unknown,
+                });
                 continue;
             }
         }
         // Connection closed by authenticating user <user> <ip> — often a probe
         if line.contains("Connection closed by authenticating user") {
             if let Some(ip) = extract_ip(line) {
-                events.push(AuthEvent { source_ip: ip, success: false, user: "unknown".into(), method: AuthMethod::Unknown });
+                events.push(AuthEvent {
+                    source_ip: ip,
+                    success: false,
+                    user: "unknown".into(),
+                    method: AuthMethod::Unknown,
+                });
             }
         }
     }
@@ -82,6 +120,7 @@ fn parse_events(contents: &str) -> Vec<AuthEvent> {
     events
 }
 
+/// Parse `"<user> from <ip>"` from a log fragment, returning `(user, ip)`.
 fn parse_for_from(s: &str) -> Option<(String, String)> {
     // "<user> from <ip>"
     let from_idx = s.find(" from ")?;
@@ -91,6 +130,7 @@ fn parse_for_from(s: &str) -> Option<(String, String)> {
     Some((user, ip))
 }
 
+/// Parse `"<user> from <ip>"` from a "Failed" log fragment, returning `(user, ip)`.
 fn parse_user_from(s: &str) -> Option<(String, String)> {
     // "<user> from <ip>"
     let from_idx = s.find(" from ")?;
@@ -99,6 +139,7 @@ fn parse_user_from(s: &str) -> Option<(String, String)> {
     Some((user, ip))
 }
 
+/// Extract the last IPv4 or IPv6 address token from a log line.
 fn extract_ip(line: &str) -> Option<String> {
     // Very simple: look for the last token that looks like an IPv4 address
     for token in line.split_whitespace().rev() {
@@ -159,7 +200,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
     }
 
     // Mark IPs that had failures before success
-    for (ip, _) in &success_users {
+    for ip in success_users.keys() {
         if fail_count.get(ip).copied().unwrap_or(0) >= STUFF_FAIL_THRESHOLD {
             ip_failed_first.insert(ip.clone(), true);
         }
@@ -176,11 +217,22 @@ pub fn run(ctx: &DefenderContext) -> Result {
     for (ip, count) in &brute_ips {
         let count = *count;
         let succeeded = success_users.contains_key(*ip);
-        let severity = if succeeded { Severity::Critical } else { Severity::High };
-        let verdict = if succeeded { Verdict::Investigate } else { Verdict::Info };
+        let severity = if succeeded {
+            Severity::Critical
+        } else {
+            Severity::High
+        };
+        let verdict = if succeeded {
+            Verdict::Investigate
+        } else {
+            Verdict::Info
+        };
 
         let summary = if succeeded {
-            format!("Brute force from {} — {} failures then LOGIN SUCCEEDED", ip, count)
+            format!(
+                "Brute force from {} — {} failures then LOGIN SUCCEEDED",
+                ip, count
+            )
         } else {
             format!("Brute force from {} — {} failed attempts", ip, count)
         };
@@ -220,14 +272,19 @@ pub fn run(ctx: &DefenderContext) -> Result {
     // Credential-stuffing successes from IPs below the brute threshold
     for (ip, users) in &success_users {
         let fails = fail_count.get(ip).copied().unwrap_or(0);
-        if fails >= STUFF_FAIL_THRESHOLD && fails < BRUTE_FORCE_THRESHOLD {
+        if (STUFF_FAIL_THRESHOLD..BRUTE_FORCE_THRESHOLD).contains(&fails) {
             ctx.emit(
                 Finding::new(
                     Severity::High,
                     "auth_log",
                     format!("Suspicious: {} failures then success from {}", fails, ip),
-                    format!("source_ip: {}\nfailed_before_success: {}\nlogged_in_as: {}\nlog: {}",
-                        ip, fails, users.join(", "), path),
+                    format!(
+                        "source_ip: {}\nfailed_before_success: {}\nlogged_in_as: {}\nlog: {}",
+                        ip,
+                        fails,
+                        users.join(", "),
+                        path
+                    ),
                 )
                 .with_context("source_ip", ip.clone())
                 .with_context("failed_before_success", fails.to_string())
@@ -318,7 +375,8 @@ Jan 10 12:00:06 host sshd[1234]: Accepted publickey for deploy from 192.168.1.1 
     #[test]
     fn detects_password_auth_success() {
         let events = parse_events(SAMPLE);
-        let pwd_success: Vec<_> = events.iter()
+        let pwd_success: Vec<_> = events
+            .iter()
             .filter(|e| e.success && e.method == AuthMethod::Password)
             .collect();
         assert_eq!(pwd_success.len(), 1);
@@ -328,10 +386,104 @@ Jan 10 12:00:06 host sshd[1234]: Accepted publickey for deploy from 192.168.1.1 
     #[test]
     fn publickey_auth_not_flagged_as_password() {
         let events = parse_events(SAMPLE);
-        let key_success: Vec<_> = events.iter()
+        let key_success: Vec<_> = events
+            .iter()
             .filter(|e| e.success && e.method == AuthMethod::Publickey)
             .collect();
         assert_eq!(key_success.len(), 1);
         assert_eq!(key_success[0].user, "deploy");
+    }
+
+    // ── parse_for_from ────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_for_from_basic() {
+        let (user, ip) = parse_for_from("root from 1.2.3.4 port 22 ssh2").unwrap();
+        assert_eq!(user, "root");
+        assert_eq!(ip, "1.2.3.4");
+    }
+
+    #[test]
+    fn parse_for_from_no_from_returns_none() {
+        assert!(parse_for_from("root 1.2.3.4").is_none());
+    }
+
+    #[test]
+    fn parse_for_from_invalid_user_with_spaces() {
+        // "invalid user bob from 5.5.5.5 port 22"
+        let (user, ip) = parse_for_from("invalid user bob from 5.5.5.5 port 22").unwrap();
+        assert_eq!(user, "invalid user bob");
+        assert_eq!(ip, "5.5.5.5");
+    }
+
+    // ── parse_user_from ───────────────────────────────────────────────────
+
+    #[test]
+    fn parse_user_from_basic() {
+        let (user, ip) = parse_user_from("baduser from 9.9.9.9 port 222").unwrap();
+        assert_eq!(user, "baduser");
+        assert_eq!(ip, "9.9.9.9");
+    }
+
+    #[test]
+    fn parse_user_from_missing_from_returns_none() {
+        assert!(parse_user_from("nobody 10.0.0.1").is_none());
+    }
+
+    // ── extract_ip ────────────────────────────────────────────────────────
+
+    #[test]
+    fn extract_ip_finds_ipv4() {
+        let line = "Connection closed by authenticating user alice 10.0.0.5 port 22";
+        let ip = extract_ip(line).unwrap();
+        assert_eq!(ip, "10.0.0.5");
+    }
+
+    #[test]
+    fn extract_ip_no_ip_returns_none() {
+        let line = "some log line with no IP address here";
+        assert!(extract_ip(line).is_none());
+    }
+
+    // ── Invalid-user lines parsed ─────────────────────────────────────────
+
+    #[test]
+    fn invalid_user_line_parsed_as_failure() {
+        let log = "Jan 1 00:00:00 host sshd[1]: Invalid user ghost from 3.3.3.3 port 22\n";
+        let events = parse_events(log);
+        assert_eq!(events.len(), 1);
+        assert!(!events[0].success);
+        assert_eq!(events[0].source_ip, "3.3.3.3");
+        assert_eq!(events[0].user, "ghost");
+    }
+
+    // ── Brute-force threshold constants ──────────────────────────────────
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn brute_force_threshold_at_least_ten() {
+        assert!(BRUTE_FORCE_THRESHOLD >= 10);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn stuff_threshold_below_brute_threshold() {
+        assert!(STUFF_FAIL_THRESHOLD < BRUTE_FORCE_THRESHOLD);
+    }
+
+    // ── Empty and edge input ──────────────────────────────────────────────
+
+    #[test]
+    fn empty_log_produces_no_events() {
+        let events = parse_events("");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn unrelated_log_lines_produce_no_events() {
+        let log = "Jan 1 00:00:00 host systemd[1]: Started OpenSSH Daemon.\n\
+                   Jan 1 00:00:01 host kernel: something else\n";
+        let events = parse_events(log);
+        assert!(events.is_empty());
     }
 }

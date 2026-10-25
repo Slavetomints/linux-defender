@@ -12,6 +12,7 @@ use walkdir::WalkDir;
 
 use crate::core::{DefenderContext, Finding, Result, Severity, Verdict};
 
+/// Standard binary directories walked when searching for recently-modified files.
 const SYSTEM_BIN_DIRS: &[&str] = &[
     "/bin",
     "/sbin",
@@ -23,14 +24,17 @@ const SYSTEM_BIN_DIRS: &[&str] = &[
 
 /// A binary file whose mtime is suspiciously recent.
 pub struct ModifiedBinary {
+    /// Absolute path to the binary.
     pub path: PathBuf,
+    /// Last-modified time of the binary.
     pub mtime: SystemTime,
 }
 
 /// Scan system binary directories for recently-modified files.
 pub fn run(ctx: &DefenderContext) -> Result {
     // Cutoff: competition start if known, otherwise 1 hour ago.
-    let cutoff = ctx.competition_start
+    let cutoff = ctx
+        .competition_start
         .unwrap_or_else(|| SystemTime::now() - Duration::from_secs(3600));
 
     ctx.log_msg(&format!(
@@ -74,6 +78,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
     Ok(())
 }
 
+/// Walk all [`SYSTEM_BIN_DIRS`] and return files whose mtime is after `cutoff`.
 fn scan_dirs(cutoff: SystemTime) -> Vec<ModifiedBinary> {
     let mut hits = Vec::new();
 
@@ -102,7 +107,7 @@ fn scan_dirs(cutoff: SystemTime) -> Vec<ModifiedBinary> {
     }
 
     // Most-recently-modified first.
-    hits.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    hits.sort_by_key(|h| core::cmp::Reverse(h.mtime));
     hits
 }
 

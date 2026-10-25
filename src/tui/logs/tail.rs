@@ -14,6 +14,7 @@ pub fn spawn_tail(path: impl Into<PathBuf>, tx: Sender<String>, preserve_path: O
         .ok();
 }
 
+/// Background loop that reads new lines from `path` and sends them over `tx`.
 fn tail_loop(path: &Path, tx: Sender<String>, preserve_path: Option<PathBuf>) {
     let mut file = match File::open(path) {
         Ok(f) => f,
@@ -30,7 +31,7 @@ fn tail_loop(path: &Path, tx: Sender<String>, preserve_path: Option<PathBuf>) {
             Ok(0) => {
                 std::thread::sleep(Duration::from_millis(200));
                 // detect log rotation: if our position is beyond current file size, reopen
-                if let Ok(pos) = reader.seek(SeekFrom::Current(0)) {
+                if let Ok(pos) = reader.stream_position() {
                     if let Ok(meta) = std::fs::metadata(path) {
                         if pos > meta.len() {
                             if let Ok(f) = File::open(path) {

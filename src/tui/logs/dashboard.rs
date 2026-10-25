@@ -25,7 +25,11 @@ impl LogDashboard {
             }
         }
 
-        Self { box_type, panes, active: 0 }
+        Self {
+            box_type,
+            panes,
+            active: 0,
+        }
     }
 
     pub fn active_pane_mut(&mut self) -> Option<&mut LogPane> {
@@ -53,6 +57,7 @@ impl LogDashboard {
     }
 }
 
+/// Return the log pane titles and their source paths for the given `box_type`.
 fn pane_configs(box_type: BoxType) -> Vec<(&'static str, PaneSource)> {
     match box_type {
         BoxType::Web => vec![

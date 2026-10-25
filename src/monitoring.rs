@@ -14,13 +14,13 @@ pub mod auth_log;
 pub mod binary_integrity;
 pub mod bind_mounts;
 pub mod c2_detection;
-pub mod elf_disguise;
 pub mod deleted_binaries;
+pub mod elf_disguise;
 pub mod fail2ban;
 pub mod git_hooks;
-pub mod perm_anomalies;
 pub mod hidden_elf;
 pub mod outbound_connections;
+pub mod perm_anomalies;
 pub mod port_map;
 pub mod proc_maps;
 pub mod process_tree;
@@ -35,7 +35,6 @@ pub mod world_writable;
 #[command(arg_required_else_help = true)]
 pub struct CliArgs {
     // ── Real detection modules ────────────────────────────────────────────
-
     /// Analyse auth.log / secure for brute-force and credential-stuffing
     #[arg(long)]
     pub auth_log_analysis: bool,
@@ -121,7 +120,6 @@ pub struct CliArgs {
     pub bind_mounts: bool,
 
     // ── Legacy stub flags (maintained for backwards compatibility) ────────
-
     /// Watch the web server access log (not yet implemented)
     #[arg(long)]
     pub access_log: bool,
@@ -236,27 +234,27 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
 /// Run a single named monitoring module by id. Used by the TUI scan tab.
 pub fn run_module(name: &str, ctx: &DefenderContext) -> Result {
     match name {
-        "auth_log"            => auth_log::run(ctx),
-        "port_map"            => port_map::run(ctx),
-        "hidden_elf"          => hidden_elf::run(ctx),
-        "deleted_binaries"    => deleted_binaries::run(ctx),
-        "process_tree"        => process_tree::run(ctx),
-        "recently_modified"   => recently_modified::run(ctx),
-        "suspicious_services"    => suspicious_services::run(ctx),
-        "world_writable"         => world_writable::run(ctx),
-        "outbound_connections"   => outbound_connections::run(ctx),
-        "fail2ban"               => fail2ban::run(ctx),
-        "ai_artifacts"           => ai_artifacts::run(ctx),
-        "elf_disguise"           => elf_disguise::run(ctx),
-        "perm_anomalies"         => perm_anomalies::run(ctx),
-        "attacker_tools"         => attacker_tools::run(ctx),
-        "c2_detection"           => c2_detection::run(ctx),
-        "rootkit_cross_check"    => rootkit_cross_check::run(ctx),
-        "proc_maps"              => proc_maps::run(ctx),
-        "binary_integrity"       => binary_integrity::run(ctx),
-        "git_hooks"              => git_hooks::run(ctx),
-        "webserver_config"       => webserver_config::run(ctx),
-        "bind_mounts"            => bind_mounts::run(ctx),
+        "auth_log" => auth_log::run(ctx),
+        "port_map" => port_map::run(ctx),
+        "hidden_elf" => hidden_elf::run(ctx),
+        "deleted_binaries" => deleted_binaries::run(ctx),
+        "process_tree" => process_tree::run(ctx),
+        "recently_modified" => recently_modified::run(ctx),
+        "suspicious_services" => suspicious_services::run(ctx),
+        "world_writable" => world_writable::run(ctx),
+        "outbound_connections" => outbound_connections::run(ctx),
+        "fail2ban" => fail2ban::run(ctx),
+        "ai_artifacts" => ai_artifacts::run(ctx),
+        "elf_disguise" => elf_disguise::run(ctx),
+        "perm_anomalies" => perm_anomalies::run(ctx),
+        "attacker_tools" => attacker_tools::run(ctx),
+        "c2_detection" => c2_detection::run(ctx),
+        "rootkit_cross_check" => rootkit_cross_check::run(ctx),
+        "proc_maps" => proc_maps::run(ctx),
+        "binary_integrity" => binary_integrity::run(ctx),
+        "git_hooks" => git_hooks::run(ctx),
+        "webserver_config" => webserver_config::run(ctx),
+        "bind_mounts" => bind_mounts::run(ctx),
         _ => Err(DefenderError::Command(format!(
             "unknown monitoring module: {}",
             name

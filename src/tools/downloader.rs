@@ -109,15 +109,19 @@ pub fn is_installed(name: &str) -> bool {
 /// Read the stored SHA256 for `name`, if any.
 pub fn stored_sha256(name: &str) -> Option<String> {
     let p = Path::new(HASH_DIR).join(format!("{}.sha256", name));
-    std::fs::read_to_string(p).ok().map(|s| s.trim().to_string())
+    std::fs::read_to_string(p)
+        .ok()
+        .map(|s| s.trim().to_string())
 }
 
+/// Compute a SHA-256 hex digest of `bytes`.
 fn hex_sha256(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
     format!("{:x}", h.finalize())
 }
 
+/// Fetch the bytes at `url` using `curl`, returning an error string on failure.
 fn fetch_bytes(url: &str) -> std::result::Result<Vec<u8>, String> {
     let curl = Command::new("curl")
         .args(["-fsSL", "--max-time", "30", "-o", "-", url])

@@ -46,7 +46,9 @@ impl ActiveWizard {
     pub fn new(idx: usize, box_type: BoxType) -> Option<Self> {
         match idx {
             0 => Some(ActiveWizard::Fail2Ban(fail2ban::Fail2BanWizard::new())),
-            1 => Some(ActiveWizard::Firewall(firewall::FirewallWizard::new(box_type))),
+            1 => Some(ActiveWizard::Firewall(firewall::FirewallWizard::new(
+                box_type,
+            ))),
             2 => Some(ActiveWizard::Ipv6(ipv6::Ipv6Wizard::new())),
             3 => Some(ActiveWizard::SplunkForwarder(
                 splunk_forwarder::SplunkForwarderWizard::new(box_type),
@@ -152,15 +154,9 @@ pub(crate) fn render_exec_log(
     drop(lines);
 
     let (title, border_style) = if done {
-        (
-            " Output (done) ",
-            Style::default().fg(Color::Green),
-        )
+        (" Output (done) ", Style::default().fg(Color::Green))
     } else {
-        (
-            " Output (running…) ",
-            Style::default().fg(Color::Yellow),
-        )
+        (" Output (running…) ", Style::default().fg(Color::Yellow))
     };
 
     f.render_widget(

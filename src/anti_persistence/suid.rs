@@ -62,6 +62,9 @@ pub fn run(ctx: &DefenderContext) -> Result {
     }
 
     ctx.debug(&format!("{} SUID binaries found", count));
-    ctx.log_msg(&format!("[+] SUID scan complete — {} binaries found", count));
+    ctx.log_msg(&format!(
+        "[+] SUID scan complete — {} binaries found",
+        count
+    ));
     Ok(())
 }

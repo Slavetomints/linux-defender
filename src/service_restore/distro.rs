@@ -30,11 +30,12 @@ pub enum Distro {
 impl Distro {
     /// Read `/etc/os-release` and return the best-fit family.
     pub fn detect() -> Result<Self> {
-        let text = fs::read_to_string("/etc/os-release").map_err(|e| {
-            DefenderError::Other(format!("cannot read /etc/os-release: {e}"))
-        })?;
+        let text = fs::read_to_string("/etc/os-release")
+            .map_err(|e| DefenderError::Other(format!("cannot read /etc/os-release: {e}")))?;
 
-        let id = os_release_field(&text, "ID").unwrap_or_default().to_lowercase();
+        let id = os_release_field(&text, "ID")
+            .unwrap_or_default()
+            .to_lowercase();
         let id_like = os_release_field(&text, "ID_LIKE")
             .unwrap_or_default()
             .to_lowercase();
@@ -254,7 +255,9 @@ mod tests {
     #[test]
     fn detects_debian_from_id_like() {
         let text = "ID=ubuntu\nID_LIKE=debian\n";
-        let id = os_release_field(text, "ID").unwrap_or_default().to_lowercase();
+        let id = os_release_field(text, "ID")
+            .unwrap_or_default()
+            .to_lowercase();
         let id_like = os_release_field(text, "ID_LIKE")
             .unwrap_or_default()
             .to_lowercase();

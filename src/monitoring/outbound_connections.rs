@@ -31,11 +31,16 @@ const EXPECTED_OUTBOUND_PORTS: &[u16] = &[
 /// TCP state 01 = ESTABLISHED.
 const TCP_ESTABLISHED: &str = "01";
 
+/// One established TCP connection read from `/proc/net/tcp[6]`.
 #[derive(Debug)]
 struct Conn {
+    /// Local port of this side of the connection.
     local_port: u16,
+    /// Remote IP address.
     remote_addr: IpAddr,
+    /// Remote port.
     remote_port: u16,
+    /// Socket inode used to map the connection back to a PID.
     inode: u64,
 }
 
@@ -59,22 +64,35 @@ fn parse_established(contents: &str, is_v6: bool) -> Vec<Conn> {
             parse_hex_addr_v4(fields[2])
         };
 
-        let Ok(inode) = fields[9].parse::<u64>() else { continue };
-        if inode == 0 { continue; }
+        let Ok(inode) = fields[9].parse::<u64>() else {
+            continue;
+        };
+        if inode == 0 {
+            continue;
+        }
 
         // Skip connections where remote is loopback — those are internal IPC.
-        if is_loopback(&remote_addr) { continue; }
+        if is_loopback(&remote_addr) {
+            continue;
+        }
 
-        out.push(Conn { local_port, remote_addr, remote_port, inode });
+        out.push(Conn {
+            local_port,
+            remote_addr,
+            remote_port,
+            inode,
+        });
     }
 
     out
 }
 
+/// Parse the port from a `<hex_ip>:<hex_port>` field in `/proc/net/tcp`.
 fn parse_hex_port(addr: &str) -> Option<u16> {
     u16::from_str_radix(addr.split(':').nth(1)?, 16).ok()
 }
 
+/// Decode a little-endian hex IPv4 address and port from `/proc/net/tcp`.
 fn parse_hex_addr_v4(addr: &str) -> (IpAddr, u16) {
     let mut parts = addr.splitn(2, ':');
     let ip_hex = parts.next().unwrap_or("00000000");
@@ -87,6 +105,7 @@ fn parse_hex_addr_v4(addr: &str) -> (IpAddr, u16) {
     (IpAddr::V4(ip), port)
 }
 
+/// Decode a little-endian hex IPv6 address and port from `/proc/net/tcp6`.
 fn parse_hex_addr_v6(addr: &str) -> (IpAddr, u16) {
     let mut parts = addr.splitn(2, ':');
     let zero_padding = "0".repeat(32);
@@ -111,6 +130,7 @@ fn parse_hex_addr_v6(addr: &str) -> (IpAddr, u16) {
     (IpAddr::V6(Ipv6Addr::from(octets)), port)
 }
 
+/// Return true if `addr` is a loopback address.
 fn is_loopback(addr: &IpAddr) -> bool {
     match addr {
         IpAddr::V4(a) => a.is_loopback(),
@@ -121,14 +141,22 @@ fn is_loopback(addr: &IpAddr) -> bool {
 /// Build inode → pid map from /proc/*/fd.
 fn inode_to_pid(target_inodes: &HashMap<u64, ()>) -> HashMap<u64, u32> {
     let mut result = HashMap::new();
-    let Ok(procs) = std::fs::read_dir("/proc") else { return result };
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return result;
+    };
 
     for entry in procs.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else { continue };
-        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else { continue };
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
+            continue;
+        };
 
         for fd in fds.flatten() {
-            let Ok(link) = std::fs::read_link(fd.path()) else { continue };
+            let Ok(link) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
             let s = link.to_string_lossy();
             if let Some(inode_str) = s.strip_prefix("socket:[").and_then(|s| s.strip_suffix(']')) {
                 if let Ok(inode) = inode_str.parse::<u64>() {
@@ -145,14 +173,20 @@ fn inode_to_pid(target_inodes: &HashMap<u64, ()>) -> HashMap<u64, u32> {
 /// Get UID and process name for a PID from /proc/<pid>/status.
 fn proc_uid_name(pid: u32) -> (u32, String) {
     let path = format!("/proc/{}/status", pid);
-    let Ok(contents) = std::fs::read_to_string(&path) else { return (u32::MAX, "unknown".into()) };
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return (u32::MAX, "unknown".into());
+    };
 
     let mut uid = u32::MAX;
     let mut name = String::from("unknown");
 
     for line in contents.lines() {
         if let Some(v) = line.strip_prefix("Uid:\t") {
-            uid = v.split_whitespace().next().and_then(|s| s.parse().ok()).unwrap_or(u32::MAX);
+            uid = v
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(u32::MAX);
         } else if let Some(v) = line.strip_prefix("Name:\t") {
             name = v.trim().to_string();
         }
@@ -165,24 +199,20 @@ fn uid_to_username(uid: u32) -> Option<String> {
     let contents = std::fs::read_to_string("/etc/passwd").ok()?;
     for line in contents.lines() {
         let fields: Vec<&str> = line.split(':').collect();
-        if fields.len() >= 3 {
-            if fields[2].parse::<u32>().ok() == Some(uid) {
-                return Some(fields[0].to_string());
-            }
+        if fields.len() >= 3 && fields[2].parse::<u32>().ok() == Some(uid) {
+            return Some(fields[0].to_string());
         }
     }
     None
 }
 
+/// Scan for outbound network connections initiated by service accounts.
 pub fn run(ctx: &DefenderContext) -> Result {
     ctx.log_msg("[+] Scanning for outbound connections from service accounts...");
 
     let mut conns: Vec<Conn> = Vec::new();
 
-    for (path, is_v6) in &[
-        ("/proc/net/tcp",  false),
-        ("/proc/net/tcp6", true),
-    ] {
+    for (path, is_v6) in &[("/proc/net/tcp", false), ("/proc/net/tcp6", true)] {
         if let Ok(contents) = std::fs::read_to_string(path) {
             conns.extend(parse_established(&contents, *is_v6));
         }
@@ -200,7 +230,9 @@ pub fn run(ctx: &DefenderContext) -> Result {
     let mut findings = 0;
 
     for conn in &conns {
-        let Some(&pid) = inode_pid.get(&conn.inode) else { continue };
+        let Some(&pid) = inode_pid.get(&conn.inode) else {
+            continue;
+        };
         let (uid, proc_name) = proc_uid_name(pid);
 
         // Only flag service accounts (non-root, UID < 1000)
@@ -213,8 +245,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
             continue;
         }
 
-        let username = uid_to_username(uid)
-            .unwrap_or_else(|| format!("uid:{}", uid));
+        let username = uid_to_username(uid).unwrap_or_else(|| format!("uid:{}", uid));
 
         findings += 1;
 

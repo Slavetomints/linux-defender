@@ -17,22 +17,16 @@ const EXPECTED_WRITABLE: &[&str] = &[
     "/var/tmp",
     "/dev/shm",
     "/run/shm",
-    "/var/crash",  // crash dumps
+    "/var/crash", // crash dumps
     "/var/metrics",
 ];
 
 /// Roots to walk when searching for unexpected world-writable paths.
 const SCAN_ROOTS: &[&str] = &[
-    "/etc",
-    "/bin",
-    "/sbin",
-    "/usr",
-    "/opt",
-    "/var/www",
-    "/srv",
-    "/home",
+    "/etc", "/bin", "/sbin", "/usr", "/opt", "/var/www", "/srv", "/home",
 ];
 
+/// Scan for world-writable files and directories that could be abused by attackers.
 pub fn run(ctx: &DefenderContext) -> Result {
     ctx.log_msg("[+] Scanning for world-writable files and directories...");
 
@@ -41,7 +35,11 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
     for path in &dirs {
         let is_root_owned = is_owned_by_root(path);
-        let severity = if is_root_owned { Severity::High } else { Severity::Medium };
+        let severity = if is_root_owned {
+            Severity::High
+        } else {
+            Severity::Medium
+        };
         ctx.emit(
             Finding::new(
                 severity,
@@ -69,7 +67,11 @@ pub fn run(ctx: &DefenderContext) -> Result {
     for path in &files {
         let mode = file_mode(path);
         let is_suid = mode & 0o4000 != 0;
-        let severity = if is_suid { Severity::Critical } else { Severity::High };
+        let severity = if is_suid {
+            Severity::Critical
+        } else {
+            Severity::High
+        };
 
         let summary = if is_suid {
             format!("World-writable SUID file: {}", path.display())
@@ -88,18 +90,27 @@ pub fn run(ctx: &DefenderContext) -> Result {
             format!(
                 "{} is world-writable. Anyone on the system can modify it. \
                  Restrict with: chmod o-w {}",
-                path.display(), path.display()
+                path.display(),
+                path.display()
             )
         };
 
         ctx.emit(
-            Finding::new(severity, "world_writable", summary,
-                format!("path: {}\nmode: {:04o}", path.display(), mode))
+            Finding::new(
+                severity,
+                "world_writable",
+                summary,
+                format!("path: {}\nmode: {:04o}", path.display(), mode),
+            )
             .with_path(path.clone())
             .with_context("path", path.display().to_string())
             .with_context("mode", format!("{:04o}", mode))
             .with_verdict(Verdict::Investigate, recommendation)
-            .with_action(Action::Manual(format!("chmod o-w {} && chmod -s {}", path.display(), path.display()))),
+            .with_action(Action::Manual(format!(
+                "chmod o-w {} && chmod -s {}",
+                path.display(),
+                path.display()
+            ))),
         );
     }
 
@@ -153,12 +164,12 @@ fn scan() -> (Vec<PathBuf>, Vec<PathBuf>) {
     (dirs, files)
 }
 
+/// Return the raw permission bits for `path`, or 0 if metadata is unavailable.
 fn file_mode(path: &Path) -> u32 {
-    path.metadata()
-        .map(|m| m.permissions().mode())
-        .unwrap_or(0)
+    path.metadata().map(|m| m.permissions().mode()).unwrap_or(0)
 }
 
+/// Return true if `path` is owned by root (UID 0).
 fn is_owned_by_root(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     path.metadata().map(|m| m.uid() == 0).unwrap_or(false)

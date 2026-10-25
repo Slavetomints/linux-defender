@@ -19,6 +19,7 @@ const SYSTEM_PREFIXES: &[&str] = &[
     "/etc/", "/bin/", "/sbin/", "/usr/", "/lib/", "/lib64/", "/boot/",
 ];
 
+/// Return true if `path` is a sensitive system directory that should not be bind-mounted over.
 fn is_system_path(path: &str) -> bool {
     // Exact matches for the directory itself (e.g. "/etc").
     let exact = ["/etc", "/bin", "/sbin", "/usr", "/lib", "/lib64", "/boot"];

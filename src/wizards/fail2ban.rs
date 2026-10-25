@@ -12,6 +12,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use super::WizardAction;
 
+/// Service id/description pairs the wizard lets the user protect with fail2ban.
 const SERVICES: &[(&str, &str)] = &[
     ("sshd", "SSH daemon"),
     ("apache2", "Apache HTTP server"),
@@ -21,25 +22,40 @@ const SERVICES: &[(&str, &str)] = &[
     ("vsftpd", "vsftpd FTP"),
 ];
 
+/// Wizard progress step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
+    /// Step 1: choose which services to protect.
     ServiceSelect,
+    /// Step 2: configure timing parameters (maxretry, bantime, findtime).
     TimingConfig,
+    /// Step 3: review the configuration before executing.
     Summary,
+    /// Step 4: running the deployment commands and streaming output.
     Executing,
 }
 
 /// fail2ban deployment wizard state.
 pub struct Fail2BanWizard {
+    /// Current wizard step.
     step: Step,
+    /// Selection state for each service in `SERVICES`.
     services: Vec<bool>,
+    /// Index of the highlighted service row.
     service_cursor: usize,
+    /// Maximum failed attempts before banning.
     maxretry: String,
+    /// Duration to keep an IP banned (seconds).
     bantime: String,
+    /// Window in which `maxretry` failures trigger a ban (seconds).
     findtime: String,
+    /// Index of the active timing field (0=maxretry, 1=bantime, 2=findtime).
     timing_cursor: usize,
+    /// Shared execution log lines streamed from the background thread.
     exec_log: Option<Arc<Mutex<Vec<String>>>>,
+    /// Set to `true` by the background thread when execution finishes.
     exec_done: Arc<Mutex<bool>>,
+    /// Scroll offset for the execution log.
     log_scroll: usize,
 }
 
@@ -61,7 +77,15 @@ impl Fail2BanWizard {
             log_scroll: 0,
         }
     }
+}
 
+impl Default for Fail2BanWizard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Fail2BanWizard {
     /// Render the wizard modal over `area`.
     pub fn render(&self, f: &mut Frame, area: Rect) {
         let inner = super::modal_popup(f, area, 70, 80, " Deploy fail2ban ");
@@ -73,6 +97,7 @@ impl Fail2BanWizard {
         }
     }
 
+    /// Render step 1: the service-selection list.
     fn render_service_select(&self, f: &mut Frame, area: Rect) {
         let rows = Layout::default()
             .direction(Direction::Vertical)
@@ -118,6 +143,7 @@ impl Fail2BanWizard {
         );
     }
 
+    /// Render step 2: the timing configuration fields.
     fn render_timing(&self, f: &mut Frame, area: Rect) {
         let rows = Layout::default()
             .direction(Direction::Vertical)
@@ -167,6 +193,7 @@ impl Fail2BanWizard {
         );
     }
 
+    /// Render step 3: the review-and-confirm summary.
     fn render_summary(&self, f: &mut Frame, area: Rect) {
         let enabled: Vec<&str> = self
             .services
@@ -232,6 +259,7 @@ impl Fail2BanWizard {
         );
     }
 
+    /// Render step 4: the live execution log.
     fn render_executing(&self, f: &mut Frame, area: Rect) {
         if let Some(ref log) = self.exec_log {
             let done = *self.exec_done.lock().unwrap();
@@ -308,6 +336,7 @@ impl Fail2BanWizard {
         WizardAction::Continue
     }
 
+    /// Return a mutable reference to the currently focused timing field string.
     fn active_timing_field(&mut self) -> &mut String {
         match self.timing_cursor {
             0 => &mut self.maxretry,
@@ -316,6 +345,7 @@ impl Fail2BanWizard {
         }
     }
 
+    /// Spawn a background thread that installs/configures fail2ban and streams log output.
     fn start_execution(&mut self) {
         let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let done = Arc::clone(&self.exec_done);
@@ -345,10 +375,7 @@ impl Fail2BanWizard {
             } else {
                 push!("  Not found — attempting install…");
                 if super::cmd_succeeds("which apt-get") {
-                    super::run_cmd_to_log(
-                        &["apt-get", "install", "-y", "fail2ban"],
-                        &lc,
-                    );
+                    super::run_cmd_to_log(&["apt-get", "install", "-y", "fail2ban"], &lc);
                 } else if super::cmd_succeeds("which dnf") {
                     super::run_cmd_to_log(&["dnf", "install", "-y", "fail2ban"], &lc);
                 } else if super::cmd_succeeds("which yum") {
@@ -386,12 +413,8 @@ impl Fail2BanWizard {
     }
 }
 
-fn build_jail_config(
-    services: &[String],
-    maxretry: &str,
-    bantime: &str,
-    findtime: &str,
-) -> String {
+/// Build a `jail.local` config string for the selected services and timing values.
+fn build_jail_config(services: &[String], maxretry: &str, bantime: &str, findtime: &str) -> String {
     let mut out = format!(
         "[DEFAULT]\nmaxretry = {}\nbantime  = {}\nfindtime = {}\n\n",
         maxretry.parse::<u32>().unwrap_or(5),
@@ -401,9 +424,8 @@ fn build_jail_config(
     for svc in services {
         match svc.as_str() {
             "sshd" => out.push_str("[sshd]\nenabled = true\n\n"),
-            "apache2" => out.push_str(
-                "[apache-auth]\nenabled = true\n\n[apache-badbots]\nenabled = true\n\n",
-            ),
+            "apache2" => out
+                .push_str("[apache-auth]\nenabled = true\n\n[apache-badbots]\nenabled = true\n\n"),
             "nginx" => out.push_str("[nginx-http-auth]\nenabled = true\n\n"),
             "postfix" => out.push_str("[postfix]\nenabled = true\n\n"),
             "dovecot" => out.push_str("[dovecot]\nenabled = true\n\n"),

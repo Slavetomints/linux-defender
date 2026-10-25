@@ -50,19 +50,19 @@ impl Verdict {
     /// Short display label.
     pub fn label(self) -> &'static str {
         match self {
-            Verdict::Remove      => "REMOVE",
-            Verdict::Disable     => "DISABLE",
+            Verdict::Remove => "REMOVE",
+            Verdict::Disable => "DISABLE",
             Verdict::Investigate => "INVEST.",
-            Verdict::Info        => "INFO",
+            Verdict::Info => "INFO",
         }
     }
 
     pub fn color(self) -> Color {
         match self {
-            Verdict::Remove      => Color::Red,
-            Verdict::Disable     => Color::Yellow,
+            Verdict::Remove => Color::Red,
+            Verdict::Disable => Color::Yellow,
             Verdict::Investigate => Color::Cyan,
-            Verdict::Info        => Color::DarkGray,
+            Verdict::Info => Color::DarkGray,
         }
     }
 }
@@ -79,10 +79,10 @@ impl Action {
     /// Human-readable description of what executing this action does.
     pub fn description(&self) -> String {
         match self {
-            Action::Delete(p)           => format!("Delete {}", p.display()),
-            Action::RemoveImmutable(p)  => format!("chattr -i {}", p.display()),
-            Action::RestartService(s)   => format!("systemctl restart {}", s),
-            Action::Manual(s)           => format!("Manual: {}", s),
+            Action::Delete(p) => format!("Delete {}", p.display()),
+            Action::RemoveImmutable(p) => format!("chattr -i {}", p.display()),
+            Action::RestartService(s) => format!("systemctl restart {}", s),
+            Action::Manual(s) => format!("Manual: {}", s),
         }
     }
 }

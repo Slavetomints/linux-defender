@@ -22,6 +22,7 @@ pub fn sys_arg(box_type: BoxType) -> &'static str {
 }
 
 /// Options for running nftbuild.
+#[derive(Default)]
 pub struct RunOptions {
     /// Pass `-ssh` to allow outbound SSH from this box.
     pub allow_outbound_ssh: bool,
@@ -29,16 +30,6 @@ pub struct RunOptions {
     pub zero_trust: bool,
     /// Pass `-ntp` to add NTP rules.
     pub ntp: bool,
-}
-
-impl Default for RunOptions {
-    fn default() -> Self {
-        Self {
-            allow_outbound_ssh: false,
-            zero_trust: false,
-            ntp: false,
-        }
-    }
 }
 
 /// Result of running nftbuild.

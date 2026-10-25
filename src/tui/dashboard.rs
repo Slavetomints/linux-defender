@@ -7,7 +7,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
-use crate::core::{BoxType, Finding, ServiceConfig, Severity};
+use crate::core::{BoxType, Finding, Severity};
+use crate::score_check::ServiceHistory;
 
 /// One logged-in user session from `who`.
 #[derive(Debug, Clone)]
@@ -28,7 +29,7 @@ pub fn render(
     f: &mut Frame,
     area: ratatui::layout::Rect,
     box_type: BoxType,
-    services: &[(&'static str, u16, bool)],
+    services: &[ServiceHistory],
     findings: &[Finding],
     nft_config: Option<&str>,
     sessions: &[SessionInfo],
@@ -82,19 +83,30 @@ fn render_services(
     f: &mut Frame,
     area: ratatui::layout::Rect,
     box_type: BoxType,
-    services: &[(&'static str, u16, bool)],
+    services: &[ServiceHistory],
 ) {
     let items: Vec<ListItem> = services
         .iter()
-        .map(|(name, port, up)| {
-            let (symbol, color) = if *up {
+        .map(|h| {
+            let up = h.is_up();
+            let (symbol, color) = if up {
                 ("●", Color::Green)
             } else {
                 ("✖", Color::Red)
             };
+            let uptime = h
+                .uptime_fraction()
+                .map(|f| format!(" {:>3.0}%", f * 100.0))
+                .unwrap_or_else(|| "  -- ".into());
+            let latency = h
+                .avg_latency_ms()
+                .map(|ms| format!(" {:>4}ms", ms))
+                .unwrap_or_else(|| "   ---".into());
             let line = Line::from(vec![
                 Span::styled(symbol, Style::default().fg(color)),
-                Span::raw(format!(" {:<14} :{}", name, port)),
+                Span::raw(format!(" {:<14} :{:<6}", h.check.name, h.check.port)),
+                Span::styled(uptime, Style::default().fg(if up { Color::Green } else { Color::Red })),
+                Span::styled(latency, Style::default().fg(Color::DarkGray)),
             ]);
             ListItem::new(line)
         })
@@ -394,13 +406,6 @@ fn render_firewall(f: &mut Frame, area: ratatui::layout::Rect, config: &str) {
     f.render_widget(Paragraph::new(display), inner);
 }
 
-/// Build the service status vec from a BoxType's ServiceConfig list.
-pub fn poll_services(configs: &'static [ServiceConfig]) -> Vec<(&'static str, u16, bool)> {
-    configs
-        .iter()
-        .map(|s| (s.name, s.port, s.is_up()))
-        .collect()
-}
 
 /// Read currently logged-in sessions from `who`.
 pub fn poll_sessions(authorized_users: &[String]) -> Vec<SessionInfo> {

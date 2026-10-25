@@ -53,6 +53,7 @@
 #![warn(clippy::missing_docs_in_private_items)]
 
 pub mod anti_persistence;
+pub mod score_check;
 pub mod backups;
 pub mod core;
 pub mod monitoring;

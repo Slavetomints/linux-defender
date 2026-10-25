@@ -4,6 +4,10 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::time::Duration;
 
+use crate::score_check::{
+    ServiceCheck, GENERAL_CHECKS, MAIL_CHECKS, SPLUNK_CHECKS, WEB_CHECKS,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BoxType {
     Web,
@@ -95,6 +99,16 @@ impl BoxType {
     }
 
     pub const ALL: &'static [BoxType] = &[Self::Web, Self::Mail, Self::Splunk, Self::General];
+
+    /// Rich service check definitions for this box type.
+    pub fn checks(self) -> &'static [ServiceCheck] {
+        match self {
+            Self::Web => WEB_CHECKS,
+            Self::Mail => MAIL_CHECKS,
+            Self::Splunk => SPLUNK_CHECKS,
+            Self::General => GENERAL_CHECKS,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

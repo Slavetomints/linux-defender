@@ -20,10 +20,11 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use chrono::Local;
 
 use crate::core::{BoxType, DefenderContext, Finding, Severity, detect_box_type, execute_action};
+use crate::score_check::{ServiceHistory, build_histories, poll_all};
 use crate::tui::logs::dashboard::LogDashboard as LogDash;
 
 use super::dashboard::{
-    SessionInfo, poll_auth_events, poll_services, poll_sessions, render as render_dashboard,
+    SessionInfo, poll_auth_events, poll_sessions, render as render_dashboard,
 };
 use super::logs::preserve;
 
@@ -330,7 +331,8 @@ pub struct App {
     pub box_type: BoxType,
     pub tab: Tab,
     pub findings: Vec<Finding>,
-    pub services: Vec<(&'static str, u16, bool)>,
+    /// Scored-service check histories (latency, uptime %, last result).
+    pub services: Vec<ServiceHistory>,
     pub log_dashboard: LogDash,
     pub finding_tx: Sender<Finding>,
     pub finding_rx: Receiver<Finding>,
@@ -390,7 +392,7 @@ impl App {
         finding_rx: Receiver<Finding>,
         nft_config: Option<String>,
     ) -> Self {
-        let services = poll_services(box_type.services());
+        let services = build_histories(box_type.checks());
         let (scan_progress_tx, scan_progress_rx) = mpsc::channel();
         let (auto_scan_done_tx, auto_scan_done_rx) = mpsc::channel::<&'static str>();
         let scan_selected = vec![true; SCAN_MODULES.len()];
@@ -473,7 +475,7 @@ impl App {
             self.tick_auto_scan();
         }
         if self.last_service_check.elapsed() >= Duration::from_secs(5) {
-            self.services = poll_services(self.box_type.services());
+            poll_all(&mut self.services);
             self.sessions = poll_sessions(&self.authorized_users);
             self.auth_events = poll_auth_events();
             self.last_service_check = Instant::now();
@@ -482,7 +484,7 @@ impl App {
                 let down: Vec<&'static str> = self
                     .services
                     .iter()
-                    .filter_map(|&(name, _port, up)| if !up { Some(name) } else { None })
+                    .filter_map(|h| if !h.is_up() { Some(h.check.name) } else { None })
                     .collect();
                 for name in down {
                     let count = self.watchdog_restart_count.get(name).copied().unwrap_or(0);
@@ -1096,7 +1098,7 @@ fn render_tabbar(
 
 /// Render the one-line status bar at the bottom of the terminal.
 fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
-    let down = app.services.iter().filter(|(_, _, up)| !up).count();
+    let down = app.services.iter().filter(|h| !h.is_up()).count();
     let down_str = if down > 0 {
         format!("  ⚠ {} DOWN", down)
     } else {

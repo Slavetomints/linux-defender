@@ -84,7 +84,7 @@ struct ProcEntry {
     uid: u32,
 }
 
-/// Read every readable /proc/<pid>/status file and build a process map.
+/// Read every readable `/proc/<pid>/status` file and build a process map.
 fn snapshot_processes() -> HashMap<u32, ProcEntry> {
     let mut map = HashMap::new();
 

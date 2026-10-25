@@ -1,6 +1,6 @@
 //! Outbound TCP connections from service accounts.
 //!
-//! Reads `/proc/net/tcp[6]` for ESTABLISHED connections, maps each socket to
+//! Reads `/proc/net/tcp\[6\]` for ESTABLISHED connections, maps each socket to
 //! its owning process and UID, then flags any established outbound connection
 //! owned by a service account (www-data, postfix, mysql, etc.).  A web server
 //! process dialling out on port 4444 is almost certainly a C2 beacon.
@@ -31,7 +31,7 @@ const EXPECTED_OUTBOUND_PORTS: &[u16] = &[
 /// TCP state 01 = ESTABLISHED.
 const TCP_ESTABLISHED: &str = "01";
 
-/// One established TCP connection read from `/proc/net/tcp[6]`.
+/// One established TCP connection read from `/proc/net/tcp\[6\]`.
 #[derive(Debug)]
 struct Conn {
     /// Local port of this side of the connection.
@@ -44,7 +44,7 @@ struct Conn {
     inode: u64,
 }
 
-/// Parse established (state=01) connections from a /proc/net/tcp[6] file.
+/// Parse established (state=01) connections from a /proc/net/tcp\[6\] file.
 fn parse_established(contents: &str, is_v6: bool) -> Vec<Conn> {
     let mut out = Vec::new();
 
@@ -170,7 +170,7 @@ fn inode_to_pid(target_inodes: &HashMap<u64, ()>) -> HashMap<u64, u32> {
     result
 }
 
-/// Get UID and process name for a PID from /proc/<pid>/status.
+/// Get UID and process name for a PID from `/proc/<pid>/status`.
 fn proc_uid_name(pid: u32) -> (u32, String) {
     let path = format!("/proc/{}/status", pid);
     let Ok(contents) = std::fs::read_to_string(&path) else {

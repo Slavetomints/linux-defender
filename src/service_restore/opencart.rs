@@ -201,8 +201,21 @@ pub fn run(
     ctx.progress("[+] Running OpenCart CLI installer...");
     let cli_script = root.join("install/cli_install.php");
     if !cli_script.exists() {
+        // install/ was wiped by a previous run — re-extract just that subtree.
+        ctx.progress("[!] install/ not found (previous run?); re-extracting from zip...");
+        if !Path::new(TMP_ZIP).exists() {
+            download_file(url, Path::new(TMP_ZIP), &distro, ctx)?;
+        }
+        extract_zip(
+            Path::new(TMP_ZIP),
+            &root,
+            &["config.php", "admin/config.php"],
+            ctx,
+        )?;
+    }
+    if !cli_script.exists() {
         return Err(DefenderError::Other(format!(
-            "CLI installer not found at {}; extraction may have failed",
+            "CLI installer not found at {} after re-extraction; check the archive",
             cli_script.display()
         )));
     }
@@ -229,6 +242,10 @@ pub fn run(
         .arg(admin_email)
         .arg("--http_server")
         .arg(http_server)
+        .arg("--db_prefix")
+        .arg("oc_")
+        .arg("--language")
+        .arg("en-gb")
         .status()
         .map_err(|e| DefenderError::Command(format!("cli_install.php: {e}")))?;
 

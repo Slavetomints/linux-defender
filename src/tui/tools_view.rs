@@ -42,14 +42,35 @@ impl SelectedTool {
 }
 
 /// Render the tools tab into `area`.
-pub fn render(f: &mut Frame, area: Rect, selected: SelectedTool, download_status: Option<&str>) {
+pub fn render(
+    f: &mut Frame,
+    area: Rect,
+    selected: SelectedTool,
+    download_status: Option<&str>,
+    nft_config: Option<&str>,
+) {
+    // When a firewall config exists, split horizontally: tool list on left, config on right.
+    let (list_area, config_area) = if nft_config.is_some() {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .split(area);
+        (cols[0], Some(cols[1]))
+    } else {
+        (area, None)
+    };
+
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(3)])
-        .split(area);
+        .split(list_area);
 
     render_tool_list(f, rows[0], selected, download_status);
     render_help(f, rows[1], selected);
+
+    if let (Some(cfg_area), Some(cfg)) = (config_area, nft_config) {
+        render_nft_config(f, cfg_area, cfg);
+    }
 }
 
 /// Render the list of downloadable tools with download-status annotation.
@@ -234,5 +255,32 @@ fn render_help(f: &mut Frame, area: Rect, selected: SelectedTool) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// Render the applied nftables ruleset in the right pane.
+fn render_nft_config(f: &mut Frame, area: Rect, config: &str) {
+    let lines: Vec<Line> = config
+        .lines()
+        .map(|l| {
+            let color = if l.trim_start().starts_with('#') {
+                Color::DarkGray
+            } else if l.contains("drop") || l.contains("reject") {
+                Color::Red
+            } else if l.contains("accept") {
+                Color::Green
+            } else if l.contains("table") || l.contains("chain") {
+                Color::Cyan
+            } else {
+                Color::White
+            };
+            Line::from(Span::styled(l.to_string(), Style::default().fg(color)))
+        })
+        .collect();
+
+    let block = Block::default()
+        .title(" Firewall Ruleset (active) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green));
     f.render_widget(Paragraph::new(lines).block(block), area);
 }

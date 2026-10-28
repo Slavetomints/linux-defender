@@ -495,6 +495,8 @@ pub struct App {
     restore_progress_tx: Sender<String>,
     /// Receiver end of the service restore progress channel.
     restore_progress_rx: Receiver<String>,
+    /// True if at least one backup directory exists under the known backup roots.
+    pub baseline_present: bool,
 }
 
 impl App {
@@ -578,7 +580,31 @@ impl App {
             restore_log_scroll: 0,
             restore_progress_tx,
             restore_progress_rx,
+            baseline_present: Self::detect_baseline(),
         }
+    }
+
+    /// Return true if any backup directory exists under the known roots.
+    fn detect_baseline() -> bool {
+        let roots = [
+            "/root/baseline",
+            "/etc/linux-defender/baseline",
+        ];
+        for root in &roots {
+            if std::path::Path::new(root).exists() {
+                return true;
+            }
+        }
+        // also check for any ccdc-b@ckup-* directory under /etc
+        if let Ok(entries) = std::fs::read_dir("/etc") {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name.to_string_lossy().starts_with("ccdc-b") {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Process all pending channel messages and trigger periodic service/session polling.
@@ -642,6 +668,7 @@ impl App {
         while let Ok(p) = self.backups_progress_rx.try_recv() {
             if p.is_empty() {
                 self.backups_running = false;
+                self.baseline_present = true;
             } else {
                 self.backups_log.push(p);
             }
@@ -947,60 +974,68 @@ impl App {
         let path = if nix::unistd::geteuid().is_root() {
             let dir = std::path::Path::new("/etc/linux-defender/reports");
             std::fs::create_dir_all(dir).map_err(|e| format!("mkdir failed: {}", e))?;
-            dir.join(format!("{}.txt", ts))
+            dir.join(format!("ir-report-{}.txt", ts))
         } else {
-            std::path::PathBuf::from(format!("/tmp/defender-report-{}.txt", ts))
+            std::path::PathBuf::from(format!("ir-report-{}.txt", ts))
         };
 
-        let crit = self
-            .findings
-            .iter()
-            .filter(|f| !f.resolved && f.severity == Severity::Critical)
-            .count();
-        let high = self
-            .findings
-            .iter()
-            .filter(|f| !f.resolved && f.severity == Severity::High)
-            .count();
-        let med = self
-            .findings
-            .iter()
-            .filter(|f| !f.resolved && f.severity == Severity::Medium)
-            .count();
+        let active: Vec<&Finding> = self.findings.iter().filter(|f| !f.resolved).collect();
+        let crit = active.iter().filter(|f| f.severity == Severity::Critical).count();
+        let high = active.iter().filter(|f| f.severity == Severity::High).count();
+        let med  = active.iter().filter(|f| f.severity == Severity::Medium).count();
+        let info = active.iter().filter(|f| f.severity == Severity::Info).count();
 
-        let mut report = format!(
-            "LINUX-DEFENDER IR REPORT\nGenerated: {}\nBox type: {}\nTotal findings: {} (Critical: {}, High: {}, Medium: {})\n{}\n\n",
-            now.format("%Y-%m-%d %H:%M:%S"),
-            self.box_type.label(),
-            self.findings.len(),
-            crit,
-            high,
-            med,
-            "=".repeat(40),
-        );
+        let div  = "═".repeat(70);
+        let div2 = "─".repeat(70);
 
-        for finding in &self.findings {
-            report.push_str(&format!(
-                "[{}] {}  {}\n  {}\n",
-                finding.severity.label().trim(),
-                finding.verdict.label(),
-                finding.module,
-                finding.summary,
-            ));
-            if let Some(ref p) = finding.path {
-                report.push_str(&format!("  path: {}\n", p.display()));
+        let mut r = String::new();
+        r.push_str(&format!("{div}\n"));
+        r.push_str("  INCIDENT RESPONSE REPORT — CCDC 2026\n");
+        r.push_str(&format!("{div}\n\n"));
+        r.push_str(&format!("  Date/Time : {}\n", now.format("%Y-%m-%d %H:%M:%S %Z")));
+        r.push_str(&format!("  Box Type  : {}\n", self.box_type.label()));
+        r.push_str(&format!("  Box Desc  : {}\n", self.box_type.description()));
+        r.push_str(&format!("  Baseline  : {}\n\n", if self.baseline_present { "present" } else { "NOT TAKEN" }));
+        r.push_str(&format!("{div2}\n"));
+        r.push_str("  EXECUTIVE SUMMARY\n");
+        r.push_str(&format!("{div2}\n\n"));
+        r.push_str(&format!(
+            "  Total active findings : {}\n  Critical : {}  High : {}  Medium : {}  Info : {}\n\n",
+            active.len(), crit, high, med, info
+        ));
+
+        for &(label, sev) in &[
+            ("CRITICAL", Severity::Critical),
+            ("HIGH",     Severity::High),
+            ("MEDIUM",   Severity::Medium),
+            ("INFO",     Severity::Info),
+        ] {
+            let section: Vec<&&Finding> = active.iter().filter(|f| f.severity == sev).collect();
+            if section.is_empty() {
+                continue;
             }
-            if !finding.detail.is_empty() {
-                report.push_str(&format!("  {}\n", finding.detail));
+            r.push_str(&format!("{div2}\n  {label} ({} finding{})\n{div2}\n\n", section.len(), if section.len() == 1 { "" } else { "s" }));
+            for (i, f) in section.iter().enumerate() {
+                r.push_str(&format!("  [{:02}] Module  : {}\n", i + 1, f.module));
+                r.push_str(&format!("       Verdict : {}\n", f.verdict.label()));
+                r.push_str(&format!("       Summary : {}\n", f.summary));
+                if let Some(ref p) = f.path {
+                    r.push_str(&format!("       Path    : {}\n", p.display()));
+                }
+                if !f.detail.is_empty() {
+                    r.push_str(&format!("       Detail  : {}\n", f.detail));
+                }
+                for (key, val) in &f.context {
+                    r.push_str(&format!("       {key:<8}: {val}\n"));
+                }
+                r.push('\n');
             }
-            for (label, value) in &finding.context {
-                report.push_str(&format!("  {}: {}\n", label, value));
-            }
-            report.push('\n');
         }
 
+        r.push_str(&format!("{div}\n  END OF REPORT\n{div}\n"));
+
         let path_str = path.to_string_lossy().to_string();
-        std::fs::write(&path, report).map_err(|e| format!("write failed: {}", e))?;
+        std::fs::write(&path, r).map_err(|e| format!("write failed: {}", e))?;
         Ok(path_str)
     }
 }
@@ -1297,6 +1332,13 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                             app.user_input_buf.clear();
                         }
                     }
+                    KeyCode::Char('b') => {
+                        if app.tab == Tab::Dashboard {
+                            // Jump straight to Backups and queue an --all run
+                            app.tab = Tab::Backups;
+                            app.start_backup("all");
+                        }
+                    }
                     KeyCode::Char('e') => {
                         if app.tab == Tab::Scan && app.scan_focus == ScanFocus::Findings {
                             match app.export_ir_report() {
@@ -1436,7 +1478,13 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
         Tab::Tools => {
             use crate::tui::tools_view::SelectedTool;
             let selected = SelectedTool::from_cursor(app.tools_cursor);
-            crate::tui::tools_view::render(f, rows[1], selected, app.download_status.as_deref());
+            crate::tui::tools_view::render(
+                f,
+                rows[1],
+                selected,
+                app.download_status.as_deref(),
+                app.nft_config.as_deref(),
+            );
         }
         Tab::Backups => {
             render_backups(f, rows[1], app);
@@ -1576,6 +1624,15 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
         left.push(Span::styled("WATCHDOG", Style::default().fg(ok_color)));
     }
 
+    // baseline missing
+    if !app.baseline_present {
+        left.push(Span::styled("  │  ", Style::default().fg(sep_color)));
+        left.push(Span::styled(
+            "⚠ NO BASELINE",
+            Style::default().fg(warn_color).add_modifier(Modifier::BOLD),
+        ));
+    }
+
     // paused log pane
     let paused = app.tab == Tab::Logs
         && app
@@ -1598,6 +1655,9 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
     // tab-specific binds
     match app.tab {
         Tab::Dashboard => {
+            if !app.baseline_present {
+                right.extend(kb("b", "take baseline", Color::Yellow));
+            }
             right.extend(kb("w", "watchdog", key_color));
             right.extend(kb("u", "users", key_color));
         }
@@ -2507,18 +2567,6 @@ fn render_service_restore(f: &mut ratatui::Frame, area: Rect, app: &App) {
     }
 }
 
-/// Render a "coming soon" placeholder for tabs that are not yet fully implemented.
-#[allow(dead_code)]
-fn render_placeholder(f: &mut ratatui::Frame, area: Rect, name: &str) {
-    let block = Block::default()
-        .title(format!(" {} ", name))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Blue));
-    let p = Paragraph::new(format!("{} — coming soon", name))
-        .block(block)
-        .style(Style::default().fg(Color::DarkGray));
-    f.render_widget(p, area);
-}
 
 /// Render the "Add Authorized User" text-input modal overlay.
 fn render_user_input_modal(f: &mut ratatui::Frame, area: Rect, buf: &str) {

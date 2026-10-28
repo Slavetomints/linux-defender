@@ -42,9 +42,11 @@ pub fn download_file(url: &str, dest: &Path, distro: &Distro, ctx: &DefenderCont
         return Ok(());
     }
 
-    ctx.progress("[!] Neither curl nor wget succeeded.");
+    ctx.progress("[!] Neither curl nor wget succeeded — installing curl automatically...");
 
-    if ctx.interactive() && prompt_yes(&format!("[?] Install curl via {}? (y/N)", distro.name()))? {
+    if !ctx.interactive()
+        || prompt_yes(&format!("[?] Install curl via {}? (y/N)", distro.name()))?
+    {
         install_package(distro, &["curl"], ctx)?;
         if try_curl(url, dest_str) {
             ctx.progress("[✓] Download complete");
@@ -304,16 +306,14 @@ pub fn reload_webserver(ctx: &DefenderContext) -> Result<()> {
 /// rather than prompting.
 pub fn resolve_web_root(path: &Path, ctx: &DefenderContext) -> Result<PathBuf> {
     if !path.exists() {
-        ctx.progress(&format!("[!] {} does not exist.", path.display()));
-        if ctx.interactive() && prompt_yes(&format!("[?] Create {} now? (y/N)", path.display()))? {
-            fs::create_dir_all(path)?;
-            ctx.progress(&format!("[✓] Created {}", path.display()));
-        } else {
+        if ctx.interactive() && !prompt_yes(&format!("[?] Create {} now? (y/N)", path.display()))? {
             return Err(DefenderError::Other(format!(
                 "web root {} does not exist",
                 path.display()
             )));
         }
+        fs::create_dir_all(path)?;
+        ctx.progress(&format!("[✓] Created {}", path.display()));
     }
     if !path.is_dir() {
         return Err(DefenderError::Other(format!(
@@ -333,26 +333,26 @@ pub fn find_php(distro: &Distro, ctx: &DefenderContext) -> Result<String> {
         return Ok(bin);
     }
 
-    ctx.progress("[!] PHP not found on this system.");
+    ctx.progress("[!] PHP not found — installing automatically...");
+    let pkg = distro.php_package();
 
-    if ctx.interactive() {
-        let pkg = distro.php_package();
-        if prompt_yes(&format!("[?] Install {pkg} via {}? (y/N)", distro.name()))? {
-            install_package(distro, &[pkg], ctx)?;
-            if let Some(bin) = probe_php() {
-                ctx.progress(&format!("[✓] PHP is now available: {bin}"));
-                return Ok(bin);
-            }
-            return Err(DefenderError::Other(
-                "PHP was installed but no php binary found on $PATH; \
-                 you may need to log out and back in, or run `hash -r`"
-                    .into(),
-            ));
-        }
+    // In interactive mode, ask first; in TUI mode, just install.
+    if ctx.interactive()
+        && !prompt_yes(&format!("[?] Install {pkg} via {}? (y/N)", distro.name()))?
+    {
+        return Err(DefenderError::Other(
+            "PHP not found; install php-cli and retry".into(),
+        ));
+    }
+
+    install_package(distro, &[pkg], ctx)?;
+    if let Some(bin) = probe_php() {
+        ctx.progress(&format!("[✓] PHP is now available: {bin}"));
+        return Ok(bin);
     }
 
     Err(DefenderError::Other(
-        "PHP not found; install php-cli and retry".into(),
+        "PHP was installed but no php binary found on $PATH".into(),
     ))
 }
 

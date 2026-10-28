@@ -394,18 +394,53 @@ pub fn ensure_webserver(distro: &Distro, ctx: &DefenderContext) -> Result<()> {
 /// web module and the MySQL driver, then restarts the web server so the new
 /// module is active.
 pub fn ensure_php_apache(distro: &Distro, ctx: &DefenderContext) -> Result<()> {
-    let (php_mod, mysql_ext) = match distro {
-        Distro::Debian => ("libapache2-mod-php", "php-mysql"),
-        Distro::Rhel => ("php", "php-mysqlnd"),
-        Distro::Arch => ("php-apache", "php"),
-        Distro::Suse => ("apache2-mod_php8", "php8-mysql"),
-        Distro::Alpine => ("php-apache2", "php-pdo_mysql"),
+    // Apache PHP module + all extensions OpenCart requires.
+    let pkgs: &[&str] = match distro {
+        Distro::Debian => &[
+            "libapache2-mod-php",
+            "php-mysql",
+            "php-gd",
+            "php-curl",
+            "php-zip",
+            "php-xml",
+            "php-intl",
+            "php-mbstring",
+        ],
+        Distro::Rhel => &[
+            "php",
+            "php-mysqlnd",
+            "php-gd",
+            "php-curl",
+            "php-zip",
+            "php-xml",
+            "php-intl",
+            "php-mbstring",
+        ],
+        Distro::Arch => &["php-apache", "php-gd"],
+        Distro::Suse => &[
+            "apache2-mod_php8",
+            "php8-mysql",
+            "php8-gd",
+            "php8-curl",
+            "php8-zip",
+            "php8-dom",
+            "php8-intl",
+            "php8-mbstring",
+        ],
+        Distro::Alpine => &[
+            "php-apache2",
+            "php-pdo_mysql",
+            "php-gd",
+            "php-curl",
+            "php-zip",
+            "php-xml",
+            "php-intl",
+            "php-mbstring",
+        ],
     };
 
-    ctx.progress(&format!(
-        "[+] Installing PHP Apache module ({php_mod}) and MySQL driver ({mysql_ext})..."
-    ));
-    install_package(distro, &[php_mod, mysql_ext], ctx)?;
+    ctx.progress("[+] Installing PHP Apache module and required extensions...");
+    install_package(distro, pkgs, ctx)?;
 
     let svc = match distro {
         Distro::Rhel => "httpd",

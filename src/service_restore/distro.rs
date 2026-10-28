@@ -191,6 +191,8 @@ pub fn enable_and_restart(service: &str, ctx: &DefenderContext) -> Result {
 
     let status = Command::new("systemctl")
         .args(["enable", "--now", service])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map_err(|e| DefenderError::Command(format!("systemctl enable {service}: {e}")))?;
 
@@ -202,6 +204,8 @@ pub fn enable_and_restart(service: &str, ctx: &DefenderContext) -> Result {
 
     let status = Command::new("systemctl")
         .args(["restart", service])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map_err(|e| DefenderError::Command(format!("systemctl restart {service}: {e}")))?;
 

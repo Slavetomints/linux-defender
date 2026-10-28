@@ -440,37 +440,32 @@ pub(crate) struct RestoreCredDialog {
 
 impl RestoreCredDialog {
     fn new(service: RestoreCredService) -> Self {
-        let (f0, f1, f3, f4, f6) = match service {
-            RestoreCredService::OpenCart => (
-                "localhost",       // db_host
-                "",                // db_user
-                "opencart",        // db_name
-                "3306",            // db_port
-                "http://localhost/", // http_server
-            ),
-            RestoreCredService::PrestaShop => (
-                "localhost",   // domain
-                "localhost",   // db_server
-                "prestashop",  // db_name
-                "",            // (unused slot 4)
-                "",            // (unused slot 6)
-            ),
-        };
-        Self {
-            service,
-            fields: [
-                f0.into(),
-                f1.into(),
-                String::new(), // db_pass / db_user
-                f3.into(),
-                f4.into(),
-                String::new(), // admin_user / db_pass
-                f6.into(),
-                String::new(), // admin_pass / admin_email
-                String::new(), // admin_email / admin_pass
+        // Fields are indexed 0..=8 and must match field_label() and into_credentials() exactly.
+        let fields = match service {
+            RestoreCredService::OpenCart => [
+                "localhost".into(),       // 0  DB Hostname
+                String::new(),            // 1  DB Username
+                String::new(),            // 2  DB Password
+                "opencart".into(),        // 3  DB Name
+                "3306".into(),            // 4  DB Port
+                "http://localhost/".into(),// 5  HTTP base URL
+                "admin".into(),           // 6  Admin Username
+                String::new(),            // 7  Admin Password
+                String::new(),            // 8  Admin Email
             ],
-            focused: RestoreCredField::F0,
-        }
+            RestoreCredService::PrestaShop => [
+                "localhost".into(),        // 0  Shop Domain
+                "localhost".into(),        // 1  DB Server
+                "prestashop".into(),       // 2  DB Name
+                String::new(),             // 3  DB Username
+                String::new(),             // 4  DB Password
+                String::new(),             // 5  Admin Email
+                String::new(),             // 6  Admin Password
+                String::new(),             // 7  (unused)
+                String::new(),             // 8  (unused)
+            ],
+        };
+        Self { service, fields, focused: RestoreCredField::F0 }
     }
 
     /// Labels for each field depending on the service.

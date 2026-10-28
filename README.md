@@ -1,252 +1,318 @@
 # linux-defender
 
-System hardening tool for CCDC environments. Focuses on anti-persistence, monitoring, system
-hardening, and effective backups. Ships as a full-screen TUI and a traditional CLI.
+[![CI](https://github.com/UWStout-CCDC/linux-defender/actions/workflows/ci.yml/badge.svg)](https://github.com/UWStout-CCDC/linux-defender/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/badge/coverage-75%25-brightgreen)](https://github.com/UWStout-CCDC/linux-defender/actions)
+[![MSRV](https://img.shields.io/badge/rustc-1.86%2B-blue)](https://www.rust-lang.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-## Requirements
+> Full-screen TUI + traditional CLI for hardening Linux boxes in CCDC competition environments.
+> Covers anti-persistence hunting, real-time monitoring, config hardening, targeted backups,
+> and service restoration — all runnable with a single binary dropped onto an unknown host.
 
-- Linux
-- Rust (stable — see `rust-toolchain.toml`)
-- Checks that modify the system require **root**; modules that need root say so and exit rather
-  than half-run.
+---
 
-## Build
-
-```sh
-cargo build --release
-# binary at target/release/defender-cli
-```
-
-For a static binary with no shared library dependencies — useful when dropping the tool onto an
-unknown competition host:
+## Quick start
 
 ```sh
+# build a static binary (no shared libs — drop it anywhere)
 rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl
+# binary at target/x86_64-unknown-linux-musl/release/defender-cli
+
+# or a normal build
+cargo build --release
 ```
 
-Tagged pushes (`v*`) build both targets and attach them to a GitHub Release automatically.
+```sh
+# interactive TUI (auto-detects box type, runs all scan modules in background)
+sudo ./defender-cli
 
-## Usage
+# one-shot CLI
+sudo ./defender-cli anti-persistence --all
+sudo ./defender-cli monitoring --all
+sudo ./defender-cli system-hardening --user-permissions --services --programs --configs
+sudo ./defender-cli backups --all --save-location /root/baseline
+```
+
+Tagged pushes (`v*`) build and attach both gnu and static musl binaries to a GitHub Release.
+
+---
+
+## Interactive TUI
+
+Launch with no subcommand. Eight tabs, `1`–`8` to switch:
 
 ```
-defender-cli [--verbose] <COMMAND> [FLAGS]
+┌─[1] Dashboard──[2] Logs──[3] Scan──[4] Hardening──[5] Backups──[6] Monitor──[7] Tools──[8] Svc Restore─┐
+│                                                                                                           │
+│  ...                                                                                                      │
+│                                                                                                           │
+├───────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Web  │  5 findings  │  WATCHDOG     [q] quit  [1-8] tabs  [↑↓] select  [Enter] run module               │
+└───────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+| Tab | Key | What it does |
+|---|---|---|
+| **Dashboard** | `1` | Live service status for all scored ports, sessions, auth events |
+| **Logs** | `2` | Tail live log streams across multiple panes |
+| **Scan** | `3` | Run any combination of the 47 scan modules; browse findings with detail view |
+| **Hardening** | `4` | Apply hardening steps (user perms, disable services, restrict programs, deploy configs) |
+| **Backups** | `5` | Run targeted backups; live output log |
+| **Monitor** | `6` | Run any of 26 monitoring modules on demand |
+| **Tools** | `7` | Download and run companion tools |
+| **Svc Restore** | `8` | Reinstall scored services from scratch (Postfix, Dovecot, Splunk, OpenCart, PrestaShop) |
+
+The status bar shows box type, finding count, services-down alert, scan/watchdog state, and context-sensitive keybinds — all color-coded.
+
+---
+
+## CLI reference
 
 Every run appends to `defender-report-<timestamp>.txt` in the working directory.
 
-Running without a subcommand launches the **interactive TUI**, which runs all 47 scan modules in
-the background and displays findings in real time.
-
 ### `anti-persistence`
 
-Hunts for Red Team persistence. Every destructive action prompts for `y/N` first.
+Hunts for Red Team persistence mechanisms. Every destructive action prompts `y/N` first.
 
-| Flag | Acts? | What it does |
+| Flag | Mode | What it does |
 |---|---|---|
-| `--cron` | prompts | Reviews each user's crontab entry by entry, rewrites with only the kept lines |
+| `--cron` | prompts | Reviews each user's crontab entry by entry, rewrites keeping only approved lines |
 | `--cron-system` | prompts | Checks `/etc/cron.d` and periodic script directories for malicious jobs |
 | `--systemd` | prompts | Walks all systemd units, stops + disables ones you flag |
-| `--systemd-timers` | prompts | Scans systemd timer units for suspicious short-interval or malicious ExecStart |
+| `--systemd-timers` | prompts | Scans systemd timer units for suspicious intervals or malicious `ExecStart` |
 | `--users` | prompts | Reviews every account in `/etc/passwd`, `userdel`s ones you flag |
 | `--ssh-keys` | prompts | Finds `authorized_keys` per account, removes on confirmation |
-| `--at-jobs` | prompts | Reviews `atq` jobs, `atrm`s ones you flag |
+| `--at-jobs` | prompts | Reviews `atq` jobs, `atrm`s flagged ones |
 | `--php-shells` | prompts | Scores files under `/var/www/html` against webshell primitives |
 | `--ld-preload` | prompts | Checks `/etc/ld.so.preload` and `$LD_PRELOAD` for loader hijacking |
 | `--rc-local` | prompts | Reports boot commands in `rc.local`, offers to blank them |
 | `--xdg-autostart` | prompts | Lists autostart `.desktop` entries, offers to remove flagged ones |
 | `--immutable` | prompts | Detects immutable/append-only flags on sensitive files |
-| `--ssh-config` | reports | Audits `sshd_config` for dangerous directives (ForceCommand, AuthorizedKeysCommand, etc.) |
-| `--sudoers` | reports | Audits `/etc/sudoers` and `sudoers.d` for NOPASSWD, LD_PRELOAD, and wildcard rules |
-| `--shell-aliases` | reports | Detects malicious shell aliases in global and per-user dotfiles |
-| `--polkit` | reports | Audits polkit rules and pkla files for unconditional privilege grants |
-| `--pam` | reports | Finds PAM directives shaped like an auth backdoor |
-| `--startup-scripts` | reports | Scans system and per-user shell dotfiles for dangerous lines |
-| `--udev` | reports | Finds admin-managed udev rules that execute a program |
-| `--logrotate` | reports | Finds logrotate script blocks, which run as root on a timer |
-| `--grub` | reports | Checks kernel parameters and `/etc/grub.d` scripts |
-| `--kernel-modules` | reports | Loaded modules with no file on disk, plus boot-load config |
-| `--initramfs` | reports | Custom initramfs hooks, and images newer than their kernel |
-| `--capabilities` | reports | Files carrying dangerous Linux capabilities (slow: sweeps `/`) |
-| `--suid` | reports | Lists SUID binaries (slow: sweeps `/`) |
-| `--prompt-command` | reports | Reports a hijacked `$PROMPT_COMMAND` |
+| `--ssh-config` | read-only | Audits `sshd_config` for dangerous directives (`ForceCommand`, `AuthorizedKeysCommand`, etc.) |
+| `--sudoers` | read-only | Audits `/etc/sudoers` and `sudoers.d` for `NOPASSWD`, `LD_PRELOAD`, and wildcard rules |
+| `--shell-aliases` | read-only | Detects malicious shell aliases in global and per-user dotfiles |
+| `--polkit` | read-only | Audits polkit rules and pkla files for unconditional privilege grants |
+| `--pam` | read-only | Finds PAM directives shaped like an auth backdoor |
+| `--startup-scripts` | read-only | Scans system and per-user shell dotfiles for dangerous lines |
+| `--udev` | read-only | Finds admin-managed udev rules that execute a program |
+| `--logrotate` | read-only | Finds logrotate script blocks (run as root on a timer) |
+| `--grub` | read-only | Checks kernel parameters and `/etc/grub.d` scripts |
+| `--kernel-modules` | read-only | Loaded modules with no file on disk, plus boot-load config |
+| `--initramfs` | read-only | Custom initramfs hooks, and images newer than their kernel |
+| `--capabilities` | read-only | Files carrying dangerous Linux capabilities (slow: sweeps `/`) |
+| `--suid` | read-only | Lists SUID binaries (slow: sweeps `/`) |
+| `--prompt-command` | read-only | Reports a hijacked `$PROMPT_COMMAND` |
+| `--git-hooks` | read-only | Scans git repositories for malicious hook scripts |
 | `--all` | — | Runs every check |
 
-"prompts" means the check can change the system, and always asks `y/N` first. "reports" means
-it is strictly read-only — for PAM, udev and logrotate that is deliberate, since a wrong
-automated edit there locks you out or breaks devices.
-
-Checks that modify the system need root. Read-only reporting works unprivileged, and a check
-that needs root without having it says so and is skipped rather than half-run. A module that
-fails is reported and the run continues to the next one.
-
-Detection is tuned to be specific rather than exhaustive: flagging every `curl` in every dotfile
-would bury a real finding. For example `--pam` flags `sufficient pam_permit.so` (an actual
-bypass) but not the `optional pam_permit.so` that ships in stock Arch and Debian stacks.
+**prompts** = can modify the system, always asks `y/N` first. **read-only** = never modifies. PAM, udev, and logrotate are intentionally read-only — an automated edit there can lock you out or break devices.
 
 ### `monitoring`
 
-Scans the live system for attacker activity and anomalies.
+Scans the live system for attacker activity and anomalies. All checks are read-only.
 
-| Flag | What it does |
+| Flag | What it detects |
 |---|---|
-| `--auth-log-analysis` | Parses `auth.log` / `secure` for brute-force and credential-stuffing |
+| `--auth-log-analysis` | Brute-force and credential-stuffing patterns in `auth.log` / `secure` |
+| `--access-log` | Web request anomalies: traversal, webshell params, scanner UAs, 404 storms |
+| `--error-log` | Nginx/Apache error log: CGI errors, sensitive-path denials, WAF triggers |
+| `--auth-log-watch` | 1-hour sliding window: account creation/deletion, password changes, SSH logins |
+| `--pspy` | New short-lived processes, deleted binaries still running under `/proc` |
+| `--network-watch` | Active connections to public IPs, suspicious listeners |
+| `--php-modules` | Malicious PHP ini settings, unknown extension `.so` files, webshell patterns in PHP files |
 | `--port-map` | Maps listening TCP ports to their owning binaries |
-| `--hidden-elf` | Finds hidden ELF binaries in web roots and temp directories |
-| `--deleted-binaries` | Finds processes whose on-disk executable has been deleted |
-| `--process-tree` | Detects parent→child anomalies (web server spawning a shell, etc.) |
-| `--recently-modified` | Finds system binaries modified after competition start (or last hour) |
-| `--suspicious-services` | Detects systemd units with suspicious ExecStart paths |
-| `--world-writable` | Finds world-writable directories and files outside expected locations |
-| `--outbound-connections` | Detects established TCP connections from service accounts to unexpected ports |
-| `--fail2ban` | Checks fail2ban daemon, active jails, and recent bans |
-| `--ai-artifacts` | Scans scripts and executables for AI-generation tells |
-| `--elf-disguise` | Detects ELF binaries and scripts masquerading as other file types |
-| `--perm-anomalies` | Detects permission/ownership anomalies: orphaned UIDs, SUID outside standard paths, etc. |
-| `--attacker-tools` | Detects attacker tools in temp dirs, hidden executables, double-extension files |
-| `--c2-detection` | Detects C2 implants and beacons (memfd execution, deleted-temp exe, C2 ports, Go implants) |
-| `--rootkit-cross-check` | Cross-checks `/proc` PID list and listening ports against `ps`/`ss` for rootkit evidence |
-| `--proc-maps` | Scans `/proc/*/maps` for anonymous `rwxp` mappings (shellcode injection) |
-| `--binary-integrity` | Verifies SHA-256 hashes of system binaries against a stored baseline |
-| `--git-hooks` | Scans git repositories for malicious hook scripts |
-| `--webserver-config` | Audits nginx, Apache, and PHP config for webshell enablers |
-| `--bind-mounts` | Detects bind mounts and overlay/tmpfs hiding system paths |
+| `--hidden-elf` | Hidden ELF binaries in web roots and temp directories |
+| `--deleted-binaries` | Processes whose on-disk executable has been deleted |
+| `--process-tree` | Parent→child anomalies (web server spawning a shell, etc.) |
+| `--recently-modified` | System binaries modified after competition start |
+| `--suspicious-services` | Systemd units with suspicious `ExecStart` paths |
+| `--world-writable` | World-writable directories and files outside expected locations |
+| `--outbound-connections` | Established TCP connections from service accounts to unexpected ports |
+| `--fail2ban` | fail2ban daemon status, active jails, and recent bans |
+| `--elf-disguise` | ELF binaries and scripts masquerading as other file types |
+| `--perm-anomalies` | Orphaned UIDs, SUID outside standard paths, permission anomalies |
+| `--attacker-tools` | Attacker tools in temp dirs, hidden executables, double-extension files |
+| `--c2-detection` | C2 implants and beacons: memfd execution, deleted-temp exe, C2 ports, Go implants |
+| `--rootkit-cross-check` | Cross-checks `/proc` PID list and listening ports against `ps`/`ss` |
+| `--proc-maps` | Anonymous `rwxp` mappings in `/proc/*/maps` (shellcode injection) |
+| `--binary-integrity` | SHA-256 hashes of system binaries against a stored baseline |
+| `--webserver-config` | nginx, Apache, and PHP config for webshell enablers |
+| `--bind-mounts` | Bind mounts and overlay/tmpfs hiding system paths |
+| `--ai-artifacts` | Scripts and executables for AI-generation tells |
 | `--all` | Runs all checks |
-
-### `backups`
-
-| Flag | Status | What it does |
-|---|---|---|
-| `--all` | working | Copies every known config path and writes a SHA-256 manifest |
-| `--compare-hashes` | working | Re-hashes the system and diffs against a previous manifest |
-| `--save-location <DIR>` | — | Where to write (or read) the backup. Defaults to `/etc/ccdc-b@ckup-<timestamp>` |
-| `--custom` `--ecomm` `--mail` `--restore` `--splunk` `--users` | stub | Not yet implemented |
-
-A backup directory contains `H@shes.txt` (the manifest), `backup.log` (per-path detail), and one
-`.bak` copy per source path.
-
-```sh
-# At competition start
-defender-cli backups --all --save-location /root/baseline
-
-# Later, to see what Red Team touched
-defender-cli backups --compare-hashes --save-location /root/baseline
-```
-
-An unreadable path is logged and skipped — one bad file does not abort the run.
 
 ### `system-hardening`
 
-`--install-tools` downloads the team's `nftbuild` firewall script. The remaining flags
-(`--user-permissions`, `--services`, `--programs`, `--configs`) are stubs.
+Applies hardening in one shot. Steps that require root say so and exit cleanly if unprivileged.
+
+| Flag | Requires root | What it does |
+|---|---|---|
+| `--user-permissions` | yes | Locks unused accounts, fixes `/etc/passwd` / `/etc/shadow` / `/etc/sudoers` permissions, deploys `umask 027` |
+| `--services` | yes | Enumerates enabled systemd units, disables anything not on the box-type allow-list |
+| `--programs` | no | `chmod 750` on compilers (`gcc`, `g++`, `clang`), network tools (`nmap`, `nc`, `curl`, `wget`), package managers |
+| `--configs` | no | Hardens `sshd_config`, writes `/etc/sysctl.d/99-defender-hardening.conf`, locks cron to root only |
+| `--install-tools` | — | Downloads the team's `nftbuild` firewall script |
+
+### `backups`
+
+| Flag | What it does |
+|---|---|
+| `--all` | Copies every known config path and writes a SHA-256 manifest |
+| `--compare-hashes` | Re-hashes the system and diffs against a previous manifest |
+| `--web` | Backs up nginx / Apache / PHP config |
+| `--mail` | Backs up Postfix + Dovecot + Roundcube config |
+| `--splunk` | Backs up Splunk local config and apps |
+| `--users` | Backs up `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/sudoers`, and related files |
+| `--ecomm` | Backs up OpenCart + PrestaShop config |
+| `--custom <PATH>` | Backs up an arbitrary path with a hash manifest |
+| `--restore` | Restores files from a backup directory using its `H@shes.txt` manifest |
+| `--save-location <DIR>` | Where to write (or read) the backup. Defaults to `/etc/ccdc-b@ckup-<timestamp>` |
+
+```sh
+# At competition start — snapshot the whole system
+sudo defender-cli backups --all --save-location /root/baseline
+
+# Later — see what Red Team touched
+sudo defender-cli backups --compare-hashes --save-location /root/baseline
+
+# Restore from snapshot
+sudo defender-cli backups --restore --save-location /root/baseline
+```
+
+### `service-restore`
+
+Reinstalls scored services from scratch when no backup is enough. Uses the host's package manager
+for system services; downloads fresh releases from GitHub for web apps.
+
+| Flag | What it does |
+|---|---|
+| `--postfix` | Reinstalls Postfix via package manager, restarts the service |
+| `--dovecot` | Reinstalls Dovecot (splits packages on Debian), restarts the service |
+| `--splunk` | Wipes Splunk's local-override layer, restarts the daemon |
+| `--opencart` | Downloads a fresh OpenCart release, installs to web root, preserves `config.php` if present |
+| `--prestashop` | Downloads a fresh PrestaShop release, installs to web root, preserves `parameters.php` if present |
+
+### `score-check`
+
+Polls all scored ports for the detected box type and displays uptime % and average latency.
+Protocol-level checks (SMTP banner, IMAP `* OK`, POP3 `+OK`) go beyond a bare TCP connect.
+
+```sh
+defender-cli score-check
+```
+
+---
+
+## Persistence test fixtures
+
+`bin/persist/` contains 19 scripts that deploy and clean up real persistence techniques — used to
+verify that `anti-persistence` detects each one. `bin/deploy_persistence.sh` is a master script
+that prompts for attacker IP/port and deploys any or all of them.
+
+```sh
+export ATTACKER_IP=10.0.0.1 ATTACKER_PORT=4444
+sudo bin/deploy_persistence.sh         # interactive menu
+sudo bin/persist/01_cron.sh deploy     # one at a time
+sudo bin/persist/01_cron.sh cleanup
+```
+
+Techniques covered: cron user, cron.d, rc.local, at job, SSH key, startup script, XDG autostart,
+systemd service, systemd timer, polkit rule, git hook, PROMPT\_COMMAND, shell alias, sudoers drop-in.
+
+---
 
 ## Development
 
 ```sh
 cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
-cargo test --all-features -- --ignored   # the SUID scan; walks the whole filesystem
+cargo test --all-features                            # unit + integration (no root needed)
+cargo test --all-features -- --ignored               # root-gated tests (filesystem mutation)
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```
 
-Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/) and are
-linted in CI — see `commitlint.config.mjs` for the accepted scopes.
+Or with `just`:
 
-### What runs in CI
+```sh
+just ci          # fmt + clippy + build + test + docs (what CI runs)
+just test        # cargo test only
+just test-root   # --ignored tests (requires root)
+```
+
+### CI workflows
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `ci.yml` | push / PR | fmt, clippy, build, test, coverage, docs — as parallel jobs |
-| `msrv.yml` | push / PR touching code | Builds and tests on the MSRV in `Cargo.toml` (currently 1.86) |
-| `audit.yml` | weekly + dependency changes | `cargo audit` against the RUSTSEC advisory database |
-| `cargo-deny.yml` | dependency changes | License, advisory, source and duplicate policy (`deny.toml`) |
+| `ci.yml` | push / PR | fmt, clippy, build, test, coverage, docs |
+| `msrv.yml` | push / PR (code changes) | Builds and tests on MSRV (currently 1.86) |
+| `audit.yml` | weekly + dep changes | `cargo audit` against RUSTSEC advisory DB |
+| `cargo-deny.yml` | dep changes | License, advisory, source and duplicate policy |
 | `codeql.yml` | push / PR / weekly | CodeQL static analysis |
 | `typos.yml` | push / PR | Spell check |
-| `actionlint.yml` | workflow changes | Lints these workflow files, shellcheck included |
-| `commitlint.yml` | push / PR | Conventional Commit messages |
+| `actionlint.yml` | workflow changes | Lints workflow files (shellcheck included) |
+| `commitlint.yml` | push / PR | Conventional Commit message enforcement |
 | `docs.yml` | push to `main` | Publishes rustdoc to GitHub Pages |
-| `release.yml` | `v*` tag | Builds gnu + static musl binaries, attaches to a Release |
+| `release.yml` | `v*` tag | Builds gnu + musl binaries, attaches to GitHub Release |
 
-Coverage is gated at 60% lines and functions; it currently sits at roughly 75% / 87%, so there is
-headroom to raise the floor in `ci.yml`. It will never reach 100%: interactive prompts and
-root-gated system mutation cannot run in CI.
+Coverage is gated at 60% (currently ~75% lines / ~87% functions). It will never reach 100% —
+interactive prompts and root-gated system mutation cannot run in CI.
 
-`docs.yml` needs GitHub Pages enabled on the repository (Settings → Pages → source "GitHub
-Actions") before its deploy step will succeed.
+Enable GitHub Pages (Settings → Pages → source "GitHub Actions") before `docs.yml`'s deploy step.
 
 ### Layout
 
-Single crate, built as a library plus a thin binary so the logic is reachable from integration
-tests. Modules use the sibling-file convention (`backups.rs` + `backups/`), not `mod.rs`.
-
-`tests/` mirrors `src/`, so it is always clear which source module a test covers.
+Single crate, library + thin binary. Modules use the sibling-file convention (`backups.rs` +
+`backups/`), never `mod.rs`. `tests/` mirrors `src/`.
 
 ```
 src/                                tests/
-├── main.rs                         ├── cli.rs          drives the built binary
-├── lib.rs                          │
-├── core.rs                         ├── core.rs
-│   └── core/                       │   └── core/
-│       ├── context.rs              │       ├── context.rs
-│       ├── error.rs                │       ├── scan.rs
-│       ├── scan.rs                 │       └── utils.rs
-│       └── utils.rs                │
-├── anti_persistence.rs             ├── anti_persistence.rs
-│   └── anti_persistence/           │   └── anti_persistence/
-│       ├── cron.rs                 │       └── php_shells.rs
-│       ├── cron_system.rs          │
-│       ├── php_shells.rs           │
-│       ├── polkit.rs               │
-│       ├── shell_aliases.rs        │
-│       ├── ssh_config.rs           │
-│       ├── sudoers.rs              │
-│       ├── systemd_timers.rs       │
-│       └── ... one per check       │
-├── backups.rs                      ├── backups.rs
-│   └── backups/                    │   └── backups/
-│       ├── all.rs                  │       ├── all.rs
-│       ├── compare_hashes.rs       │       ├── compare_hashes.rs
-│       ├── hash.rs                 │       ├── hash.rs
-│       └── paths.rs                │
-├── monitoring.rs                   └── common.rs       shared fixture helpers
+├── main.rs                         ├── cli.rs
+├── lib.rs                          ├── core.rs
+├── core.rs                         ├── anti_persistence.rs
+│   └── core/                       ├── backups.rs
+│       ├── box_type.rs             ├── monitoring.rs
+│       ├── context.rs              ├── system_hardening.rs
+│       ├── error.rs                └── service_restore.rs
+│       ├── scan.rs
+│       └── utils.rs
+├── anti_persistence.rs             (one file per technique)
+│   └── anti_persistence/
+├── backups.rs
+│   └── backups/
+│       ├── all.rs, compare_hashes.rs, custom.rs
+│       ├── ecomm.rs, hash.rs, mail.rs
+│       ├── paths.rs, restore.rs, splunk.rs, users.rs
+├── monitoring.rs
 │   └── monitoring/
-│       ├── binary_integrity.rs
-│       ├── bind_mounts.rs
-│       ├── c2_detection.rs
-│       ├── git_hooks.rs
-│       ├── proc_maps.rs
-│       ├── rootkit_cross_check.rs
-│       ├── webserver_config.rs
-│       └── ... one per check
-└── system_hardening.rs
-    └── system_hardening/
+│       ├── access_log.rs, auth_log_watch.rs, error_log.rs
+│       ├── network_watch.rs, php_modules.rs, pspy.rs
+│       └── (20+ other modules)
+├── system_hardening.rs
+│   └── system_hardening/
+│       ├── configs.rs, programs.rs, services.rs, user_perms.rs
+├── service_restore.rs
+│   └── service_restore/
+│       ├── distro.rs, dovecot.rs, opencart.rs
+│       ├── postfix.rs, prestashop.rs, splunk.rs, webserver.rs
+├── score_check.rs
+└── tui/
+    ├── app.rs          (main TUI loop, all tab rendering)
+    ├── dashboard.rs
+    └── logs/
 ```
 
-Each top-level file under `tests/` is one test binary, declared explicitly in `Cargo.toml`
-(`autotests = false`) so `common.rs` stays a shared helper instead of becoming an empty target.
-Submodules use `#[path]` attributes because a test crate root resolves `mod` against `tests/`
-rather than its own subdirectory.
-
-Every module exposes `run(&DefenderContext, ...) -> core::Result`. Errors use `DefenderError`
-(`src/core/error.rs`); `main` surfaces them through `anyhow`.
-
-Each check separates detection from action: the logic deciding whether something is suspicious is
-a pure function over `&str` or `&Path`, unit tested against fixtures, while `run` handles the
-system interaction around it. That split is why the suite covers detection without root.
+Every module exposes `run(&DefenderContext, ...) -> core::Result`. Detection logic is a pure
+function over `&str` / `&Path`, unit-tested against fixtures; `run()` handles the system
+interaction around it — that split keeps coverage high without root.
 
 ### Documentation
 
-Every public module carries a `//!` header explaining the persistence vector or detection
-technique it covers and why it matters — start there rather than with the code.
-`missing_docs` is enabled crate-wide, so every public item is documented and CI fails on a gap.
+Every module has a `//!` header explaining the technique or detection method.
+`missing_docs` is enabled crate-wide; CI fails on a gap.
 
 ```sh
 cargo doc --no-deps --open
 ```
 
-Published automatically to GitHub Pages on push to `main`.
-
-Code that walks the filesystem takes its paths as a parameter (`backups::all::run_with_paths`,
-`backups::hash::compute`, `php_shells::find_shells`) so tests can point it at a fixture tree
-instead of the real system.
+Rustdoc is published automatically to GitHub Pages on push to `main`.

@@ -416,6 +416,86 @@ pub fn ensure_php_apache(distro: &Distro, ctx: &DefenderContext) -> Result<()> {
     Ok(())
 }
 
+// ── Database bootstrapping ───────────────────────────────────────────────────
+
+/// Ensure MariaDB is installed, running, and has `db_name` created.
+///
+/// On a fresh install the root account has no password, so we set it to
+/// `db_pass` and create the target database in one step. If root already has
+/// a password (re-run scenario), we skip the ALTER USER and just ensure the
+/// database exists.
+pub fn ensure_mysql(
+    distro: &Distro,
+    db_name: &str,
+    db_pass: &str,
+    ctx: &DefenderContext,
+) -> Result<()> {
+    let pkg = match distro {
+        Distro::Debian => "mariadb-server",
+        Distro::Rhel => "mariadb-server",
+        Distro::Arch => "mariadb",
+        Distro::Suse => "mariadb",
+        Distro::Alpine => "mariadb",
+    };
+
+    let mysql_present = Command::new("mysql")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !mysql_present {
+        ctx.progress(&format!("[+] Installing {pkg}..."));
+        install_package(distro, &[pkg], ctx)?;
+
+        // Rocky/RHEL needs the data directory initialised before first start.
+        if matches!(distro, Distro::Rhel) {
+            let _ = Command::new("mysql_install_db")
+                .args(["--user=mysql", "--datadir=/var/lib/mysql"])
+                .output();
+        }
+    }
+
+    enable_and_restart("mariadb", ctx)?;
+
+    // Fresh install: root has no password — set it and create the database.
+    let setup_sql = format!(
+        "ALTER USER 'root'@'localhost' IDENTIFIED BY '{db_pass}'; \
+         CREATE DATABASE IF NOT EXISTS `{db_name}`; \
+         FLUSH PRIVILEGES;"
+    );
+    let fresh = Command::new("mysql")
+        .args(["-u", "root", "--connect-expired-password", "-e", &setup_sql])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if fresh {
+        ctx.progress(&format!(
+            "[✓] MariaDB configured, database '{db_name}' ready"
+        ));
+        return Ok(());
+    }
+
+    // Re-run: root already has a password — just ensure the database exists.
+    let create_sql = format!("CREATE DATABASE IF NOT EXISTS `{db_name}`;");
+    let output = Command::new("mysql")
+        .args(["-u", "root", &format!("-p{db_pass}"), "-e", &create_sql])
+        .output()
+        .map_err(|e| DefenderError::Command(format!("mysql: {e}")))?;
+
+    if output.status.success() {
+        ctx.progress(&format!("[✓] Database '{db_name}' ready"));
+    } else {
+        ctx.progress(&format!(
+            "[!] Could not create database: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    Ok(())
+}
+
 // ── Site verification ─────────────────────────────────────────────────────────
 
 /// Curl `url` and confirm the response body matches `pattern`.

@@ -34,8 +34,8 @@ use crate::core::{
 
 use super::distro::Distro;
 use super::webserver::{
-    download_file, ensure_php_apache, ensure_webserver, extract_zip, find_php, fix_permissions,
-    reload_webserver, resolve_web_root, verify_site,
+    download_file, ensure_mysql, ensure_php_apache, ensure_webserver, extract_zip, find_php,
+    fix_permissions, reload_webserver, resolve_web_root, verify_site,
 };
 
 /// Credentials collected by the TUI dialog (or the CLI prompts) before install.
@@ -115,6 +115,8 @@ pub fn run(
     ensure_webserver(&distro, ctx)?;
     // Ensure the Apache PHP module + MySQL driver are installed and active.
     ensure_php_apache(&distro, ctx)?;
+    // Ensure MariaDB is installed, running, and the target database exists.
+    // We need the credentials for this, so defer until after we collect them.
 
     ctx.progress(&format!(
         "[!] OpenCart {OPENCART_VERSION} will be installed to {}.",
@@ -197,6 +199,9 @@ pub fn run(
     let admin_pass = &creds.admin_pass;
     let admin_email = &creds.admin_email;
 
+    // ── 5b. Ensure database is ready ─────────────────────────────────────────
+    ensure_mysql(&distro, db_name, db_pass, ctx)?;
+
     // ── 6. Run CLI installer ──────────────────────────────────────────────────
     ctx.progress("[+] Running OpenCart CLI installer...");
     let cli_script = root.join("install/cli_install.php");
@@ -254,6 +259,20 @@ pub fn run(
             "OpenCart CLI installer returned non-zero; check output above for details".into(),
         ));
     }
+
+    // The CLI installer exits 0 even on DB connection failure but leaves
+    // config.php empty. Treat an empty config as a hard failure.
+    let config_len = fs::metadata(root.join("config.php"))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    if config_len == 0 {
+        return Err(DefenderError::Command(
+            "CLI installer exited 0 but config.php is empty — \
+             check DB credentials and that MariaDB accepted the connection"
+                .into(),
+        ));
+    }
+
     ctx.progress("[✓] OpenCart installation complete");
 
     // ── 7. Delete web-accessible installer ───────────────────────────────────

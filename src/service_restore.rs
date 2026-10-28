@@ -33,7 +33,9 @@ pub mod webserver;
 /// The TUI collects these via a dialog before spawning the restore thread.
 /// The CLI path leaves both fields as `None` and prompts interactively.
 pub struct RestoreCredentials {
+    /// Credentials for an OpenCart restore, or `None` to prompt interactively.
     pub opencart: Option<opencart::OpenCartCredentials>,
+    /// Credentials for a PrestaShop restore, or `None` to prompt interactively.
     pub prestashop: Option<prestashop::PrestaShopCredentials>,
 }
 
@@ -82,7 +84,11 @@ pub struct CliArgs {
 ///
 /// `creds` carries pre-supplied credentials for web-app restores (TUI path).
 /// Pass `None` from the CLI to fall back to interactive prompts.
-pub fn run(ctx: &DefenderContext, args: &CliArgs, creds: Option<&RestoreCredentials>) -> Result<()> {
+pub fn run(
+    ctx: &DefenderContext,
+    args: &CliArgs,
+    creds: Option<&RestoreCredentials>,
+) -> Result<()> {
     if args.postfix {
         println!("[+] Restoring Postfix");
         postfix::run(ctx)?;
@@ -98,7 +104,12 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs, creds: Option<&RestoreCredenti
     if args.opencart {
         println!("[+] Restoring OpenCart at {}", args.opencart_path.display());
         let oc_creds = creds.and_then(|c| c.opencart.as_ref());
-        opencart::run(ctx, &args.opencart_path, args.opencart_url.as_deref(), oc_creds)?;
+        opencart::run(
+            ctx,
+            &args.opencart_path,
+            args.opencart_url.as_deref(),
+            oc_creds,
+        )?;
     }
     if args.prestashop {
         println!(
@@ -106,7 +117,12 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs, creds: Option<&RestoreCredenti
             args.prestashop_path.display()
         );
         let ps_creds = creds.and_then(|c| c.prestashop.as_ref());
-        prestashop::run(ctx, &args.prestashop_path, args.prestashop_url.as_deref(), ps_creds)?;
+        prestashop::run(
+            ctx,
+            &args.prestashop_path,
+            args.prestashop_url.as_deref(),
+            ps_creds,
+        )?;
     }
     Ok(())
 }

@@ -41,14 +41,23 @@ use super::webserver::{
 /// Credentials collected by the TUI dialog (or the CLI prompts) before install.
 #[derive(Debug, Clone)]
 pub struct OpenCartCredentials {
+    /// Database hostname (e.g. `localhost`).
     pub db_host: String,
+    /// Database username.
     pub db_user: String,
+    /// Database password.
     pub db_pass: String,
+    /// Database name (e.g. `opencart`).
     pub db_name: String,
+    /// Database port (e.g. `3306`).
     pub db_port: String,
+    /// HTTP base URL including trailing slash (e.g. `http://localhost/`).
     pub http_server: String,
+    /// OpenCart admin username.
     pub admin_user: String,
+    /// OpenCart admin password.
     pub admin_pass: String,
+    /// OpenCart admin email address.
     pub admin_email: String,
 }
 
@@ -111,7 +120,9 @@ pub fn run(
         "[!] OpenCart {OPENCART_VERSION} will be installed to {}.",
         root.display()
     ));
-    ctx.progress("[!] Existing PHP files (except config.php / admin/config.php) will be overwritten.");
+    ctx.progress(
+        "[!] Existing PHP files (except config.php / admin/config.php) will be overwritten.",
+    );
 
     // Skip confirmation prompt when credentials are pre-supplied (TUI path).
     if credentials.is_none() && !prompt_yes("[?] Continue? (y/N)")? {
@@ -358,7 +369,6 @@ fn replace_define_line(src: &str, key: &str, value: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
-
 
 #[cfg(test)]
 mod tests {

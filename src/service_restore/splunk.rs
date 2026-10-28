@@ -32,7 +32,9 @@ pub fn run(ctx: &DefenderContext) -> Result {
         )));
     }
 
-    ctx.progress(&format!("[!] This will wipe all files in {LOCAL_DIR} and restart Splunk."));
+    ctx.progress(&format!(
+        "[!] This will wipe all files in {LOCAL_DIR} and restart Splunk."
+    ));
     if ctx.interactive() && !prompt_yes("[?] Continue? (y/N)")? {
         ctx.progress("[-] Skipping Splunk restore");
         return Ok(());

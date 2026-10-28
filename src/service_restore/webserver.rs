@@ -45,8 +45,7 @@ pub fn download_file(url: &str, dest: &Path, distro: &Distro, ctx: &DefenderCont
 
     ctx.progress("[!] Neither curl nor wget succeeded — installing curl automatically...");
 
-    if !ctx.interactive()
-        || prompt_yes(&format!("[?] Install curl via {}? (y/N)", distro.name()))?
+    if !ctx.interactive() || prompt_yes(&format!("[?] Install curl via {}? (y/N)", distro.name()))?
     {
         install_package(distro, &["curl"], ctx)?;
         if try_curl(url, dest_str) {
@@ -174,7 +173,9 @@ pub fn extract_zip(
         }
     }
 
-    ctx.progress(&format!("[✓] Extracted {extracted} files, preserved {preserved}"));
+    ctx.progress(&format!(
+        "[✓] Extracted {extracted} files, preserved {preserved}"
+    ));
     ctx.debug(&format!(
         "extraction complete: {extracted} extracted, {preserved} preserved, {total} total entries"
     ));
@@ -338,8 +339,7 @@ pub fn find_php(distro: &Distro, ctx: &DefenderContext) -> Result<String> {
     let pkg = distro.php_package();
 
     // In interactive mode, ask first; in TUI mode, just install.
-    if ctx.interactive()
-        && !prompt_yes(&format!("[?] Install {pkg} via {}? (y/N)", distro.name()))?
+    if ctx.interactive() && !prompt_yes(&format!("[?] Install {pkg} via {}? (y/N)", distro.name()))?
     {
         return Err(DefenderError::Other(
             "PHP not found; install php-cli and retry".into(),

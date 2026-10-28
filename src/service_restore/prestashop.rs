@@ -38,12 +38,19 @@ use super::webserver::{
 /// Credentials collected by the TUI dialog (or CLI prompts) before install.
 #[derive(Debug, Clone)]
 pub struct PrestaShopCredentials {
+    /// Shop domain without scheme (e.g. `localhost` or `shop.example.com`).
     pub domain: String,
+    /// Database server address (e.g. `localhost`).
     pub db_server: String,
+    /// Database name (e.g. `prestashop`).
     pub db_name: String,
+    /// Database username.
     pub db_user: String,
+    /// Database password.
     pub db_pass: String,
+    /// Admin account email address.
     pub admin_email: String,
+    /// Admin account password.
     pub admin_pass: String,
 }
 

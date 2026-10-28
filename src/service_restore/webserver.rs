@@ -11,6 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use regex::Regex;
 use walkdir::WalkDir;
 use zip::ZipArchive;
 
@@ -354,6 +355,70 @@ pub fn find_php(distro: &Distro, ctx: &DefenderContext) -> Result<String> {
     Err(DefenderError::Other(
         "PHP was installed but no php binary found on $PATH".into(),
     ))
+}
+
+// ── Web-server bootstrapping ──────────────────────────────────────────────────
+
+/// Ensure a web server is installed and running.
+///
+/// If no web server is currently active, installs and starts Apache (or the
+/// distro equivalent) automatically — no prompts.
+pub fn ensure_webserver(distro: &Distro, ctx: &DefenderContext) -> Result<()> {
+    if active_webserver().is_some() {
+        return Ok(());
+    }
+
+    ctx.progress("[!] No active web server detected — installing Apache...");
+    let pkg = match distro {
+        Distro::Debian => "apache2",
+        Distro::Rhel => "httpd",
+        Distro::Arch => "apache",
+        Distro::Suse => "apache2",
+        Distro::Alpine => "apache2",
+    };
+    let svc = match distro {
+        Distro::Rhel => "httpd",
+        _ => "apache2",
+    };
+
+    install_package(distro, &[pkg], ctx)?;
+    enable_and_restart(svc, ctx)?;
+    ctx.progress(&format!("[✓] {svc} installed and running"));
+    Ok(())
+}
+
+// ── Site verification ─────────────────────────────────────────────────────────
+
+/// Curl `url` and confirm the response body matches `pattern`.
+///
+/// Uses a 15-second timeout. Returns `Ok(())` if the pattern matches,
+/// `Err` if curl fails or the body does not match.
+pub fn verify_site(url: &str, pattern: &str, ctx: &DefenderContext) -> Result<()> {
+    ctx.progress(&format!("[+] Verifying site at {url}..."));
+
+    let output = Command::new("curl")
+        .args(["-s", "-L", "--max-time", "15", url])
+        .output()
+        .map_err(|e| DefenderError::Command(format!("curl verify: {e}")))?;
+
+    if !output.status.success() {
+        return Err(DefenderError::Other(format!(
+            "curl returned non-zero checking {url}"
+        )));
+    }
+
+    let body = String::from_utf8_lossy(&output.stdout);
+    let re = Regex::new(pattern)
+        .map_err(|e| DefenderError::Other(format!("invalid verify regex: {e}")))?;
+
+    if re.is_match(&body) {
+        ctx.progress("[✓] Site verification passed");
+        Ok(())
+    } else {
+        Err(DefenderError::Other(format!(
+            "site at {url} did not match expected pattern — check server logs"
+        )))
+    }
 }
 
 /// Try each php binary name; return the first one that responds.

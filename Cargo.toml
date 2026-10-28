@@ -28,6 +28,7 @@ crossterm = "0.28"
 libc = "0.2"
 nix = { version = "0.31.1", features = ["user", "ioctl"] }
 ratatui = "0.29"
+regex = "1"
 sha2 = "0.10"
 thiserror = "2"
 walkdir = "2.5.0"

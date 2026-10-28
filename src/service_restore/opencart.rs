@@ -34,7 +34,8 @@ use crate::core::{
 
 use super::distro::{Distro, ensure_root_or_reexec};
 use super::webserver::{
-    download_file, extract_zip, find_php, fix_permissions, reload_webserver, resolve_web_root,
+    download_file, ensure_webserver, extract_zip, find_php, fix_permissions, reload_webserver,
+    resolve_web_root, verify_site,
 };
 
 /// Credentials collected by the TUI dialog (or the CLI prompts) before install.
@@ -102,6 +103,9 @@ pub fn run(
     ctx.debug(&format!("web root: {}", root.display()));
     ctx.debug(&format!("php: {php}"));
     ctx.debug(&format!("distro: {}", distro.name()));
+
+    // Guarantee a web server is present before we install into the web root.
+    ensure_webserver(&distro, ctx)?;
 
     ctx.progress(&format!(
         "[!] OpenCart {OPENCART_VERSION} will be installed to {}.",
@@ -248,6 +252,12 @@ pub fn run(
     ctx.progress(&format!(
         "[!] Admin panel: {http_server}admin/  (rename the admin/ directory when you have time)"
     ));
+
+    // Verify the storefront is actually serving an OpenCart page.
+    if let Err(e) = verify_site(http_server, r"(?i)opencart|powered by opencart", ctx) {
+        ctx.progress(&format!("[!] Site check failed: {e}"));
+    }
+
     Ok(())
 }
 

@@ -12,7 +12,6 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use super::distro::ensure_root_or_reexec;
 use crate::core::{DefenderContext, DefenderError, Result, prompt_yes};
 
 /// Canonical Splunk installation directory.
@@ -24,8 +23,6 @@ const SPLUNK_BIN: &str = "/opt/splunk/bin/splunk";
 
 /// Stop Splunk, wipe the local-override layer, and start it again.
 pub fn run(ctx: &DefenderContext) -> Result {
-    ensure_root_or_reexec()?;
-
     if !Path::new(SPLUNK_BIN).exists() {
         return Err(DefenderError::Other(format!(
             "Splunk not found at {SPLUNK_HOME}; is it installed?"

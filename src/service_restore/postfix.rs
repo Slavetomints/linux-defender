@@ -6,8 +6,6 @@
 
 use crate::core::{DefenderContext, DefenderError, Result, prompt_yes};
 
-use super::distro::ensure_root_or_reexec;
-
 use super::distro::{Distro, enable_and_restart};
 
 /// systemd service name for Postfix.
@@ -15,8 +13,6 @@ const SERVICE: &str = "postfix";
 
 /// Reinstall Postfix via the host's package manager and bring it back up.
 pub fn run(ctx: &DefenderContext) -> Result {
-    ensure_root_or_reexec()?;
-
     let distro = Distro::detect()?;
     ctx.debug(&format!("detected distro: {}", distro.name()));
 

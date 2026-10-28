@@ -9,6 +9,7 @@ use std::env;
 use anyhow::Context;
 use chrono::Local;
 use clap::{Parser, Subcommand};
+use nix::unistd::Uid;
 
 use defender_cli::core::DefenderContext;
 use defender_cli::{anti_persistence, backups, monitoring, service_restore, system_hardening};
@@ -55,6 +56,11 @@ impl Mode {
 }
 
 fn main() -> anyhow::Result<()> {
+    if !Uid::effective().is_root() {
+        eprintln!("[!] defender must be run as root (try: sudo defender-cli)");
+        std::process::exit(1);
+    }
+
     // No arguments → launch the TUI.
     if env::args().len() == 1 {
         return defender_cli::tui::run();

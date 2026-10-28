@@ -32,7 +32,7 @@ use crate::core::{
     DefenderContext, DefenderError, Result, prompt_string, prompt_string_default, prompt_yes,
 };
 
-use super::distro::{Distro, ensure_root_or_reexec};
+use super::distro::Distro;
 use super::webserver::{
     download_file, ensure_php_apache, ensure_webserver, extract_zip, find_php, fix_permissions,
     reload_webserver, resolve_web_root, verify_site,
@@ -101,8 +101,6 @@ pub fn run(
     download_url: Option<&str>,
     credentials: Option<&OpenCartCredentials>,
 ) -> Result<()> {
-    ensure_root_or_reexec()?;
-
     let root = resolve_web_root(web_root, ctx)?;
     let distro = Distro::detect()?;
     let php = find_php(&distro, ctx)?;

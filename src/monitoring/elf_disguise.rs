@@ -430,7 +430,10 @@ mod tests {
         let file_ext = ext(&png_path).unwrap_or_default();
         let is_binary = BINARY_EXTENSIONS.iter().any(|&e| e == file_ext);
         let has_shebang = is_shebang(&png_path);
-        assert!(is_binary && has_shebang, "should be flagged as shebang in binary ext");
+        assert!(
+            is_binary && has_shebang,
+            "should be flagged as shebang in binary ext"
+        );
         std::fs::remove_file(png_path).unwrap();
     }
 

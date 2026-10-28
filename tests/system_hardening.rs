@@ -8,37 +8,44 @@ mod common;
 
 use tempfile::TempDir;
 
-use common::{run_cli, stdout};
+use common::run_cli;
 
-const HARDENING_STEPS: &[&str] = &[
-    "--user-permissions",
-    "--services",
-    "--programs",
-    "--configs",
-];
+/// Flags that run real work but do not require root to exit cleanly.
+const NO_ROOT_STEPS: &[&str] = &["--programs", "--configs"];
+
+/// Flags that require root; tested separately with `#[ignore]`.
+const ROOT_STEPS: &[&str] = &["--user-permissions", "--services"];
 
 #[test]
-fn every_hardening_step_is_accepted_and_routed() {
+fn every_non_root_hardening_step_exits_cleanly() {
     let dir = TempDir::new().unwrap();
 
-    for flag in HARDENING_STEPS {
+    for &flag in NO_ROOT_STEPS {
         let out = run_cli(dir.path(), &["system-hardening", flag]);
         assert!(out.status.success(), "{} should exit cleanly", flag);
-        assert!(
-            stdout(&out).contains("Not implemented"),
-            "{} is a stub and should say so",
-            flag
-        );
     }
 }
 
 #[test]
+#[ignore = "requires root"]
+fn every_root_hardening_step_exits_cleanly() {
+    let dir = TempDir::new().unwrap();
+
+    for &flag in ROOT_STEPS {
+        let out = run_cli(dir.path(), &["system-hardening", flag]);
+        assert!(out.status.success(), "{} should exit cleanly", flag);
+    }
+}
+
+#[test]
+#[ignore = "requires root"]
 fn hardening_steps_can_be_combined() {
     let dir = TempDir::new().unwrap();
-    let out = run_cli(dir.path(), &["system-hardening", "--services", "--configs"]);
-
+    let out = run_cli(
+        dir.path(),
+        &["system-hardening", "--user-permissions", "--services"],
+    );
     assert!(out.status.success());
-    assert_eq!(stdout(&out).matches("Not implemented").count(), 2);
 }
 
 #[test]

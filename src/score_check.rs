@@ -9,6 +9,8 @@
 //! - [`CheckKind::Http`] — send a raw HTTP/1.0 GET, verify the status code
 //! - [`CheckKind::Https`] — `curl` subprocess with SNI, verify status code
 //! - [`CheckKind::Smtp`] — connect and read the greeting banner (`220 …`)
+//! - [`CheckKind::Imap`] — connect and read the greeting banner (`* OK …`)
+//! - [`CheckKind::Pop3`] — connect and read the greeting banner (`+OK …`)
 //! - [`CheckKind::Dns`] — `dig` query, check for an ANSWER section
 
 use std::collections::VecDeque;
@@ -37,6 +39,10 @@ pub enum CheckKind {
     },
     /// SMTP: connect and expect a `220` greeting banner.
     Smtp,
+    /// IMAP: connect and expect a `* OK` untagged greeting.
+    Imap,
+    /// POP3: connect and expect a `+OK` greeting.
+    Pop3,
     /// DNS: run `dig @host query` and expect an ANSWER section.
     Dns {
         /// Query name, e.g. `"example.com"`.
@@ -70,7 +76,7 @@ pub struct CheckResult {
     pub checked_at: SystemTime,
 }
 
-/// Running history for one service: the last [`HISTORY_LEN`] results.
+/// Running history for one service: the last 20 results.
 pub struct ServiceHistory {
     /// The check definition.
     pub check: ServiceCheck,
@@ -147,7 +153,10 @@ impl ServiceHistory {
 
 /// Build a `ServiceHistory` list from a slice of check definitions.
 pub fn build_histories(checks: &[ServiceCheck]) -> Vec<ServiceHistory> {
-    checks.iter().map(|c| ServiceHistory::new(c.clone())).collect()
+    checks
+        .iter()
+        .map(|c| ServiceHistory::new(c.clone()))
+        .collect()
 }
 
 /// Poll all histories and return a `(name, port, up)` summary compatible with
@@ -169,13 +178,17 @@ fn run_check(svc: &ServiceCheck) -> CheckResult {
     let start = Instant::now();
     let (up, detail) = match &svc.kind {
         CheckKind::Tcp => check_tcp(svc.host, svc.port),
-        CheckKind::Http { path, expected_status } => {
-            check_http(svc.host, svc.port, path, *expected_status)
-        }
-        CheckKind::Https { path, expected_status } => {
-            check_https(svc.host, svc.port, path, *expected_status)
-        }
+        CheckKind::Http {
+            path,
+            expected_status,
+        } => check_http(svc.host, svc.port, path, *expected_status),
+        CheckKind::Https {
+            path,
+            expected_status,
+        } => check_https(svc.host, svc.port, path, *expected_status),
         CheckKind::Smtp => check_smtp(svc.host, svc.port),
+        CheckKind::Imap => check_imap(svc.host, svc.port),
+        CheckKind::Pop3 => check_pop3(svc.host, svc.port),
         CheckKind::Dns { query } => check_dns(svc.host, svc.port, query),
     };
     CheckResult {
@@ -214,7 +227,10 @@ fn check_http(host: &str, port: u16, path: &str, expected: u16) -> (bool, String
         return (false, "TCP connect failed".into());
     };
     let _ = stream.set_read_timeout(Some(CHECK_TIMEOUT));
-    let request = format!("GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n", path, host);
+    let request = format!(
+        "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        path, host
+    );
     if stream.write_all(request.as_bytes()).is_err() {
         return (false, "write failed".into());
     }
@@ -224,7 +240,13 @@ fn check_http(host: &str, port: u16, path: &str, expected: u16) -> (bool, String
     let status = parse_http_status(&resp);
     match status {
         Some(code) => (code == expected, format!("HTTP {}", code)),
-        None => (false, format!("bad response: {}", resp.chars().take(40).collect::<String>())),
+        None => (
+            false,
+            format!(
+                "bad response: {}",
+                resp.chars().take(40).collect::<String>()
+            ),
+        ),
     }
 }
 
@@ -233,9 +255,13 @@ fn check_https(host: &str, port: u16, path: &str, expected: u16) -> (bool, Strin
     let url = format!("https://{}:{}{}", host, port, path);
     let out = std::process::Command::new("curl")
         .args([
-            "-s", "-o", "/dev/null",
-            "-w", "%{http_code}",
-            "--max-time", "3",
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "--max-time",
+            "3",
             "--insecure", // competition certs are self-signed
             &url,
         ])
@@ -248,7 +274,10 @@ fn check_https(host: &str, port: u16, path: &str, expected: u16) -> (bool, Strin
         }
         Ok(o) => {
             let msg = String::from_utf8_lossy(&o.stderr);
-            (false, format!("curl error: {}", msg.chars().take(40).collect::<String>()))
+            (
+                false,
+                format!("curl error: {}", msg.chars().take(40).collect::<String>()),
+            )
         }
         Err(e) => (false, format!("curl not found: {}", e)),
     }
@@ -271,7 +300,55 @@ fn check_smtp(host: &str, port: u16) -> (bool, String) {
     if first_line.starts_with("220") {
         (true, first_line.chars().take(50).collect())
     } else {
-        (false, format!("unexpected banner: {}", first_line.chars().take(40).collect::<String>()))
+        (
+            false,
+            format!(
+                "unexpected banner: {}",
+                first_line.chars().take(40).collect::<String>()
+            ),
+        )
+    }
+}
+
+/// IMAP greeting check: connect and expect `* OK`.
+fn check_imap(host: &str, port: u16) -> (bool, String) {
+    let addr = format!("{}:{}", host, port);
+    let Ok(mut stream) = (match addr.parse::<SocketAddr>() {
+        Ok(sa) => TcpStream::connect_timeout(&sa, CONNECT_TIMEOUT),
+        Err(_) => TcpStream::connect(&addr as &str),
+    }) else {
+        return (false, "TCP connect failed".into());
+    };
+    let _ = stream.set_read_timeout(Some(CHECK_TIMEOUT));
+    let mut buf = [0u8; 256];
+    let n = stream.read(&mut buf).unwrap_or(0);
+    let banner = String::from_utf8_lossy(&buf[..n]);
+    let first = banner.lines().next().unwrap_or("").trim();
+    if first.starts_with("* OK") {
+        (true, first.chars().take(50).collect())
+    } else {
+        (false, format!("unexpected banner: {}", first.chars().take(40).collect::<String>()))
+    }
+}
+
+/// POP3 greeting check: connect and expect `+OK`.
+fn check_pop3(host: &str, port: u16) -> (bool, String) {
+    let addr = format!("{}:{}", host, port);
+    let Ok(mut stream) = (match addr.parse::<SocketAddr>() {
+        Ok(sa) => TcpStream::connect_timeout(&sa, CONNECT_TIMEOUT),
+        Err(_) => TcpStream::connect(&addr as &str),
+    }) else {
+        return (false, "TCP connect failed".into());
+    };
+    let _ = stream.set_read_timeout(Some(CHECK_TIMEOUT));
+    let mut buf = [0u8; 256];
+    let n = stream.read(&mut buf).unwrap_or(0);
+    let banner = String::from_utf8_lossy(&buf[..n]);
+    let first = banner.lines().next().unwrap_or("").trim();
+    if first.starts_with("+OK") {
+        (true, first.chars().take(50).collect())
+    } else {
+        (false, format!("unexpected banner: {}", first.chars().take(40).collect::<String>()))
     }
 }
 
@@ -316,13 +393,19 @@ pub const WEB_CHECKS: &[ServiceCheck] = &[
         name: "HTTP",
         host: "127.0.0.1",
         port: 80,
-        kind: CheckKind::Http { path: "/", expected_status: 200 },
+        kind: CheckKind::Http {
+            path: "/",
+            expected_status: 200,
+        },
     },
     ServiceCheck {
         name: "HTTPS",
         host: "127.0.0.1",
         port: 443,
-        kind: CheckKind::Https { path: "/", expected_status: 200 },
+        kind: CheckKind::Https {
+            path: "/",
+            expected_status: 200,
+        },
     },
     ServiceCheck {
         name: "SSH",
@@ -350,19 +433,34 @@ pub const MAIL_CHECKS: &[ServiceCheck] = &[
         name: "Dovecot IMAP",
         host: "127.0.0.1",
         port: 143,
-        kind: CheckKind::Tcp,
+        kind: CheckKind::Imap,
     },
     ServiceCheck {
         name: "Dovecot IMAPS",
         host: "127.0.0.1",
         port: 993,
-        kind: CheckKind::Tcp,
+        kind: CheckKind::Imap,
+    },
+    ServiceCheck {
+        name: "Dovecot POP3",
+        host: "127.0.0.1",
+        port: 110,
+        kind: CheckKind::Pop3,
+    },
+    ServiceCheck {
+        name: "Dovecot POP3S",
+        host: "127.0.0.1",
+        port: 995,
+        kind: CheckKind::Pop3,
     },
     ServiceCheck {
         name: "Roundcube",
         host: "127.0.0.1",
         port: 80,
-        kind: CheckKind::Http { path: "/", expected_status: 200 },
+        kind: CheckKind::Http {
+            path: "/",
+            expected_status: 200,
+        },
     },
     ServiceCheck {
         name: "SSH",
@@ -378,7 +476,10 @@ pub const SPLUNK_CHECKS: &[ServiceCheck] = &[
         name: "Splunk Web",
         host: "127.0.0.1",
         port: 8000,
-        kind: CheckKind::Http { path: "/", expected_status: 200 },
+        kind: CheckKind::Http {
+            path: "/",
+            expected_status: 200,
+        },
     },
     ServiceCheck {
         name: "Splunk Mgmt",

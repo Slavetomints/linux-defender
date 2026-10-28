@@ -39,7 +39,14 @@ pub fn compute(paths: &[&str]) -> Result<BTreeMap<String, String>> {
         }
 
         if src.is_file() {
-            hashes.insert((*path).to_string(), hash_file(src)?);
+            match hash_file(src) {
+                Ok(digest) => {
+                    hashes.insert((*path).to_string(), digest);
+                }
+                Err(_) => {
+                    eprintln!("[!] Cannot read {path} (skipped)");
+                }
+            }
         } else if src.is_dir() {
             for entry in WalkDir::new(src).into_iter().filter_map(|e| e.ok()) {
                 let entry_path = entry.path();
@@ -49,7 +56,13 @@ pub fn compute(paths: &[&str]) -> Result<BTreeMap<String, String>> {
 
                 let key = entry_path.to_string_lossy().to_string();
                 let value = if entry_path.is_file() {
-                    hash_file(entry_path)?
+                    match hash_file(entry_path) {
+                        Ok(d) => d,
+                        Err(_) => {
+                            eprintln!("[!] Cannot read {} (skipped)", entry_path.display());
+                            continue;
+                        }
+                    }
                 } else if entry_path.is_dir() {
                     MARKER_DIR.to_string()
                 } else {

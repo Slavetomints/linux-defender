@@ -427,7 +427,8 @@ mod tests {
 
     #[test]
     fn passwd_parse_skips_non_numeric_uid() {
-        let contents = "broken:x:notanumber:0::/home/broken:/bin/sh\nroot:x:0:0:root:/root:/bin/bash\n";
+        let contents =
+            "broken:x:notanumber:0::/home/broken:/bin/sh\nroot:x:0:0:root:/root:/bin/bash\n";
         let accounts: Vec<Account> = contents
             .lines()
             .filter_map(|line| {

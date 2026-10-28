@@ -3,6 +3,10 @@
 //! The intended workflow is to take a baseline at the start of a competition
 //! with `--all`, then use `--compare-hashes` against that baseline to see what
 //! has been altered since.
+//!
+//! Use `--restore --save-location <dir>` to copy files from a backup directory
+//! back to their original locations, one prompt per file. Targeted backups (`--mail`, `--users`, `--custom`)
+//! cover specific stacks and are useful for fast restore.
 
 use std::path::PathBuf;
 
@@ -33,27 +37,27 @@ pub struct CliArgs {
     #[arg(long)]
     pub compare_hashes: bool,
 
-    /// Back up a site-specific service (not yet implemented)
+    /// Back up an arbitrary path (e.g. `--custom /srv/myapp`)
     #[arg(long)]
-    pub custom: bool,
+    pub custom: Option<PathBuf>,
 
-    /// Back up the e-commerce stack (not yet implemented)
+    /// Back up the e-commerce stack (OpenCart, PrestaShop, PHP config)
     #[arg(long)]
     pub ecomm: bool,
 
-    /// Back up the mail stack (not yet implemented)
+    /// Back up the mail stack
     #[arg(long)]
     pub mail: bool,
 
-    /// Restore from a previous backup (not yet implemented)
+    /// Restore from a previous backup (requires `--save-location`)
     #[arg(long)]
     pub restore: bool,
 
-    /// Back up Splunk configuration (not yet implemented)
+    /// Back up Splunk configuration
     #[arg(long)]
     pub splunk: bool,
 
-    /// Back up the user and group databases (not yet implemented)
+    /// Back up the user and group databases
     #[arg(long)]
     pub users: bool,
 
@@ -72,29 +76,33 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
         println!("[+] Comparing hashes");
         compare_hashes::run(ctx, &args.save_location)?;
     }
-    if args.custom {
-        println!("[+] Backing up custom service");
-        custom::run(ctx)?;
+    if let Some(ref path) = args.custom {
+        println!("[+] Backing up custom path: {}", path.display());
+        custom::run(ctx, path, &args.save_location)?;
     }
     if args.ecomm {
         println!("[+] Backing up ecomm service");
-        ecomm::run(ctx)?;
+        ecomm::run(ctx, &args.save_location)?;
     }
     if args.mail {
         println!("[+] Backing up mail service");
-        mail::run(ctx)?;
+        mail::run(ctx, &args.save_location)?;
     }
     if args.restore {
-        println!("[+] Restoring from backup");
-        restore::run(ctx)?;
+        if let Some(ref dir) = args.save_location {
+            println!("[+] Restoring from backup");
+            restore::run(ctx, dir)?;
+        } else {
+            eprintln!("[!] --restore requires --save-location <backup-dir>");
+        }
     }
     if args.splunk {
         println!("[+] Backing up splunk service");
-        splunk::run(ctx)?;
+        splunk::run(ctx, &args.save_location)?;
     }
     if args.users {
         println!("[+] Backing up user databases");
-        users::run(ctx)?;
+        users::run(ctx, &args.save_location)?;
     }
 
     Ok(())

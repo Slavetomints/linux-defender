@@ -406,7 +406,10 @@ mod tests {
         let content =
             "deadbeef00000000000000000000000000000000000000000000000000000000  /usr/bin/ls\n";
         let map = parse_baseline(content);
-        assert_eq!(map.get("/usr/bin/ls").unwrap(), "deadbeef00000000000000000000000000000000000000000000000000000000");
+        assert_eq!(
+            map.get("/usr/bin/ls").unwrap(),
+            "deadbeef00000000000000000000000000000000000000000000000000000000"
+        );
     }
 
     #[test]

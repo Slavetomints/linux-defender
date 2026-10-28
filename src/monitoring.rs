@@ -8,22 +8,28 @@ use clap::Args;
 
 use crate::core::{DefenderContext, DefenderError, Result};
 
+pub mod access_log;
 pub mod ai_artifacts;
 pub mod attacker_tools;
 pub mod auth_log;
+pub mod auth_log_watch;
 pub mod binary_integrity;
 pub mod bind_mounts;
 pub mod c2_detection;
 pub mod deleted_binaries;
 pub mod elf_disguise;
+pub mod error_log;
 pub mod fail2ban;
 pub mod git_hooks;
 pub mod hidden_elf;
+pub mod network_watch;
 pub mod outbound_connections;
 pub mod perm_anomalies;
+pub mod php_modules;
 pub mod port_map;
 pub mod proc_maps;
 pub mod process_tree;
+pub mod pspy;
 pub mod recently_modified;
 pub mod rootkit_cross_check;
 pub mod suspicious_services;
@@ -119,24 +125,23 @@ pub struct CliArgs {
     #[arg(long)]
     pub bind_mounts: bool,
 
-    // ── Legacy stub flags (maintained for backwards compatibility) ────────
-    /// Watch the web server access log (not yet implemented)
+    /// Analyse web server access log for traversal, webshells, and scanners
     #[arg(long)]
     pub access_log: bool,
 
-    /// Watch the web server error log (not yet implemented)
+    /// Analyse web server error log for exploitation indicators
     #[arg(long)]
     pub error_log: bool,
 
-    /// Watch the authentication log (not yet implemented)
+    /// Scan the last hour of auth.log for account changes and sudo commands
     #[arg(long)]
     pub auth_log: bool,
 
-    /// Watch for short-lived processes (not yet implemented)
+    /// Snapshot short-lived and deleted-binary processes
     #[arg(long)]
     pub pspy: bool,
 
-    /// Watch listening ports and connections (not yet implemented)
+    /// Snapshot listening ports and active connections
     #[arg(long)]
     pub network: bool,
 
@@ -211,21 +216,20 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
         run_module("bind_mounts", ctx)?;
     }
 
-    // Legacy stubs — print a placeholder so existing integration tests pass.
-    if args.access_log {
-        println!("[!] Not implemented: monitoring access log");
+    if args.all || args.access_log {
+        run_module("access_log", ctx)?;
     }
-    if args.error_log {
-        println!("[!] Not implemented: monitoring error log");
+    if args.all || args.error_log {
+        run_module("error_log", ctx)?;
     }
-    if args.auth_log {
-        println!("[!] Not implemented: monitoring auth log");
+    if args.all || args.auth_log {
+        run_module("auth_log_watch", ctx)?;
     }
     if args.pspy {
-        println!("[!] Not implemented: pspy");
+        run_module("pspy", ctx)?;
     }
     if args.network {
-        println!("[!] Not implemented: monitoring network connections");
+        run_module("network_watch", ctx)?;
     }
 
     Ok(())
@@ -255,6 +259,11 @@ pub fn run_module(name: &str, ctx: &DefenderContext) -> Result {
         "git_hooks" => git_hooks::run(ctx),
         "webserver_config" => webserver_config::run(ctx),
         "bind_mounts" => bind_mounts::run(ctx),
+        "pspy" => pspy::run(ctx),
+        "network_watch" => network_watch::run(ctx),
+        "access_log" => access_log::run(ctx),
+        "error_log" => error_log::run(ctx),
+        "auth_log_watch" => auth_log_watch::run(ctx),
         _ => Err(DefenderError::Command(format!(
             "unknown monitoring module: {}",
             name

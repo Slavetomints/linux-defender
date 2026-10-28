@@ -27,6 +27,9 @@ build:
 # Run all unit tests.
 test:
     cargo test --all-features --locked
+
+# Run ignored (root-required) tests — needs sudo.
+test-root:
     cargo test --all-features --locked -- --ignored
 
 # Build docs with warnings as errors.

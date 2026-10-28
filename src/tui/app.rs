@@ -23,9 +23,7 @@ use crate::core::{BoxType, DefenderContext, Finding, Severity, detect_box_type, 
 use crate::score_check::{ServiceHistory, build_histories, poll_all};
 use crate::tui::logs::dashboard::LogDashboard as LogDash;
 
-use super::dashboard::{
-    SessionInfo, poll_auth_events, poll_sessions, render as render_dashboard,
-};
+use super::dashboard::{SessionInfo, poll_auth_events, poll_sessions, render as render_dashboard};
 use super::logs::preserve;
 
 /// Which pane of the Scan tab currently has keyboard focus.
@@ -47,6 +45,54 @@ pub(crate) enum ScanInterval {
     /// Manual only — expensive filesystem walks or rarely-changing config.
     OnDemand,
 }
+
+/// Registry of monitoring modules available from the Monitor tab: (id, display label).
+const MONITOR_MODULES: &[(&str, &str)] = &[
+    ("access_log", "Access log analysis"),
+    ("error_log", "Error log analysis"),
+    ("auth_log_watch", "Auth log watch (1h)"),
+    ("pspy", "Process spy"),
+    ("network_watch", "Network snapshot"),
+    ("auth_log", "Auth log brute-force analysis"),
+    ("port_map", "Listening port map"),
+    ("hidden_elf", "Hidden ELF binaries"),
+    ("deleted_binaries", "Deleted running binaries"),
+    ("process_tree", "Process tree anomalies"),
+    ("recently_modified", "Recently-modified binaries"),
+    ("suspicious_services", "Suspicious service units"),
+    ("world_writable", "World-writable paths"),
+    ("outbound_connections", "Outbound svc-acct connections"),
+    ("fail2ban", "Fail2ban status"),
+    ("ai_artifacts", "AI-generated script tells"),
+    ("elf_disguise", "ELF/script disguise check"),
+    ("perm_anomalies", "Permission/ownership anomalies"),
+    ("attacker_tools", "Attacker tool detection"),
+    ("c2_detection", "C2/implant detection"),
+    ("rootkit_cross_check", "Rootkit PID/port cross-check"),
+    ("proc_maps", "RWX anonymous memory maps"),
+    ("binary_integrity", "Binary integrity baseline"),
+    ("git_hooks", "Malicious git hooks"),
+    ("webserver_config", "Webserver config audit"),
+    ("bind_mounts", "Bind/overlay mount detection"),
+];
+
+/// Backup operations: (id, display label).
+const BACKUP_STEPS: &[(&str, &str)] = &[
+    ("all", "Full Config Backup"),
+    ("mail", "Mail Stack"),
+    ("splunk", "Splunk Config"),
+    ("users", "User/Group/Shadow DBs"),
+    ("ecomm", "E-Commerce Stack"),
+];
+
+/// Service restore operations: (id, display label).
+const RESTORE_SERVICES: &[(&str, &str)] = &[
+    ("postfix", "Postfix (SMTP)"),
+    ("dovecot", "Dovecot (IMAP/POP3)"),
+    ("splunk", "Splunk"),
+    ("opencart", "OpenCart"),
+    ("prestashop", "PrestaShop"),
+];
 
 /// Registry of all scan modules: (id, display label, is_anti_persistence, auto-scan interval).
 const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
@@ -276,6 +322,14 @@ const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
     ),
 ];
 
+/// Hardening steps with their IDs and display labels.
+const HARDENING_STEPS: &[(&str, &str)] = &[
+    ("user_permissions", "User & File Permissions"),
+    ("services", "Disable Unnecessary Services"),
+    ("programs", "Restrict Dangerous Programs"),
+    ("configs", "Deploy Hardened Configs"),
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Dashboard,
@@ -285,6 +339,7 @@ pub enum Tab {
     Backups,
     Monitor,
     Tools,
+    ServiceRestore,
 }
 
 impl Tab {
@@ -297,6 +352,7 @@ impl Tab {
         Tab::Backups,
         Tab::Monitor,
         Tab::Tools,
+        Tab::ServiceRestore,
     ];
 
     /// Human-readable name shown in the tab bar.
@@ -309,10 +365,11 @@ impl Tab {
             Tab::Backups => "Backups",
             Tab::Monitor => "Monitor",
             Tab::Tools => "Tools",
+            Tab::ServiceRestore => "Svc Restore",
         }
     }
 
-    /// Map a `1`–`7` digit keypress to the corresponding tab, or `None` for anything else.
+    /// Map a `1`–`8` digit keypress to the corresponding tab, or `None` for anything else.
     fn from_digit(d: char) -> Option<Tab> {
         match d {
             '1' => Some(Tab::Dashboard),
@@ -322,6 +379,7 @@ impl Tab {
             '5' => Some(Tab::Backups),
             '6' => Some(Tab::Monitor),
             '7' => Some(Tab::Tools),
+            '8' => Some(Tab::ServiceRestore),
             _ => None,
         }
     }
@@ -381,6 +439,62 @@ pub struct App {
     pub user_input_active: bool,
     /// Buffer for the in-progress username being typed.
     pub user_input_buf: String,
+    // ── Hardening tab state ──────────────────────────────────────────────────
+    /// Cursor position in the hardening step list.
+    pub hardening_cursor: usize,
+    /// True while a hardening step is running in the background.
+    pub hardening_running: bool,
+    /// Output lines from the last/current hardening run.
+    pub hardening_log: Vec<String>,
+    /// How many lines the hardening output panel is scrolled up from the bottom.
+    pub hardening_log_scroll: usize,
+    /// Findings emitted by hardening modules (separate from scan findings).
+    hardening_finding_tx: Sender<Finding>,
+    /// Receiver end of the hardening findings channel.
+    hardening_finding_rx: Receiver<Finding>,
+    /// Signal channel: empty string = done, non-empty = progress label.
+    hardening_progress_tx: Sender<String>,
+    /// Receiver end of the hardening progress channel.
+    hardening_progress_rx: Receiver<String>,
+    // ── Monitor tab state ────────────────────────────────────────────────────
+    /// Cursor position in the monitor module list.
+    pub monitor_cursor: usize,
+    /// True while a monitor module is running in the background.
+    pub monitor_running: bool,
+    /// Output lines from the last/current monitor run.
+    pub monitor_log: Vec<String>,
+    /// How many lines the monitor output panel is scrolled up from the bottom.
+    pub monitor_log_scroll: usize,
+    /// Signal channel: empty string = done, non-empty = log line.
+    monitor_progress_tx: Sender<String>,
+    /// Receiver end of the monitor progress channel.
+    monitor_progress_rx: Receiver<String>,
+    // ── Backups tab state ────────────────────────────────────────────────────
+    /// Cursor position in the backup step list.
+    pub backups_cursor: usize,
+    /// True while a backup operation is running in the background.
+    pub backups_running: bool,
+    /// Output lines from the last/current backup run.
+    pub backups_log: Vec<String>,
+    /// How many lines the backup output panel is scrolled up from the bottom.
+    pub backups_log_scroll: usize,
+    /// Signal channel: empty string = done, non-empty = log line.
+    backups_progress_tx: Sender<String>,
+    /// Receiver end of the backups progress channel.
+    backups_progress_rx: Receiver<String>,
+    // ── Service Restore tab state ────────────────────────────────────────────
+    /// Cursor position in the service restore list.
+    pub restore_cursor: usize,
+    /// True while a service restore is running in the background.
+    pub restore_running: bool,
+    /// Output lines from the last/current restore run.
+    pub restore_log: Vec<String>,
+    /// How many lines the restore output panel is scrolled up from the bottom.
+    pub restore_log_scroll: usize,
+    /// Signal channel: empty string = done, non-empty = log line.
+    restore_progress_tx: Sender<String>,
+    /// Receiver end of the service restore progress channel.
+    restore_progress_rx: Receiver<String>,
 }
 
 impl App {
@@ -395,6 +509,11 @@ impl App {
         let services = build_histories(box_type.checks());
         let (scan_progress_tx, scan_progress_rx) = mpsc::channel();
         let (auto_scan_done_tx, auto_scan_done_rx) = mpsc::channel::<&'static str>();
+        let (hardening_finding_tx, hardening_finding_rx) = mpsc::channel::<Finding>();
+        let (hardening_progress_tx, hardening_progress_rx) = mpsc::channel::<String>();
+        let (monitor_progress_tx, monitor_progress_rx) = mpsc::channel::<String>();
+        let (backups_progress_tx, backups_progress_rx) = mpsc::channel::<String>();
+        let (restore_progress_tx, restore_progress_rx) = mpsc::channel::<String>();
         let scan_selected = vec![true; SCAN_MODULES.len()];
         let authorized_users = vec!["root".to_string()];
         let sessions = poll_sessions(&authorized_users);
@@ -433,6 +552,32 @@ impl App {
             authorized_users,
             user_input_active: false,
             user_input_buf: String::new(),
+            hardening_cursor: 0,
+            hardening_running: false,
+            hardening_log: Vec::new(),
+            hardening_log_scroll: 0,
+            hardening_finding_tx,
+            hardening_finding_rx,
+            hardening_progress_tx,
+            hardening_progress_rx,
+            monitor_cursor: 0,
+            monitor_running: false,
+            monitor_log: Vec::new(),
+            monitor_log_scroll: 0,
+            monitor_progress_tx,
+            monitor_progress_rx,
+            backups_cursor: 0,
+            backups_running: false,
+            backups_log: Vec::new(),
+            backups_log_scroll: 0,
+            backups_progress_tx,
+            backups_progress_rx,
+            restore_cursor: 0,
+            restore_running: false,
+            restore_log: Vec::new(),
+            restore_log_scroll: 0,
+            restore_progress_tx,
+            restore_progress_rx,
         }
     }
 
@@ -465,6 +610,48 @@ impl App {
                 self.scan_progress.clear();
             } else {
                 self.scan_progress = p;
+            }
+        }
+        // Drain hardening findings into the hardening log.
+        while let Ok(f) = self.hardening_finding_rx.try_recv() {
+            self.hardening_log.push(format!(
+                "[{}] {} — {}",
+                f.severity.label().trim(),
+                f.module,
+                f.summary
+            ));
+        }
+        // Drain hardening progress: empty string = done, non-empty = step label.
+        while let Ok(p) = self.hardening_progress_rx.try_recv() {
+            if p.is_empty() {
+                self.hardening_running = false;
+                self.hardening_log.push("Done.".to_string());
+            } else {
+                self.hardening_log.push(format!("Running: {}…", p));
+            }
+        }
+        // Drain monitor progress: empty string = done, non-empty = log line.
+        while let Ok(p) = self.monitor_progress_rx.try_recv() {
+            if p.is_empty() {
+                self.monitor_running = false;
+            } else {
+                self.monitor_log.push(p);
+            }
+        }
+        // Drain backups progress: empty string = done, non-empty = log line.
+        while let Ok(p) = self.backups_progress_rx.try_recv() {
+            if p.is_empty() {
+                self.backups_running = false;
+            } else {
+                self.backups_log.push(p);
+            }
+        }
+        // Drain service restore progress: empty string = done, non-empty = log line.
+        while let Ok(p) = self.restore_progress_rx.try_recv() {
+            if p.is_empty() {
+                self.restore_running = false;
+            } else {
+                self.restore_log.push(p);
             }
         }
         // Drain completed auto-scan threads.
@@ -581,6 +768,170 @@ impl App {
                     let _ = crate::anti_persistence::run_module(id, &ctx);
                 } else {
                     let _ = crate::monitoring::run_module(id, &ctx);
+                }
+            }
+            let _ = progress_tx.send(String::new()); // signal done
+        });
+    }
+
+    /// Spawn a background thread to run the selected hardening step.
+    fn start_hardening(&mut self, step_id: &'static str) {
+        if self.hardening_running {
+            return;
+        }
+        self.hardening_running = true;
+        self.hardening_log.clear();
+        self.hardening_log_scroll = 0;
+
+        let finding_tx = self.hardening_finding_tx.clone();
+        let progress_tx = self.hardening_progress_tx.clone();
+
+        std::thread::spawn(move || {
+            let report = PathBuf::from("/tmp/defender-hardening.log");
+            let mut ctx = DefenderContext::new(report, false);
+            ctx.finding_tx = Some(finding_tx);
+
+            let args = crate::system_hardening::CliArgs {
+                user_permissions: step_id == "user_permissions",
+                services: step_id == "services",
+                programs: step_id == "programs",
+                configs: step_id == "configs",
+                install_tools: false,
+            };
+
+            let _ = progress_tx.send(step_id.to_string());
+            if let Err(e) = crate::system_hardening::run(&ctx, &args) {
+                let _ = progress_tx.send(format!("ERROR: {}", e));
+            }
+            let _ = progress_tx.send(String::new()); // signal done
+        });
+    }
+
+    /// Spawn a background thread to run a single monitoring module.
+    fn start_monitor(&mut self, module_id: &'static str) {
+        if self.monitor_running {
+            return;
+        }
+        self.monitor_running = true;
+        self.monitor_log.clear();
+        self.monitor_log_scroll = 0;
+
+        let finding_tx = self.finding_tx.clone();
+        let progress_tx = self.monitor_progress_tx.clone();
+
+        std::thread::spawn(move || {
+            let _ = progress_tx.send(format!("Running {}…", module_id));
+            let report = PathBuf::from("/tmp/defender-monitor.log");
+            let mut ctx = DefenderContext::new(report, false);
+            ctx.finding_tx = Some(finding_tx);
+            match crate::monitoring::run_module(module_id, &ctx) {
+                Ok(()) => {
+                    let _ = progress_tx.send(format!("Done: {}", module_id));
+                }
+                Err(e) => {
+                    let _ = progress_tx.send(format!("Error: {}", e));
+                }
+            }
+            let _ = progress_tx.send(String::new()); // signal done
+        });
+    }
+
+    /// Spawn a background thread to run the selected backup operation.
+    fn start_backup(&mut self, step_id: &'static str) {
+        if self.backups_running {
+            return;
+        }
+        self.backups_running = true;
+        self.backups_log.clear();
+        self.backups_log_scroll = 0;
+
+        let progress_tx = self.backups_progress_tx.clone();
+        let label = BACKUP_STEPS
+            .iter()
+            .find(|(id, _)| *id == step_id)
+            .map(|(_, l)| *l)
+            .unwrap_or(step_id);
+
+        std::thread::spawn(move || {
+            let _ = progress_tx.send(format!("Starting: {}…", label));
+            let report = PathBuf::from("/tmp/defender-backup.log");
+            let ctx = DefenderContext::new(report, false);
+            let mut args = crate::backups::CliArgs {
+                all: false,
+                compare_hashes: false,
+                custom: None,
+                ecomm: false,
+                mail: false,
+                restore: false,
+                splunk: false,
+                users: false,
+                save_location: None,
+            };
+            match step_id {
+                "all" => args.all = true,
+                "mail" => args.mail = true,
+                "splunk" => args.splunk = true,
+                "users" => args.users = true,
+                "ecomm" => args.ecomm = true,
+                _ => {}
+            }
+            match crate::backups::run(&ctx, &args) {
+                Ok(()) => {
+                    let _ = progress_tx.send(format!("✓ {} complete", label));
+                }
+                Err(e) => {
+                    let _ = progress_tx.send(format!("✗ Error: {}", e));
+                }
+            }
+            let _ = progress_tx.send(String::new()); // signal done
+        });
+    }
+
+    /// Spawn a background thread to restore a selected service.
+    fn start_restore(&mut self, service_id: &'static str) {
+        if self.restore_running {
+            return;
+        }
+        self.restore_running = true;
+        self.restore_log.clear();
+        self.restore_log_scroll = 0;
+
+        let progress_tx = self.restore_progress_tx.clone();
+        let label = RESTORE_SERVICES
+            .iter()
+            .find(|(id, _)| *id == service_id)
+            .map(|(_, l)| *l)
+            .unwrap_or(service_id);
+
+        std::thread::spawn(move || {
+            let _ = progress_tx.send(format!("Restoring: {}…", label));
+            let report = PathBuf::from("/tmp/defender-restore.log");
+            let ctx = DefenderContext::new(report, false);
+            let mut args = crate::service_restore::CliArgs {
+                postfix: false,
+                dovecot: false,
+                splunk: false,
+                opencart: false,
+                opencart_path: PathBuf::from("/var/www/html"),
+                opencart_url: None,
+                prestashop: false,
+                prestashop_path: PathBuf::from("/var/www/html"),
+                prestashop_url: None,
+            };
+            match service_id {
+                "postfix" => args.postfix = true,
+                "dovecot" => args.dovecot = true,
+                "splunk" => args.splunk = true,
+                "opencart" => args.opencart = true,
+                "prestashop" => args.prestashop = true,
+                _ => {}
+            }
+            match crate::service_restore::run(&ctx, &args) {
+                Ok(()) => {
+                    let _ = progress_tx.send(format!("✓ {} restored", label));
+                }
+                Err(e) => {
+                    let _ = progress_tx.send(format!("✗ Error: {}", e));
                 }
             }
             let _ = progress_tx.send(String::new()); // signal done
@@ -750,7 +1101,7 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
 
                 match key.code {
                     KeyCode::Char('q') => break,
-                    KeyCode::Char(d @ '1'..='7') => {
+                    KeyCode::Char(d @ '1'..='8') => {
                         if let Some(tab) = Tab::from_digit(d) {
                             app.tab = tab;
                         }
@@ -791,6 +1142,32 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                 }
                             }
                         },
+                        Tab::Hardening => {
+                            app.hardening_cursor = app
+                                .hardening_cursor
+                                .checked_sub(1)
+                                .unwrap_or(HARDENING_STEPS.len() - 1);
+                        }
+                        Tab::Monitor => {
+                            if !MONITOR_MODULES.is_empty() {
+                                app.monitor_cursor = app
+                                    .monitor_cursor
+                                    .checked_sub(1)
+                                    .unwrap_or(MONITOR_MODULES.len() - 1);
+                            }
+                        }
+                        Tab::Backups => {
+                            app.backups_cursor = app
+                                .backups_cursor
+                                .checked_sub(1)
+                                .unwrap_or(BACKUP_STEPS.len() - 1);
+                        }
+                        Tab::ServiceRestore => {
+                            app.restore_cursor = app
+                                .restore_cursor
+                                .checked_sub(1)
+                                .unwrap_or(RESTORE_SERVICES.len() - 1);
+                        }
                         _ => {}
                     },
                     KeyCode::Down => match app.tab {
@@ -817,6 +1194,22 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                 }
                             }
                         },
+                        Tab::Hardening => {
+                            app.hardening_cursor =
+                                (app.hardening_cursor + 1) % HARDENING_STEPS.len();
+                        }
+                        Tab::Monitor => {
+                            if !MONITOR_MODULES.is_empty() {
+                                app.monitor_cursor =
+                                    (app.monitor_cursor + 1) % MONITOR_MODULES.len();
+                            }
+                        }
+                        Tab::Backups => {
+                            app.backups_cursor = (app.backups_cursor + 1) % BACKUP_STEPS.len();
+                        }
+                        Tab::ServiceRestore => {
+                            app.restore_cursor = (app.restore_cursor + 1) % RESTORE_SERVICES.len();
+                        }
                         _ => {}
                     },
                     KeyCode::Enter => {
@@ -826,6 +1219,18 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                         {
                             app.show_finding_detail = !app.show_finding_detail;
                             app.action_feedback = None;
+                        } else if app.tab == Tab::Hardening && !app.hardening_running {
+                            let step_id = HARDENING_STEPS[app.hardening_cursor].0;
+                            app.start_hardening(step_id);
+                        } else if app.tab == Tab::Monitor && !app.monitor_running {
+                            let module_id = MONITOR_MODULES[app.monitor_cursor].0;
+                            app.start_monitor(module_id);
+                        } else if app.tab == Tab::Backups && !app.backups_running {
+                            let step_id = BACKUP_STEPS[app.backups_cursor].0;
+                            app.start_backup(step_id);
+                        } else if app.tab == Tab::ServiceRestore && !app.restore_running {
+                            let service_id = RESTORE_SERVICES[app.restore_cursor].0;
+                            app.start_restore(service_id);
                         }
                     }
                     KeyCode::Char('x') => {
@@ -1022,13 +1427,22 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
         Tab::Scan => {
             render_scan(f, rows[1], app);
         }
+        Tab::Hardening => {
+            render_hardening(f, rows[1], app);
+        }
+        Tab::Monitor => {
+            render_monitor(f, rows[1], app);
+        }
         Tab::Tools => {
             use crate::tui::tools_view::SelectedTool;
             let selected = SelectedTool::from_cursor(app.tools_cursor);
             crate::tui::tools_view::render(f, rows[1], selected, app.download_status.as_deref());
         }
-        _ => {
-            render_placeholder(f, rows[1], app.tab.label());
+        Tab::Backups => {
+            render_backups(f, rows[1], app);
+        }
+        Tab::ServiceRestore => {
+            render_service_restore(f, rows[1], app);
         }
     }
 
@@ -1098,71 +1512,175 @@ fn render_tabbar(
 
 /// Render the one-line status bar at the bottom of the terminal.
 fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let bg = Color::DarkGray;
+    let key_color = Color::Cyan;
+    let sep_color = Color::Gray;
+    let alert_color = Color::Red;
+    let ok_color = Color::Green;
+    let warn_color = Color::Yellow;
+
+    /// Build `[key] desc` span pair in the key/description style.
+    fn kb(key: &'static str, desc: &'static str, kc: Color) -> Vec<Span<'static>> {
+        vec![
+            Span::styled(format!("[{key}]"), Style::default().fg(kc).add_modifier(Modifier::BOLD)),
+            Span::raw(format!(" {desc}  ")),
+        ]
+    }
+
+    // ── LEFT: status indicators ──────────────────────────────────────────────
     let down = app.services.iter().filter(|h| !h.is_up()).count();
-    let down_str = if down > 0 {
-        format!("  ⚠ {} DOWN", down)
-    } else {
-        String::new()
-    };
 
-    let scan_str = if app.scan_running {
-        format!("  scanning: {}", app.scan_progress)
+    let mut left: Vec<Span> = Vec::new();
+
+    // box type
+    left.push(Span::raw(" "));
+    left.push(Span::styled(
+        app.box_type.label(),
+        Style::default().fg(key_color).add_modifier(Modifier::BOLD),
+    ));
+    left.push(Span::styled("  │  ", Style::default().fg(sep_color)));
+
+    // findings count
+    let findings_color = if app.findings.is_empty() { ok_color } else { warn_color };
+    left.push(Span::styled(
+        format!("{} findings", app.findings.len()),
+        Style::default().fg(findings_color),
+    ));
+
+    // services down
+    if down > 0 {
+        left.push(Span::styled("  │  ", Style::default().fg(sep_color)));
+        left.push(Span::styled(
+            format!("⚠ {down} DOWN"),
+            Style::default().fg(alert_color).add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    // scan / auto-scan status
+    if app.scan_running {
+        left.push(Span::styled("  │  ", Style::default().fg(sep_color)));
+        left.push(Span::styled(
+            format!("scanning: {}", app.scan_progress),
+            Style::default().fg(warn_color),
+        ));
     } else if app.auto_scan_enabled {
+        left.push(Span::styled("  │  ", Style::default().fg(sep_color)));
         let n = app.auto_scan_running.len();
-        if n > 0 {
-            format!("  AUTO ↻{}", n)
-        } else {
-            "  AUTO".to_string()
-        }
-    } else {
-        String::new()
-    };
+        let label = if n > 0 { format!("AUTO ↻{n}") } else { "AUTO".to_string() };
+        left.push(Span::styled(label, Style::default().fg(ok_color)));
+    }
 
+    // watchdog
+    if app.watchdog_enabled {
+        left.push(Span::styled("  │  ", Style::default().fg(sep_color)));
+        left.push(Span::styled("WATCHDOG", Style::default().fg(ok_color)));
+    }
+
+    // paused log pane
     let paused = app.tab == Tab::Logs
         && app
             .log_dashboard
             .panes
             .get(app.log_dashboard.active)
             .is_some_and(|p| p.paused);
-    let pause_str = if paused { "  [PAUSED]" } else { "" };
+    if paused {
+        left.push(Span::styled("  │  ", Style::default().fg(sep_color)));
+        left.push(Span::styled("PAUSED", Style::default().fg(warn_color).add_modifier(Modifier::BOLD)));
+    }
 
-    let watchdog_str = if app.watchdog_enabled {
-        "  WATCHDOG"
-    } else {
-        ""
-    };
+    // ── RIGHT: context keybinds ──────────────────────────────────────────────
+    let mut right: Vec<Span> = Vec::new();
 
-    let hint = match app.tab {
-        Tab::Dashboard => "  [w] watchdog  [u] users",
-        Tab::Logs => "  [Tab] pane  [p] pause  [↑↓] scroll",
-        Tab::Scan if app.show_finding_detail => "  [x] execute  [Esc] back",
+    // global quit + tab switch always shown
+    right.extend(kb("q", "quit", key_color));
+    right.extend(kb("1-8", "tabs", key_color));
+
+    // tab-specific binds
+    match app.tab {
+        Tab::Dashboard => {
+            right.extend(kb("w", "watchdog", key_color));
+            right.extend(kb("u", "users", key_color));
+        }
+        Tab::Logs => {
+            right.extend(kb("Tab", "pane", key_color));
+            right.extend(kb("p", "pause", key_color));
+            right.extend(kb("↑↓", "scroll", key_color));
+        }
+        Tab::Scan if app.show_finding_detail => {
+            right.extend(kb("x", "execute", key_color));
+            right.extend(kb("Esc", "back", key_color));
+        }
         Tab::Scan => match app.scan_focus {
             ScanFocus::Modules => {
-                "  [Tab] → findings  [↑↓] move  [Space] toggle  [a] all  [s] scan  [w] auto"
+                right.extend(kb("Tab", "→ findings", key_color));
+                right.extend(kb("↑↓", "move", key_color));
+                right.extend(kb("Space", "toggle", key_color));
+                right.extend(kb("s", "scan", key_color));
+                right.extend(kb("w", "auto", key_color));
             }
-            ScanFocus::Findings => "  [Tab] → modules  [↑↓] move  [Enter] detail  [e] export",
+            ScanFocus::Findings => {
+                right.extend(kb("Tab", "→ modules", key_color));
+                right.extend(kb("↑↓", "move", key_color));
+                right.extend(kb("Enter", "detail", key_color));
+                right.extend(kb("e", "export", key_color));
+            }
         },
-        Tab::Tools => "  [↑↓] navigate   [d] download (binary)   [r] run selected tool/script",
-        _ => "",
-    };
+        Tab::Hardening => {
+            if app.hardening_running {
+                right.push(Span::styled("running…", Style::default().fg(warn_color)));
+            } else {
+                right.extend(kb("↑↓", "select", key_color));
+                right.extend(kb("Enter", "run step", key_color));
+            }
+        }
+        Tab::Monitor => {
+            if app.monitor_running {
+                right.push(Span::styled("running…", Style::default().fg(warn_color)));
+            } else {
+                right.extend(kb("↑↓", "select", key_color));
+                right.extend(kb("Enter", "run module", key_color));
+            }
+        }
+        Tab::Tools => {
+            right.extend(kb("↑↓", "navigate", key_color));
+            right.extend(kb("d", "download", key_color));
+            right.extend(kb("r", "run", key_color));
+        }
+        Tab::Backups => {
+            if app.backups_running {
+                right.push(Span::styled("running…", Style::default().fg(warn_color)));
+            } else {
+                right.extend(kb("↑↓", "select", key_color));
+                right.extend(kb("Enter", "run backup", key_color));
+            }
+        }
+        Tab::ServiceRestore => {
+            if app.restore_running {
+                right.push(Span::styled("restoring…", Style::default().fg(warn_color)));
+            } else {
+                right.extend(kb("↑↓", "select", key_color));
+                right.extend(kb("Enter", "restore", key_color));
+            }
+        }
+    }
 
-    let text = format!(
-        " box:{box}  findings:{n}{down}{scan}{watchdog}{pause}  [q]uit  [1-7] tabs{hint}",
-        box = app.box_type.label(),
-        n = app.findings.len(),
-        down = down_str,
-        scan = scan_str,
-        watchdog = watchdog_str,
-        pause = pause_str,
+    // ── Layout: left flush, right flush ──────────────────────────────────────
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    let base = Style::default().bg(bg).fg(Color::White);
+    f.render_widget(
+        Paragraph::new(Line::from(left)).style(base),
+        cols[0],
     );
-
-    let style = if down > 0 {
-        Style::default().bg(Color::DarkGray).fg(Color::Red)
-    } else {
-        Style::default().bg(Color::DarkGray).fg(Color::White)
-    };
-
-    f.render_widget(Paragraph::new(text).style(style), area);
+    f.render_widget(
+        Paragraph::new(Line::from(right))
+            .style(base)
+            .alignment(ratatui::layout::Alignment::Right),
+        cols[1],
+    );
 }
 
 /// Render the Scan tab: module checklist on the left, findings list on the right.
@@ -1578,7 +2096,419 @@ fn render_logs(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     }
 }
 
-/// Render a "coming soon" placeholder for tabs that are not yet implemented.
+/// Render the Hardening tab: step list on the left, output log on the right.
+fn render_hardening(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+        .split(area);
+
+    // Left pane: step list
+    let left_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
+        .split(cols[0]);
+
+    let root_notice = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "[!] Steps 1-2 require root",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    f.render_widget(root_notice, left_rows[0]);
+
+    let items: Vec<ListItem> = HARDENING_STEPS
+        .iter()
+        .enumerate()
+        .map(|(i, (_, label))| {
+            let is_cursor = i == app.hardening_cursor;
+            let needs_root = i < 2;
+            let prefix = if is_cursor { "▶ " } else { "  " };
+            let root_tag = if needs_root { " [root]" } else { "" };
+            let running_tag =
+                if app.hardening_running && is_cursor { " ↻" } else { "" };
+            let style = if is_cursor {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(Span::styled(
+                format!("{}{}{}{}", prefix, label, root_tag, running_tag),
+                style,
+            )))
+        })
+        .collect();
+
+    let list_title = if app.hardening_running {
+        " Hardening Steps — running… "
+    } else {
+        " Hardening Steps "
+    };
+    let list_border = if app.hardening_running {
+        Style::default().fg(Color::LightYellow)
+    } else {
+        Style::default().fg(Color::Blue)
+    };
+    f.render_widget(
+        List::new(items).block(
+            Block::default()
+                .title(list_title)
+                .borders(Borders::ALL)
+                .border_style(list_border),
+        ),
+        left_rows[1],
+    );
+
+    // Right pane: output log
+    let log_block = Block::default()
+        .title(" Output ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Blue));
+    let inner = log_block.inner(cols[1]);
+    f.render_widget(log_block, cols[1]);
+
+    if app.hardening_log.is_empty() {
+        f.render_widget(
+            Paragraph::new("Select a step and press [Enter] to run.")
+                .style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+    } else {
+        let visible = inner.height as usize;
+        let total = app.hardening_log.len();
+        let start = total.saturating_sub(visible + app.hardening_log_scroll);
+        let lines: Vec<Line> = app
+            .hardening_log
+            .iter()
+            .skip(start)
+            .take(visible)
+            .map(|s| {
+                let style = if s.starts_with("[CRIT") || s.starts_with("[HIGH") {
+                    Style::default().fg(Color::Red)
+                } else if s.starts_with("[MED") {
+                    Style::default().fg(Color::Yellow)
+                } else if s.starts_with("ERROR") {
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                } else if s.starts_with("Done") {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default()
+                };
+                Line::from(Span::styled(s.clone(), style))
+            })
+            .collect();
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+}
+
+/// Render the Monitor tab: module list on the left, output log on the right.
+fn render_monitor(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+        .split(area);
+
+    // Left: module list
+    let list_title = if app.monitor_running {
+        " Monitor — running… "
+    } else {
+        " Monitor Modules "
+    };
+    let list_border = if app.monitor_running {
+        Style::default().fg(Color::LightYellow)
+    } else {
+        Style::default().fg(Color::Blue)
+    };
+
+    let items: Vec<ListItem> = MONITOR_MODULES
+        .iter()
+        .enumerate()
+        .map(|(i, (_id, label))| {
+            let is_cursor = i == app.monitor_cursor;
+            let style = if is_cursor {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let prefix = if is_cursor { "▶ " } else { "  " };
+            ListItem::new(Line::from(Span::styled(
+                format!("{}{}", prefix, label),
+                style,
+            )))
+        })
+        .collect();
+
+    // Scroll to keep cursor in view
+    let left_inner = Block::default()
+        .title(list_title)
+        .borders(Borders::ALL)
+        .border_style(list_border)
+        .inner(cols[0]);
+
+    let visible_left = left_inner.height as usize;
+    let left_start = if app.monitor_cursor >= visible_left {
+        app.monitor_cursor + 1 - visible_left
+    } else {
+        0
+    };
+
+    let visible_items: Vec<ListItem> = items.into_iter().skip(left_start).collect();
+
+    f.render_widget(
+        List::new(visible_items).block(
+            Block::default()
+                .title(list_title)
+                .borders(Borders::ALL)
+                .border_style(list_border),
+        ),
+        cols[0],
+    );
+
+    // Right: output log
+    let log_border = Style::default().fg(Color::Blue);
+    let log_block = Block::default()
+        .title(" Output ")
+        .borders(Borders::ALL)
+        .border_style(log_border);
+
+    if app.monitor_log.is_empty() {
+        let msg = if app.monitor_running {
+            "Running…"
+        } else {
+            "Select a module and press [Enter] to run it"
+        };
+        f.render_widget(
+            Paragraph::new(msg)
+                .block(log_block)
+                .style(Style::default().fg(Color::DarkGray)),
+            cols[1],
+        );
+    } else {
+        let inner = log_block.inner(cols[1]);
+        f.render_widget(log_block, cols[1]);
+
+        let visible = inner.height as usize;
+        let total = app.monitor_log.len();
+        let start = if app.monitor_log_scroll > 0 {
+            total.saturating_sub(visible).saturating_sub(app.monitor_log_scroll)
+        } else {
+            total.saturating_sub(visible)
+        };
+
+        let lines: Vec<Line> = app
+            .monitor_log
+            .iter()
+            .skip(start)
+            .take(visible)
+            .map(|l| Line::from(Span::raw(l.clone())))
+            .collect();
+
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+}
+
+/// Render the Backups tab: backup options on the left, output log on the right.
+fn render_backups(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+        .split(area);
+
+    // Left: backup step list
+    let list_title = if app.backups_running {
+        " Backups — running… "
+    } else {
+        " Backup Operations "
+    };
+    let list_border = if app.backups_running {
+        Style::default().fg(Color::LightYellow)
+    } else {
+        Style::default().fg(Color::Blue)
+    };
+
+    let items: Vec<ListItem> = BACKUP_STEPS
+        .iter()
+        .enumerate()
+        .map(|(i, (_id, label))| {
+            let is_cursor = i == app.backups_cursor;
+            let running_tag = if app.backups_running && is_cursor { " ↻" } else { "" };
+            let style = if is_cursor {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let prefix = if is_cursor { "▶ " } else { "  " };
+            ListItem::new(Line::from(Span::styled(
+                format!("{}{}{}", prefix, label, running_tag),
+                style,
+            )))
+        })
+        .collect();
+
+    f.render_widget(
+        List::new(items).block(
+            Block::default()
+                .title(list_title)
+                .borders(Borders::ALL)
+                .border_style(list_border),
+        ),
+        cols[0],
+    );
+
+    // Right: output log
+    let log_block = Block::default()
+        .title(" Output ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Blue));
+
+    if app.backups_log.is_empty() {
+        let msg = if app.backups_running {
+            "Running…"
+        } else {
+            "Select a backup operation and press [Enter] to run"
+        };
+        f.render_widget(
+            Paragraph::new(msg)
+                .block(log_block)
+                .style(Style::default().fg(Color::DarkGray)),
+            cols[1],
+        );
+    } else {
+        let inner = log_block.inner(cols[1]);
+        f.render_widget(log_block, cols[1]);
+
+        let visible = inner.height as usize;
+        let total = app.backups_log.len();
+        let start = total.saturating_sub(visible + app.backups_log_scroll);
+
+        let lines: Vec<Line> = app
+            .backups_log
+            .iter()
+            .skip(start)
+            .take(visible)
+            .map(|s| {
+                let style = if s.starts_with('✓') {
+                    Style::default().fg(Color::Green)
+                } else if s.starts_with('✗') || s.starts_with("Error") {
+                    Style::default().fg(Color::Red)
+                } else {
+                    Style::default()
+                };
+                Line::from(Span::styled(s.clone(), style))
+            })
+            .collect();
+
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+}
+
+/// Render the Service Restore tab: service list on the left, output log on the right.
+fn render_service_restore(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+        .split(area);
+
+    // Left: service list
+    let list_title = if app.restore_running {
+        " Service Restore — running… "
+    } else {
+        " Service Restore "
+    };
+    let list_border = if app.restore_running {
+        Style::default().fg(Color::LightYellow)
+    } else {
+        Style::default().fg(Color::Blue)
+    };
+
+    let items: Vec<ListItem> = RESTORE_SERVICES
+        .iter()
+        .enumerate()
+        .map(|(i, (_id, label))| {
+            let is_cursor = i == app.restore_cursor;
+            let running_tag = if app.restore_running && is_cursor { " ↻" } else { "" };
+            let style = if is_cursor {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let prefix = if is_cursor { "▶ " } else { "  " };
+            ListItem::new(Line::from(Span::styled(
+                format!("{}{}{}", prefix, label, running_tag),
+                style,
+            )))
+        })
+        .collect();
+
+    f.render_widget(
+        List::new(items).block(
+            Block::default()
+                .title(list_title)
+                .borders(Borders::ALL)
+                .border_style(list_border),
+        ),
+        cols[0],
+    );
+
+    // Right: output log
+    let log_block = Block::default()
+        .title(" Output ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Blue));
+
+    if app.restore_log.is_empty() {
+        let msg = if app.restore_running {
+            "Restoring…"
+        } else {
+            "Select a service and press [Enter] to restore it"
+        };
+        f.render_widget(
+            Paragraph::new(msg)
+                .block(log_block)
+                .style(Style::default().fg(Color::DarkGray)),
+            cols[1],
+        );
+    } else {
+        let inner = log_block.inner(cols[1]);
+        f.render_widget(log_block, cols[1]);
+
+        let visible = inner.height as usize;
+        let total = app.restore_log.len();
+        let start = total.saturating_sub(visible + app.restore_log_scroll);
+
+        let lines: Vec<Line> = app
+            .restore_log
+            .iter()
+            .skip(start)
+            .take(visible)
+            .map(|s| {
+                let style = if s.starts_with('✓') {
+                    Style::default().fg(Color::Green)
+                } else if s.starts_with('✗') || s.starts_with("Error") {
+                    Style::default().fg(Color::Red)
+                } else {
+                    Style::default()
+                };
+                Line::from(Span::styled(s.clone(), style))
+            })
+            .collect();
+
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+}
+
+/// Render a "coming soon" placeholder for tabs that are not yet fully implemented.
+#[allow(dead_code)]
 fn render_placeholder(f: &mut ratatui::Frame, area: Rect, name: &str) {
     let block = Block::default()
         .title(format!(" {} ", name))

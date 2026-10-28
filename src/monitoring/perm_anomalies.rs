@@ -492,11 +492,7 @@ mod tests {
     #[test]
     fn load_known_ids_skips_comments_and_blank_lines() {
         let tmp = std::env::temp_dir().join("perm_anomalies_test_skip");
-        std::fs::write(
-            &tmp,
-            "# comment line\n\nroot:x:0:0::/root:/bin/bash\n",
-        )
-        .unwrap();
+        std::fs::write(&tmp, "# comment line\n\nroot:x:0:0::/root:/bin/bash\n").unwrap();
         let ids = load_known_ids(tmp.to_str().unwrap(), 2);
         assert!(ids.contains(&0));
         assert_eq!(ids.len(), 1);
@@ -522,13 +518,21 @@ mod tests {
     #[test]
     fn suid_allowed_does_not_include_opt() {
         let p = "/opt/myapp";
-        assert!(!SUID_ALLOWED_PREFIXES.iter().any(|prefix| p.starts_with(prefix)));
+        assert!(
+            !SUID_ALLOWED_PREFIXES
+                .iter()
+                .any(|prefix| p.starts_with(prefix))
+        );
     }
 
     #[test]
     fn suid_allowed_does_not_include_home() {
         let p = "/home/user/suidbin";
-        assert!(!SUID_ALLOWED_PREFIXES.iter().any(|prefix| p.starts_with(prefix)));
+        assert!(
+            !SUID_ALLOWED_PREFIXES
+                .iter()
+                .any(|prefix| p.starts_with(prefix))
+        );
     }
 
     #[test]

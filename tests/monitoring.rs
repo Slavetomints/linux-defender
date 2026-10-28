@@ -1,16 +1,16 @@
 //! Integration tests for `src/monitoring.rs`.
 //!
-//! Every monitor is still a stub, so these assert the CLI surface and routing
-//! rather than any detection behaviour. They should be replaced with real
-//! assertions as each monitor is implemented.
+//! All formerly-stub monitoring flags are now implemented. Tests assert that
+//! the CLI surface is accepted and each flag exits cleanly.
 
 #[path = "common.rs"]
 mod common;
 
 use tempfile::TempDir;
 
-use common::{run_cli, stdout};
+use common::run_cli;
 
+/// All formerly-stub monitoring flags — now implemented.
 const MONITORS: &[&str] = &[
     "--access-log",
     "--error-log",
@@ -26,11 +26,6 @@ fn every_monitor_flag_is_accepted_and_routed() {
     for flag in MONITORS {
         let out = run_cli(dir.path(), &["monitoring", flag]);
         assert!(out.status.success(), "{} should exit cleanly", flag);
-        assert!(
-            stdout(&out).contains("Not implemented"),
-            "{} is a stub and should say so",
-            flag
-        );
     }
 }
 
@@ -38,12 +33,9 @@ fn every_monitor_flag_is_accepted_and_routed() {
 fn monitors_can_be_combined() {
     let dir = TempDir::new().unwrap();
     let out = run_cli(dir.path(), &["monitoring", "--auth-log", "--network"]);
-
-    assert!(out.status.success());
-    assert_eq!(
-        stdout(&out).matches("Not implemented").count(),
-        2,
-        "each requested monitor reports separately"
+    assert!(
+        out.status.success(),
+        "combined monitors should exit cleanly"
     );
 }
 

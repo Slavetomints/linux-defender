@@ -846,7 +846,12 @@ mod tests {
 
     #[test]
     fn fmt_cmdline_multiple_args() {
-        let args = vec!["python3".to_string(), "server.py".to_string(), "--port".to_string(), "4444".to_string()];
+        let args = vec![
+            "python3".to_string(),
+            "server.py".to_string(),
+            "--port".to_string(),
+            "4444".to_string(),
+        ];
         assert_eq!(fmt_cmdline(&args), "python3 server.py --port 4444");
     }
 
@@ -870,7 +875,10 @@ mod tests {
 
     #[test]
     fn contains_bytes_found_in_middle() {
-        assert!(contains_bytes(b"ELF\x7fruntime.gopanicmore", b"runtime.gopanic"));
+        assert!(contains_bytes(
+            b"ELF\x7fruntime.gopanicmore",
+            b"runtime.gopanic"
+        ));
     }
 
     // ── parse_hex_addr_v6 ─────────────────────────────────────────────────

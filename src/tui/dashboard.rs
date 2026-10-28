@@ -105,7 +105,10 @@ fn render_services(
             let line = Line::from(vec![
                 Span::styled(symbol, Style::default().fg(color)),
                 Span::raw(format!(" {:<14} :{:<6}", h.check.name, h.check.port)),
-                Span::styled(uptime, Style::default().fg(if up { Color::Green } else { Color::Red })),
+                Span::styled(
+                    uptime,
+                    Style::default().fg(if up { Color::Green } else { Color::Red }),
+                ),
                 Span::styled(latency, Style::default().fg(Color::DarkGray)),
             ]);
             ListItem::new(line)
@@ -405,7 +408,6 @@ fn render_firewall(f: &mut Frame, area: ratatui::layout::Rect, config: &str) {
 
     f.render_widget(Paragraph::new(display), inner);
 }
-
 
 /// Read currently logged-in sessions from `who`.
 pub fn poll_sessions(authorized_users: &[String]) -> Vec<SessionInfo> {

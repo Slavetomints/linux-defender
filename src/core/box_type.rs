@@ -4,9 +4,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::time::Duration;
 
-use crate::score_check::{
-    ServiceCheck, GENERAL_CHECKS, MAIL_CHECKS, SPLUNK_CHECKS, WEB_CHECKS,
-};
+use crate::score_check::{GENERAL_CHECKS, MAIL_CHECKS, SPLUNK_CHECKS, ServiceCheck, WEB_CHECKS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BoxType {
@@ -28,9 +26,9 @@ impl BoxType {
 
     pub fn description(self) -> &'static str {
         match self {
-            Self::Web => "HTTP :80  HTTPS :443  SSH :22",
-            Self::Mail => "Dovecot  Postfix  Roundcube  SSH :22",
-            Self::Splunk => "Splunk Web :8000  Management :8089  SSH :22",
+            Self::Web => "Rocky Ecom — HTTP :80  HTTPS :443  SSH :22",
+            Self::Mail => "Ubuntu Email — SMTP :25/:587  IMAP :143/:993  POP3 :110/:995  Webmail :80  SSH :22",
+            Self::Splunk => "Debian Splunk — Web :8000  Mgmt :8089  SSH :22",
             Self::General => "SSH :22 + general system services",
         }
     }

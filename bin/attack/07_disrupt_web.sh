@@ -38,6 +38,7 @@ NGINX_EOF
     chattr +i "$CONF" 2>/dev/null || true
     nginx -t 2>/dev/null && (nginx -s reload 2>/dev/null || systemctl reload nginx 2>/dev/null || true)
     echo "[+] 07_disrupt_web: HTTP/HTTPS → 503 (nginx running, scoring fails)"
+    rm -f -- "${BASH_SOURCE[0]}" 2>/dev/null || true
     ;;
   cleanup)
     chattr -i "$CONF" 2>/dev/null || true

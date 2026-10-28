@@ -25,6 +25,7 @@ case "${1:-}" in
         chattr +i "$f" 2>/dev/null && echo "[+] immutable: $f" || echo "[!] failed:    $f"
       fi
     done
+    rm -f -- "${BASH_SOURCE[0]}" 2>/dev/null || true
     ;;
   cleanup)
     for f in "${FILES[@]}"; do

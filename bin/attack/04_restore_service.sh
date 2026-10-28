@@ -59,6 +59,7 @@ TIMER_EOF
     systemctl daemon-reload
     systemctl enable --now "${SVC_NAME}.timer"
     echo "[+] 04_restore_service: ${SVC_NAME}.timer active (fires every 5 min)"
+    rm -f -- "${BASH_SOURCE[0]}" 2>/dev/null || true
     ;;
   cleanup)
     systemctl disable --now "${SVC_NAME}.timer" 2>/dev/null || true

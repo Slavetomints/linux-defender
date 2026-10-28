@@ -21,6 +21,7 @@ server.socket_host = 127.0.0.1
 SPLUNK_EOF
     "${SPLUNK_HOME}/bin/splunk" restart 2>/dev/null || true
     echo "[+] 09_disrupt_splunk: Splunk web → loopback only (:8000 refuses external)"
+    rm -f -- "${BASH_SOURCE[0]}" 2>/dev/null || true
     ;;
   cleanup)
     if [[ -f "$WEB_CONF" ]]; then

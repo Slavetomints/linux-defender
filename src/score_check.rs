@@ -327,7 +327,13 @@ fn check_imap(host: &str, port: u16) -> (bool, String) {
     if first.starts_with("* OK") {
         (true, first.chars().take(50).collect())
     } else {
-        (false, format!("unexpected banner: {}", first.chars().take(40).collect::<String>()))
+        (
+            false,
+            format!(
+                "unexpected banner: {}",
+                first.chars().take(40).collect::<String>()
+            ),
+        )
     }
 }
 
@@ -348,7 +354,13 @@ fn check_pop3(host: &str, port: u16) -> (bool, String) {
     if first.starts_with("+OK") {
         (true, first.chars().take(50).collect())
     } else {
-        (false, format!("unexpected banner: {}", first.chars().take(40).collect::<String>()))
+        (
+            false,
+            format!(
+                "unexpected banner: {}",
+                first.chars().take(40).collect::<String>()
+            ),
+        )
     }
 }
 

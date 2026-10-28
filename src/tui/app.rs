@@ -388,34 +388,52 @@ impl Tab {
 /// Which service is waiting for credential input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RestoreCredService {
+    /// OpenCart web storefront.
     OpenCart,
+    /// PrestaShop web storefront.
     PrestaShop,
 }
 
 /// Which field is currently focused in the credential dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RestoreCredField {
+    /// Field index 0.
     F0,
+    /// Field index 1.
     F1,
+    /// Field index 2.
     F2,
+    /// Field index 3.
     F3,
+    /// Field index 4.
     F4,
+    /// Field index 5.
     F5,
+    /// Field index 6.
     F6,
+    /// Field index 7.
     F7,
+    /// Field index 8.
     F8,
 }
 
 impl RestoreCredField {
+    /// Advance to the next field, clamping at the last field for the given service.
     fn next(self, service: RestoreCredService) -> Self {
-        let max = if service == RestoreCredService::OpenCart { 8 } else { 6 };
+        let max = if service == RestoreCredService::OpenCart {
+            8
+        } else {
+            6
+        };
         let idx = (self as usize + 1).min(max);
         Self::from_idx(idx)
     }
+    /// Move to the previous field, stopping at F0.
     fn prev(self) -> Self {
         let idx = (self as usize).saturating_sub(1);
         Self::from_idx(idx)
     }
+    /// Convert a numeric index to the corresponding variant, clamping at F8.
     fn from_idx(idx: usize) -> Self {
         match idx {
             0 => Self::F0,
@@ -433,39 +451,47 @@ impl RestoreCredField {
 
 /// State for the credential-input modal shown before a web-app restore.
 pub(crate) struct RestoreCredDialog {
+    /// Which service these credentials are for.
     service: RestoreCredService,
+    /// Input buffer for each form field; length is always 9 (unused slots stay empty).
     fields: [String; 9],
+    /// Which field currently has keyboard focus.
     focused: RestoreCredField,
 }
 
 impl RestoreCredDialog {
+    /// Build a new dialog pre-populated with sensible defaults for `service`.
     fn new(service: RestoreCredService) -> Self {
         // Fields are indexed 0..=8 and must match field_label() and into_credentials() exactly.
         let fields = match service {
             RestoreCredService::OpenCart => [
-                "localhost".into(),       // 0  DB Hostname
-                String::new(),            // 1  DB Username
-                String::new(),            // 2  DB Password
-                "opencart".into(),        // 3  DB Name
-                "3306".into(),            // 4  DB Port
-                "http://localhost/".into(),// 5  HTTP base URL
-                "admin".into(),           // 6  Admin Username
-                String::new(),            // 7  Admin Password
-                String::new(),            // 8  Admin Email
+                "localhost".into(),         // 0  DB Hostname
+                String::new(),              // 1  DB Username
+                String::new(),              // 2  DB Password
+                "opencart".into(),          // 3  DB Name
+                "3306".into(),              // 4  DB Port
+                "http://localhost/".into(), // 5  HTTP base URL
+                "admin".into(),             // 6  Admin Username
+                String::new(),              // 7  Admin Password
+                String::new(),              // 8  Admin Email
             ],
             RestoreCredService::PrestaShop => [
-                "localhost".into(),        // 0  Shop Domain
-                "localhost".into(),        // 1  DB Server
-                "prestashop".into(),       // 2  DB Name
-                String::new(),             // 3  DB Username
-                String::new(),             // 4  DB Password
-                String::new(),             // 5  Admin Email
-                String::new(),             // 6  Admin Password
-                String::new(),             // 7  (unused)
-                String::new(),             // 8  (unused)
+                "localhost".into(),  // 0  Shop Domain
+                "localhost".into(),  // 1  DB Server
+                "prestashop".into(), // 2  DB Name
+                String::new(),       // 3  DB Username
+                String::new(),       // 4  DB Password
+                String::new(),       // 5  Admin Email
+                String::new(),       // 6  Admin Password
+                String::new(),       // 7  (unused)
+                String::new(),       // 8  (unused)
             ],
         };
-        Self { service, fields, focused: RestoreCredField::F0 }
+        Self {
+            service,
+            fields,
+            focused: RestoreCredField::F0,
+        }
     }
 
     /// Labels for each field depending on the service.
@@ -496,6 +522,7 @@ impl RestoreCredDialog {
         }
     }
 
+    /// Number of active fields for this service (unused trailing slots are hidden).
     fn field_count(&self) -> usize {
         match self.service {
             RestoreCredService::OpenCart => 9,
@@ -503,6 +530,7 @@ impl RestoreCredDialog {
         }
     }
 
+    /// Consume the dialog and return typed credentials ready for the restore thread.
     fn into_credentials(self) -> crate::service_restore::RestoreCredentials {
         let [f0, f1, f2, f3, f4, f5, f6, f7, f8] = self.fields;
         match self.service {
@@ -740,10 +768,7 @@ impl App {
 
     /// Return true if any backup directory exists under the known roots.
     fn detect_baseline() -> bool {
-        let roots = [
-            "/root/baseline",
-            "/etc/linux-defender/baseline",
-        ];
+        let roots = ["/root/baseline", "/etc/linux-defender/baseline"];
         for root in &roots {
             if std::path::Path::new(root).exists() {
                 return true;
@@ -1091,8 +1116,7 @@ impl App {
         std::thread::spawn(move || {
             let _ = progress_tx.send(format!("Restoring: {}…", label));
             let report = PathBuf::from("/tmp/defender-restore.log");
-            let ctx = DefenderContext::new(report, false)
-                .with_progress(progress_tx.clone());
+            let ctx = DefenderContext::new(report, false).with_progress(progress_tx.clone());
             let mut args = crate::service_restore::CliArgs {
                 postfix: false,
                 dovecot: false,
@@ -1139,41 +1163,71 @@ impl App {
         };
 
         let active: Vec<&Finding> = self.findings.iter().filter(|f| !f.resolved).collect();
-        let crit = active.iter().filter(|f| f.severity == Severity::Critical).count();
-        let high = active.iter().filter(|f| f.severity == Severity::High).count();
-        let med  = active.iter().filter(|f| f.severity == Severity::Medium).count();
-        let info = active.iter().filter(|f| f.severity == Severity::Info).count();
+        let crit = active
+            .iter()
+            .filter(|f| f.severity == Severity::Critical)
+            .count();
+        let high = active
+            .iter()
+            .filter(|f| f.severity == Severity::High)
+            .count();
+        let med = active
+            .iter()
+            .filter(|f| f.severity == Severity::Medium)
+            .count();
+        let info = active
+            .iter()
+            .filter(|f| f.severity == Severity::Info)
+            .count();
 
-        let div  = "═".repeat(70);
+        let div = "═".repeat(70);
         let div2 = "─".repeat(70);
 
         let mut r = String::new();
         r.push_str(&format!("{div}\n"));
         r.push_str("  INCIDENT RESPONSE REPORT — CCDC 2026\n");
         r.push_str(&format!("{div}\n\n"));
-        r.push_str(&format!("  Date/Time : {}\n", now.format("%Y-%m-%d %H:%M:%S %Z")));
+        r.push_str(&format!(
+            "  Date/Time : {}\n",
+            now.format("%Y-%m-%d %H:%M:%S %Z")
+        ));
         r.push_str(&format!("  Box Type  : {}\n", self.box_type.label()));
         r.push_str(&format!("  Box Desc  : {}\n", self.box_type.description()));
-        r.push_str(&format!("  Baseline  : {}\n\n", if self.baseline_present { "present" } else { "NOT TAKEN" }));
+        r.push_str(&format!(
+            "  Baseline  : {}\n\n",
+            if self.baseline_present {
+                "present"
+            } else {
+                "NOT TAKEN"
+            }
+        ));
         r.push_str(&format!("{div2}\n"));
         r.push_str("  EXECUTIVE SUMMARY\n");
         r.push_str(&format!("{div2}\n\n"));
         r.push_str(&format!(
             "  Total active findings : {}\n  Critical : {}  High : {}  Medium : {}  Info : {}\n\n",
-            active.len(), crit, high, med, info
+            active.len(),
+            crit,
+            high,
+            med,
+            info
         ));
 
         for &(label, sev) in &[
             ("CRITICAL", Severity::Critical),
-            ("HIGH",     Severity::High),
-            ("MEDIUM",   Severity::Medium),
-            ("INFO",     Severity::Info),
+            ("HIGH", Severity::High),
+            ("MEDIUM", Severity::Medium),
+            ("INFO", Severity::Info),
         ] {
             let section: Vec<&&Finding> = active.iter().filter(|f| f.severity == sev).collect();
             if section.is_empty() {
                 continue;
             }
-            r.push_str(&format!("{div2}\n  {label} ({} finding{})\n{div2}\n\n", section.len(), if section.len() == 1 { "" } else { "s" }));
+            r.push_str(&format!(
+                "{div2}\n  {label} ({} finding{})\n{div2}\n\n",
+                section.len(),
+                if section.len() == 1 { "" } else { "s" }
+            ));
             for (i, f) in section.iter().enumerate() {
                 r.push_str(&format!("  [{:02}] Module  : {}\n", i + 1, f.module));
                 r.push_str(&format!("       Verdict : {}\n", f.verdict.label()));
@@ -1481,9 +1535,8 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                             let service_id = RESTORE_SERVICES[app.restore_cursor].0;
                             match service_id {
                                 "opencart" => {
-                                    app.restore_cred_dialog = Some(RestoreCredDialog::new(
-                                        RestoreCredService::OpenCart,
-                                    ));
+                                    app.restore_cred_dialog =
+                                        Some(RestoreCredDialog::new(RestoreCredService::OpenCart));
                                 }
                                 "prestashop" => {
                                     app.restore_cred_dialog = Some(RestoreCredDialog::new(
@@ -1801,7 +1854,10 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
     /// Build `[key] desc` span pair in the key/description style.
     fn kb(key: &'static str, desc: &'static str, kc: Color) -> Vec<Span<'static>> {
         vec![
-            Span::styled(format!("[{key}]"), Style::default().fg(kc).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("[{key}]"),
+                Style::default().fg(kc).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(format!(" {desc}  ")),
         ]
     }
@@ -1820,7 +1876,11 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
     left.push(Span::styled("  │  ", Style::default().fg(sep_color)));
 
     // findings count
-    let findings_color = if app.findings.is_empty() { ok_color } else { warn_color };
+    let findings_color = if app.findings.is_empty() {
+        ok_color
+    } else {
+        warn_color
+    };
     left.push(Span::styled(
         format!("{} findings", app.findings.len()),
         Style::default().fg(findings_color),
@@ -1831,7 +1891,9 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
         left.push(Span::styled("  │  ", Style::default().fg(sep_color)));
         left.push(Span::styled(
             format!("⚠ {down} DOWN"),
-            Style::default().fg(alert_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(alert_color)
+                .add_modifier(Modifier::BOLD),
         ));
     }
 
@@ -1845,7 +1907,11 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
     } else if app.auto_scan_enabled {
         left.push(Span::styled("  │  ", Style::default().fg(sep_color)));
         let n = app.auto_scan_running.len();
-        let label = if n > 0 { format!("AUTO ↻{n}") } else { "AUTO".to_string() };
+        let label = if n > 0 {
+            format!("AUTO ↻{n}")
+        } else {
+            "AUTO".to_string()
+        };
         left.push(Span::styled(label, Style::default().fg(ok_color)));
     }
 
@@ -1873,7 +1939,10 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
             .is_some_and(|p| p.paused);
     if paused {
         left.push(Span::styled("  │  ", Style::default().fg(sep_color)));
-        left.push(Span::styled("PAUSED", Style::default().fg(warn_color).add_modifier(Modifier::BOLD)));
+        left.push(Span::styled(
+            "PAUSED",
+            Style::default().fg(warn_color).add_modifier(Modifier::BOLD),
+        ));
     }
 
     // ── RIGHT: context keybinds ──────────────────────────────────────────────
@@ -1962,10 +2031,7 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
         .split(area);
 
     let base = Style::default().bg(bg).fg(Color::White);
-    f.render_widget(
-        Paragraph::new(Line::from(left)).style(base),
-        cols[0],
-    );
+    f.render_widget(Paragraph::new(Line::from(left)).style(base), cols[0]);
     f.render_widget(
         Paragraph::new(Line::from(right))
             .style(base)
@@ -2400,14 +2466,12 @@ fn render_hardening(f: &mut ratatui::Frame, area: Rect, app: &App) {
         .constraints([Constraint::Length(2), Constraint::Min(0)])
         .split(cols[0]);
 
-    let root_notice = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "[!] Steps 1-2 require root",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
+    let root_notice = Paragraph::new(Line::from(vec![Span::styled(
+        "[!] Steps 1-2 require root",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )]));
     f.render_widget(root_notice, left_rows[0]);
 
     let items: Vec<ListItem> = HARDENING_STEPS
@@ -2418,8 +2482,11 @@ fn render_hardening(f: &mut ratatui::Frame, area: Rect, app: &App) {
             let needs_root = i < 2;
             let prefix = if is_cursor { "▶ " } else { "  " };
             let root_tag = if needs_root { " [root]" } else { "" };
-            let running_tag =
-                if app.hardening_running && is_cursor { " ↻" } else { "" };
+            let running_tag = if app.hardening_running && is_cursor {
+                " ↻"
+            } else {
+                ""
+            };
             let style = if is_cursor {
                 Style::default()
                     .fg(Color::Yellow)
@@ -2587,7 +2654,9 @@ fn render_monitor(f: &mut ratatui::Frame, area: Rect, app: &App) {
         let visible = inner.height as usize;
         let total = app.monitor_log.len();
         let start = if app.monitor_log_scroll > 0 {
-            total.saturating_sub(visible).saturating_sub(app.monitor_log_scroll)
+            total
+                .saturating_sub(visible)
+                .saturating_sub(app.monitor_log_scroll)
         } else {
             total.saturating_sub(visible)
         };
@@ -2628,7 +2697,11 @@ fn render_backups(f: &mut ratatui::Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, (_id, label))| {
             let is_cursor = i == app.backups_cursor;
-            let running_tag = if app.backups_running && is_cursor { " ↻" } else { "" };
+            let running_tag = if app.backups_running && is_cursor {
+                " ↻"
+            } else {
+                ""
+            };
             let style = if is_cursor {
                 Style::default()
                     .fg(Color::Yellow)
@@ -2725,7 +2798,11 @@ fn render_service_restore(f: &mut ratatui::Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, (_id, label))| {
             let is_cursor = i == app.restore_cursor;
-            let running_tag = if app.restore_running && is_cursor { " ↻" } else { "" };
+            let running_tag = if app.restore_running && is_cursor {
+                " ↻"
+            } else {
+                ""
+            };
             let style = if is_cursor {
                 Style::default()
                     .fg(Color::Yellow)
@@ -2797,7 +2874,6 @@ fn render_service_restore(f: &mut ratatui::Frame, area: Rect, app: &App) {
         f.render_widget(Paragraph::new(lines), inner);
     }
 }
-
 
 /// Render the "Add Authorized User" text-input modal overlay.
 fn render_user_input_modal(f: &mut ratatui::Frame, area: Rect, buf: &str) {

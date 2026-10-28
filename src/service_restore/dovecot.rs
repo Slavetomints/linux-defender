@@ -27,11 +27,13 @@ pub fn run(ctx: &DefenderContext) -> Result {
         _ => &["dovecot"],
     };
 
-    if ctx.interactive() && !prompt_yes(&format!(
-        "[?] Reinstall {} via {} and restart the service? (y/N)",
-        packages.join(" "),
-        distro.name()
-    ))? {
+    if ctx.interactive()
+        && !prompt_yes(&format!(
+            "[?] Reinstall {} via {} and restart the service? (y/N)",
+            packages.join(" "),
+            distro.name()
+        ))?
+    {
         ctx.progress("[-] Skipping Dovecot restore");
         return Ok(());
     }

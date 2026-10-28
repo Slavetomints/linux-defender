@@ -27,7 +27,9 @@ impl BoxType {
     pub fn description(self) -> &'static str {
         match self {
             Self::Web => "Rocky Ecom — HTTP :80  HTTPS :443  SSH :22",
-            Self::Mail => "Ubuntu Email — SMTP :25/:587  IMAP :143/:993  POP3 :110/:995  Webmail :80  SSH :22",
+            Self::Mail => {
+                "Ubuntu Email — SMTP :25/:587  IMAP :143/:993  POP3 :110/:995  Webmail :80  SSH :22"
+            }
             Self::Splunk => "Debian Splunk — Web :8000  Mgmt :8089  SSH :22",
             Self::General => "SSH :22 + general system services",
         }

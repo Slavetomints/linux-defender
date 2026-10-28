@@ -20,10 +20,12 @@ pub fn run(ctx: &DefenderContext) -> Result {
     let distro = Distro::detect()?;
     ctx.debug(&format!("detected distro: {}", distro.name()));
 
-    if ctx.interactive() && !prompt_yes(&format!(
-        "[?] Reinstall postfix via {} and restart the service? (y/N)",
-        distro.name()
-    ))? {
+    if ctx.interactive()
+        && !prompt_yes(&format!(
+            "[?] Reinstall postfix via {} and restart the service? (y/N)",
+            distro.name()
+        ))?
+    {
         ctx.progress("[-] Skipping Postfix restore");
         return Ok(());
     }

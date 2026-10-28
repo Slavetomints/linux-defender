@@ -8,7 +8,20 @@ targets = [
 version = 2
 # Fail on any RUSTSEC advisory. Add specific IDs here only with a comment
 # explaining why the advisory does not apply to us.
-ignore = []
+ignore = [
+    # paste crate is unmaintained (RUSTSEC-2024-0436). It is a transitive
+    # dependency pulled in by ratatui; we do not use it directly and it has
+    # no known exploitable vulnerability.
+    { id = "RUSTSEC-2024-0436", reason = "transitive dep via ratatui; no direct usage" },
+
+    # The three zip advisories below (RUSTSEC-2026-0367/0368/0369) concern
+    # ZipArchive::extract() and ZipStreamReader::extract(). We never call
+    # those APIs; we extract entries manually via by_index() with our own
+    # zip-slip guard and do not preserve Unix permissions or follow symlinks.
+    { id = "RUSTSEC-2026-0367", reason = "we do not call ZipArchive::extract(); manual by_index() extraction with zip-slip guard" },
+    { id = "RUSTSEC-2026-0368", reason = "we do not call ZipArchive::extract(); symlink traversal advisory does not apply" },
+    { id = "RUSTSEC-2026-0369", reason = "we do not call extract(); permissions-through-symlinks advisory does not apply" },
+]
 
 [licenses]
 version = 2

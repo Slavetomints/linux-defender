@@ -10,7 +10,9 @@ use std::fs;
 use std::path::Path;
 
 use crate::core::scan::{effective_line, read_text_file};
-use crate::core::{DefenderContext, Finding, Result, Severity, prompt_yes, require_root};
+use crate::core::{
+    DefenderContext, Finding, Result, Severity, prompt_yes, require_root, try_clear_immutable,
+};
 
 /// Path to the system-wide loader preload configuration file.
 const PRELOAD_FILE: &str = "/etc/ld.so.preload";
@@ -63,11 +65,15 @@ fn check_preload_file(ctx: &DefenderContext) -> Result {
 
         let mut removed = false;
         if is_root {
+            try_clear_immutable(path);
             let mut all_ok = true;
             for entry in &entries {
                 let lib_path = Path::new(entry.as_str());
-                if lib_path.exists() && !ctx.remove_path_logged(lib_path) {
-                    all_ok = false;
+                if lib_path.exists() {
+                    try_clear_immutable(lib_path);
+                    if !ctx.remove_path_logged(lib_path) {
+                        all_ok = false;
+                    }
                 }
                 if !ctx.remove_line_from_file_logged(path, entry) {
                     all_ok = false;
@@ -112,6 +118,7 @@ fn check_preload_file(ctx: &DefenderContext) -> Result {
         }
 
         if prompt_yes(&format!("[?] Remove {}? (y/N)", PRELOAD_FILE))? {
+            try_clear_immutable(path);
             fs::remove_file(path)?;
             println!("[+] Removed {}", PRELOAD_FILE);
         }

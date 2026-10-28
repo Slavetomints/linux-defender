@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use crate::core::{
     DefenderContext, DefenderError, Finding, Result, Severity, UserAccount, Verdict,
-    collect_accounts, require_root,
+    collect_accounts, require_root, try_clear_immutable,
 };
 
 /// Review each account's `authorized_keys`, log all keys as evidence, then delete the file.
@@ -68,7 +68,8 @@ pub fn run(ctx: &DefenderContext) -> Result {
         }
         ctx.log_evidence_file(&keyfile);
 
-        // Phase 2: delete the entire file
+        // Phase 2: clear any immutable flag, then delete the entire file
+        try_clear_immutable(&keyfile);
         let removed = ctx.remove_path_logged(&keyfile);
 
         let mut finding = Finding::new(

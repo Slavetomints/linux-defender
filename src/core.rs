@@ -19,5 +19,5 @@ pub use error::{DefenderError, Result};
 pub use finding::{Action, Finding, Severity, Verdict};
 pub use utils::{
     UserAccount, collect_accounts, collect_users, prompt_string, prompt_string_default, prompt_yes,
-    require_root,
+    require_root, try_clear_immutable,
 };

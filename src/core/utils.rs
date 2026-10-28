@@ -94,6 +94,18 @@ fn parse_passwd(contents: &str) -> Vec<UserAccount> {
         .collect()
 }
 
+/// Attempt to clear the immutable flag on `path` before a removal.
+///
+/// Runs `chattr -i <path>` and silently ignores all errors — the file may not
+/// be on an ext4 filesystem, or the process may lack the privilege. Callers
+/// should attempt this before any `rm` or file-write operation so that a
+/// red-team `chattr +i` does not silently defeat remediation.
+pub fn try_clear_immutable(path: &std::path::Path) {
+    let _ = std::process::Command::new("chattr")
+        .args(["-i", &path.to_string_lossy()])
+        .output();
+}
+
 /// Ask the operator a yes/no question. Anything but `y` is treated as no.
 pub fn prompt_yes(question: &str) -> Result<bool> {
     print!("{}\n> ", question);

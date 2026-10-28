@@ -127,14 +127,19 @@ pub struct CliArgs {
 type Module = (&'static str, bool, fn(&DefenderContext) -> Result);
 
 /// Run each requested check, reporting failures without aborting the run.
+///
+/// When `--all` is active, `immutable` always runs first so that `chattr +i`
+/// flags are cleared before any module attempts to remove or rewrite files.
 pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
-    let modules: [Module; 26] = [
+    // immutable must precede any module that removes files so that a red-team
+    // chattr +i does not silently defeat those removals.
+    let modules: &[Module] = &[
+        ("immutable", args.immutable, immutable::run),
         ("at_jobs", args.at_jobs, at_jobs::run),
         ("capabilities", args.capabilities, capabilities::run),
         ("cron", args.cron, cron::run),
         ("cron_system", args.cron_system, cron_system::run),
         ("grub", args.grub, grub::run),
-        ("immutable", args.immutable, immutable::run),
         ("initramfs", args.initramfs, initramfs::run),
         ("kernel_modules", args.kernel_modules, kernel_modules::run),
         ("ld_preload", args.ld_preload, ld_preload::run),

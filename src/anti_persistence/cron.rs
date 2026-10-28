@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use crate::core::{
-    DefenderContext, DefenderError, Finding, Result, Severity, Verdict, collect_users, require_root,
+    DefenderContext, DefenderError, Finding, Result, Severity, Verdict, collect_users,
+    require_root, try_clear_immutable,
 };
 
 /// A pattern that distinguishes cron-based persistence from routine jobs.
@@ -153,7 +154,9 @@ pub fn run(ctx: &DefenderContext) -> Result {
                 ctx.log_evidence_line(&format!("crontab:{}", user), job);
             }
 
-            // Phase 2: rewrite crontab with only the benign jobs
+            // Phase 2: clear any immutable flag, then rewrite crontab with only the benign jobs
+            let spool = PathBuf::from(format!("/var/spool/cron/crontabs/{}", user));
+            try_clear_immutable(&spool);
             let kept: Vec<String> = benign.iter().map(|s| s.to_string()).collect();
             let rewrite_ok = write_crontab(&kept, &user).is_ok();
 

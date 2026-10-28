@@ -15,6 +15,7 @@ use crate::core::scan::{
 };
 use crate::core::{
     DefenderContext, DefenderError, Finding, Result, Severity, Verdict, require_root,
+    try_clear_immutable,
 };
 
 /// Additional patterns that are specifically relevant in cron contexts but are
@@ -103,6 +104,7 @@ fn scan_crontab_file(ctx: &DefenderContext, path: &Path) {
         ));
         ctx.log_evidence_line(&path.display().to_string(), line);
 
+        try_clear_immutable(path);
         let removed = ctx.remove_line_from_file_logged(path, line);
 
         ctx.emit(
@@ -187,6 +189,7 @@ fn scan_cron_d_file(ctx: &DefenderContext, path: &Path) {
         ));
         ctx.log_evidence_line(&path.display().to_string(), line);
 
+        try_clear_immutable(path);
         let removed = ctx.remove_line_from_file_logged(path, line);
 
         ctx.emit(
@@ -275,6 +278,7 @@ fn scan_periodic_dir(ctx: &DefenderContext, dir: &Path) {
                 ));
                 ctx.log_evidence_file(&path);
 
+                try_clear_immutable(&path);
                 let removed = ctx.remove_path_logged(&path);
 
                 ctx.emit(
@@ -346,6 +350,7 @@ fn scan_periodic_dir(ctx: &DefenderContext, dir: &Path) {
         ));
         ctx.log_evidence_file(&path);
 
+        try_clear_immutable(&path);
         let removed = ctx.remove_path_logged(&path);
 
         ctx.emit(

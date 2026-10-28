@@ -28,6 +28,15 @@ pub mod prestashop;
 pub mod splunk;
 pub mod webserver;
 
+/// Pre-supplied credentials for web-app restores (avoids blocking stdin prompts).
+///
+/// The TUI collects these via a dialog before spawning the restore thread.
+/// The CLI path leaves both fields as `None` and prompts interactively.
+pub struct RestoreCredentials {
+    pub opencart: Option<opencart::OpenCartCredentials>,
+    pub prestashop: Option<prestashop::PrestaShopCredentials>,
+}
+
 /// Which service to restore.
 #[derive(Args, Debug)]
 #[command(arg_required_else_help = true)]
@@ -70,7 +79,10 @@ pub struct CliArgs {
 }
 
 /// Run each requested service restore in flag order.
-pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result<()> {
+///
+/// `creds` carries pre-supplied credentials for web-app restores (TUI path).
+/// Pass `None` from the CLI to fall back to interactive prompts.
+pub fn run(ctx: &DefenderContext, args: &CliArgs, creds: Option<&RestoreCredentials>) -> Result<()> {
     if args.postfix {
         println!("[+] Restoring Postfix");
         postfix::run(ctx)?;
@@ -85,14 +97,16 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result<()> {
     }
     if args.opencart {
         println!("[+] Restoring OpenCart at {}", args.opencart_path.display());
-        opencart::run(ctx, &args.opencart_path, args.opencart_url.as_deref())?;
+        let oc_creds = creds.and_then(|c| c.opencart.as_ref());
+        opencart::run(ctx, &args.opencart_path, args.opencart_url.as_deref(), oc_creds)?;
     }
     if args.prestashop {
         println!(
             "[+] Restoring PrestaShop at {}",
             args.prestashop_path.display()
         );
-        prestashop::run(ctx, &args.prestashop_path, args.prestashop_url.as_deref())?;
+        let ps_creds = creds.and_then(|c| c.prestashop.as_ref());
+        prestashop::run(ctx, &args.prestashop_path, args.prestashop_url.as_deref(), ps_creds)?;
     }
     Ok(())
 }

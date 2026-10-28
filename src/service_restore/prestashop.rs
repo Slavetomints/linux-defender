@@ -35,6 +35,32 @@ use super::webserver::{
     download_file, extract_zip, find_php, fix_permissions, reload_webserver, resolve_web_root,
 };
 
+/// Credentials collected by the TUI dialog (or CLI prompts) before install.
+#[derive(Debug, Clone)]
+pub struct PrestaShopCredentials {
+    pub domain: String,
+    pub db_server: String,
+    pub db_name: String,
+    pub db_user: String,
+    pub db_pass: String,
+    pub admin_email: String,
+    pub admin_pass: String,
+}
+
+impl Default for PrestaShopCredentials {
+    fn default() -> Self {
+        Self {
+            domain: "localhost".into(),
+            db_server: "localhost".into(),
+            db_name: "prestashop".into(),
+            db_user: String::new(),
+            db_pass: String::new(),
+            admin_email: String::new(),
+            admin_pass: String::new(),
+        }
+    }
+}
+
 /// Pinned release version.
 const PRESTASHOP_VERSION: &str = "9.0.0";
 
@@ -73,12 +99,20 @@ const PRESERVE: &[&str] = &[
 ];
 
 /// Download, install, and configure PrestaShop on this host.
-pub fn run(ctx: &DefenderContext, web_root: &Path, download_url: Option<&str>) -> Result<()> {
+///
+/// When `credentials` is `Some`, all interactive prompts are skipped — TUI path.
+/// When `credentials` is `None`, the operator is prompted on the terminal.
+pub fn run(
+    ctx: &DefenderContext,
+    web_root: &Path,
+    download_url: Option<&str>,
+    credentials: Option<&PrestaShopCredentials>,
+) -> Result<()> {
     ensure_root_or_reexec()?;
 
-    let root = resolve_web_root(web_root)?;
+    let root = resolve_web_root(web_root, ctx)?;
     let distro = Distro::detect()?;
-    let php = find_php(&distro)?;
+    let php = find_php(&distro, ctx)?;
     let url = download_url.unwrap_or(PRESTASHOP_DEFAULT_URL);
 
     ctx.debug(&format!("prestashop url: {url}"));
@@ -86,44 +120,62 @@ pub fn run(ctx: &DefenderContext, web_root: &Path, download_url: Option<&str>) -
     ctx.debug(&format!("php: {php}"));
     ctx.debug(&format!("distro: {}", distro.name()));
 
-    println!(
+    ctx.progress(&format!(
         "[!] PrestaShop {PRESTASHOP_VERSION} will be installed to {}.",
         root.display()
-    );
-    println!("[!] Existing PHP files (except credential files) will be overwritten.");
-    if !prompt_yes("[?] Continue? (y/N)")? {
-        println!("[-] Skipping PrestaShop restore");
+    ));
+    ctx.progress("[!] Existing PHP files (except credential files) will be overwritten.");
+
+    if credentials.is_none() && !prompt_yes("[?] Continue? (y/N)")? {
+        ctx.progress("[-] Skipping PrestaShop restore");
         return Ok(());
     }
 
     // ── 1. Download ───────────────────────────────────────────────────────────
-    download_file(url, Path::new(TMP_ZIP), &distro)?;
+    download_file(url, Path::new(TMP_ZIP), &distro, ctx)?;
 
     // ── 2. Extract flat zip to web root ───────────────────────────────────────
-    println!("[+] Extracting to {}...", root.display());
+    ctx.progress(&format!("[+] Extracting to {}...", root.display()));
     extract_zip(Path::new(TMP_ZIP), &root, PRESERVE, ctx)?;
 
     // ── 3. Set writable directories ───────────────────────────────────────────
-    set_writable_dirs(&root)?;
+    set_writable_dirs(&root, ctx)?;
 
     // ── 4. Collect credentials ────────────────────────────────────────────────
-    println!("\n[+] Database and admin credentials (press Enter to accept defaults):");
-    let domain = prompt_string_default("  Shop domain (no http://)", "localhost")?;
-    let db_server = prompt_string_default("  Database server", "localhost")?;
-    let db_name = prompt_string_default("  Database name", "prestashop")?;
-    let db_user = prompt_string("  Database username")?;
-    let db_pass = prompt_string("  Database password")?;
-    println!();
-    println!("[+] Admin account:");
-    let admin_email = prompt_string("  Admin email")?;
-    let admin_pass = prompt_string("  Admin password")?;
+    let owned;
+    let creds = if let Some(c) = credentials {
+        c
+    } else {
+        ctx.progress("[+] Database and admin credentials (press Enter to accept defaults):");
+        let domain = prompt_string_default("  Shop domain (no http://)", "localhost")?;
+        let db_server = prompt_string_default("  Database server", "localhost")?;
+        let db_name = prompt_string_default("  Database name", "prestashop")?;
+        let db_user = prompt_string("  Database username")?;
+        let db_pass = prompt_string("  Database password")?;
+        ctx.progress("[+] Admin account:");
+        let admin_email = prompt_string("  Admin email")?;
+        let admin_pass = prompt_string("  Admin password")?;
+        owned = PrestaShopCredentials {
+            domain,
+            db_server,
+            db_name,
+            db_user,
+            db_pass,
+            admin_email,
+            admin_pass,
+        };
+        &owned
+    };
+    let domain = &creds.domain;
+    let db_server = &creds.db_server;
+    let db_name = &creds.db_name;
+    let db_user = &creds.db_user;
+    let db_pass = &creds.db_pass;
+    let admin_email = &creds.admin_email;
+    let admin_pass = &creds.admin_pass;
 
     // ── 5. Run CLI installer ──────────────────────────────────────────────────
-    //
-    // PrestaShop's CLI installer lives at install/index_cli.php.
-    // --db_create=1 creates the database if it does not yet exist.
-    // --fixtures=0 skips demo data (faster; irrelevant in CCDC).
-    println!("\n[+] Running PrestaShop CLI installer...");
+    ctx.progress("[+] Running PrestaShop CLI installer...");
     let cli_script = root.join("install/index_cli.php");
     if !cli_script.exists() {
         return Err(DefenderError::Other(format!(
@@ -152,35 +204,36 @@ pub fn run(ctx: &DefenderContext, web_root: &Path, download_url: Option<&str>) -
             "PrestaShop CLI installer returned non-zero; check output above for details".into(),
         ));
     }
-    println!("[✓] PrestaShop installation complete");
+    ctx.progress("[✓] PrestaShop installation complete");
 
     // ── 6. Delete web-accessible installer ───────────────────────────────────
     for dir in &["install", "install-dev"] {
         let p = root.join(dir);
         if p.exists() {
             fs::remove_dir_all(&p)?;
-            println!("[✓] Deleted {dir}/ directory");
+            ctx.progress(&format!("[✓] Deleted {dir}/ directory"));
         }
     }
 
     // ── 7. Permissions and web server ─────────────────────────────────────────
-    println!("[+] Fixing ownership and permissions...");
-    fix_permissions(&root, &distro)?;
+    ctx.progress("[+] Fixing ownership and permissions...");
+    fix_permissions(&root, &distro, ctx)?;
 
-    println!("[+] Reloading web server...");
+    ctx.progress("[+] Reloading web server...");
     reload_webserver(ctx)?;
 
-    // Cleanup temp zip
     let _ = fs::remove_file(TMP_ZIP);
 
     ctx.log(&format!("[ok] prestashop installed to {}", root.display()))?;
-    println!("\n[✓] PrestaShop restored at http://{domain}/");
-    println!("[!] Admin panel: http://{domain}/admin-dev/  (rename admin-dev/ when you have time)");
+    ctx.progress(&format!("[✓] PrestaShop restored at http://{domain}/"));
+    ctx.progress(&format!(
+        "[!] Admin panel: http://{domain}/admin-dev/  (rename admin-dev/ when you have time)"
+    ));
     Ok(())
 }
 
 /// `chmod -R +w` on the directories PrestaShop's installer must write to.
-fn set_writable_dirs(root: &Path) -> Result<()> {
+fn set_writable_dirs(root: &Path, ctx: &DefenderContext) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     let mut count = 0usize;
@@ -191,6 +244,6 @@ fn set_writable_dirs(root: &Path) -> Result<()> {
             count += 1;
         }
     }
-    println!("[✓] Made {count} directories writable");
+    ctx.progress(&format!("[✓] Made {count} directories writable"));
     Ok(())
 }

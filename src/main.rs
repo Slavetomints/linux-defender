@@ -87,7 +87,7 @@ fn main() -> anyhow::Result<()> {
             system_hardening::run(&ctx, &args).context("Couldn't run System Hardening mode")?
         }
         Mode::ServiceRestore(args) => {
-            service_restore::run(&ctx, &args).context("Couldn't run Service Restore mode")?
+            service_restore::run(&ctx, &args, None).context("Couldn't run Service Restore mode")?
         }
     }
 

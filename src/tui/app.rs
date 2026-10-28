@@ -385,6 +385,162 @@ impl Tab {
     }
 }
 
+/// Which service is waiting for credential input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestoreCredService {
+    OpenCart,
+    PrestaShop,
+}
+
+/// Which field is currently focused in the credential dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreCredField {
+    F0,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+}
+
+impl RestoreCredField {
+    fn next(self, service: RestoreCredService) -> Self {
+        let max = if service == RestoreCredService::OpenCart { 8 } else { 6 };
+        let idx = (self as usize + 1).min(max);
+        Self::from_idx(idx)
+    }
+    fn prev(self) -> Self {
+        let idx = (self as usize).saturating_sub(1);
+        Self::from_idx(idx)
+    }
+    fn from_idx(idx: usize) -> Self {
+        match idx {
+            0 => Self::F0,
+            1 => Self::F1,
+            2 => Self::F2,
+            3 => Self::F3,
+            4 => Self::F4,
+            5 => Self::F5,
+            6 => Self::F6,
+            7 => Self::F7,
+            _ => Self::F8,
+        }
+    }
+}
+
+/// State for the credential-input modal shown before a web-app restore.
+pub(crate) struct RestoreCredDialog {
+    service: RestoreCredService,
+    fields: [String; 9],
+    focused: RestoreCredField,
+}
+
+impl RestoreCredDialog {
+    fn new(service: RestoreCredService) -> Self {
+        let (f0, f1, f3, f4, f6) = match service {
+            RestoreCredService::OpenCart => (
+                "localhost",       // db_host
+                "",                // db_user
+                "opencart",        // db_name
+                "3306",            // db_port
+                "http://localhost/", // http_server
+            ),
+            RestoreCredService::PrestaShop => (
+                "localhost",   // domain
+                "localhost",   // db_server
+                "prestashop",  // db_name
+                "",            // (unused slot 4)
+                "",            // (unused slot 6)
+            ),
+        };
+        Self {
+            service,
+            fields: [
+                f0.into(),
+                f1.into(),
+                String::new(), // db_pass / db_user
+                f3.into(),
+                f4.into(),
+                String::new(), // admin_user / db_pass
+                f6.into(),
+                String::new(), // admin_pass / admin_email
+                String::new(), // admin_email / admin_pass
+            ],
+            focused: RestoreCredField::F0,
+        }
+    }
+
+    /// Labels for each field depending on the service.
+    fn field_label(&self, idx: usize) -> &'static str {
+        match self.service {
+            RestoreCredService::OpenCart => match idx {
+                0 => "DB Hostname",
+                1 => "DB Username",
+                2 => "DB Password",
+                3 => "DB Name",
+                4 => "DB Port",
+                5 => "HTTP base URL",
+                6 => "Admin Username",
+                7 => "Admin Password",
+                8 => "Admin Email",
+                _ => "",
+            },
+            RestoreCredService::PrestaShop => match idx {
+                0 => "Shop Domain (no http://)",
+                1 => "DB Server",
+                2 => "DB Name",
+                3 => "DB Username",
+                4 => "DB Password",
+                5 => "Admin Email",
+                6 => "Admin Password",
+                _ => "",
+            },
+        }
+    }
+
+    fn field_count(&self) -> usize {
+        match self.service {
+            RestoreCredService::OpenCart => 9,
+            RestoreCredService::PrestaShop => 7,
+        }
+    }
+
+    fn into_credentials(self) -> crate::service_restore::RestoreCredentials {
+        let [f0, f1, f2, f3, f4, f5, f6, f7, f8] = self.fields;
+        match self.service {
+            RestoreCredService::OpenCart => crate::service_restore::RestoreCredentials {
+                opencart: Some(crate::service_restore::opencart::OpenCartCredentials {
+                    db_host: f0,
+                    db_user: f1,
+                    db_pass: f2,
+                    db_name: f3,
+                    db_port: f4,
+                    http_server: f5,
+                    admin_user: f6,
+                    admin_pass: f7,
+                    admin_email: f8,
+                }),
+                prestashop: None,
+            },
+            RestoreCredService::PrestaShop => crate::service_restore::RestoreCredentials {
+                opencart: None,
+                prestashop: Some(crate::service_restore::prestashop::PrestaShopCredentials {
+                    domain: f0,
+                    db_server: f1,
+                    db_name: f2,
+                    db_user: f3,
+                    db_pass: f4,
+                    admin_email: f5,
+                    admin_pass: f6,
+                }),
+            },
+        }
+    }
+}
+
 pub struct App {
     pub box_type: BoxType,
     pub tab: Tab,
@@ -497,6 +653,8 @@ pub struct App {
     restore_progress_rx: Receiver<String>,
     /// True if at least one backup directory exists under the known backup roots.
     pub baseline_present: bool,
+    /// Credential input dialog shown before OpenCart / PrestaShop restore.
+    restore_cred_dialog: Option<RestoreCredDialog>,
 }
 
 impl App {
@@ -581,6 +739,7 @@ impl App {
             restore_progress_tx,
             restore_progress_rx,
             baseline_present: Self::detect_baseline(),
+            restore_cred_dialog: None,
         }
     }
 
@@ -915,7 +1074,11 @@ impl App {
     }
 
     /// Spawn a background thread to restore a selected service.
-    fn start_restore(&mut self, service_id: &'static str) {
+    fn start_restore(
+        &mut self,
+        service_id: &'static str,
+        creds: Option<crate::service_restore::RestoreCredentials>,
+    ) {
         if self.restore_running {
             return;
         }
@@ -933,7 +1096,8 @@ impl App {
         std::thread::spawn(move || {
             let _ = progress_tx.send(format!("Restoring: {}…", label));
             let report = PathBuf::from("/tmp/defender-restore.log");
-            let ctx = DefenderContext::new(report, false);
+            let ctx = DefenderContext::new(report, false)
+                .with_progress(progress_tx.clone());
             let mut args = crate::service_restore::CliArgs {
                 postfix: false,
                 dovecot: false,
@@ -953,7 +1117,7 @@ impl App {
                 "prestashop" => args.prestashop = true,
                 _ => {}
             }
-            match crate::service_restore::run(&ctx, &args) {
+            match crate::service_restore::run(&ctx, &args, creds.as_ref()) {
                 Ok(()) => {
                     let _ = progress_tx.send(format!("✓ {} restored", label));
                 }
@@ -1134,6 +1298,61 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                     continue;
                 }
 
+                // Credential input dialog for OpenCart / PrestaShop restores.
+                if app.restore_cred_dialog.is_some() {
+                    match key.code {
+                        KeyCode::Esc => {
+                            app.restore_cred_dialog = None;
+                        }
+                        KeyCode::Tab | KeyCode::Down => {
+                            if let Some(ref mut dlg) = app.restore_cred_dialog {
+                                let svc = dlg.service;
+                                dlg.focused = dlg.focused.next(svc);
+                            }
+                        }
+                        KeyCode::BackTab | KeyCode::Up => {
+                            if let Some(ref mut dlg) = app.restore_cred_dialog {
+                                dlg.focused = dlg.focused.prev();
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let Some(ref dlg) = app.restore_cred_dialog {
+                                let svc = dlg.service;
+                                let max_field = dlg.field_count() - 1;
+                                if dlg.focused as usize == max_field {
+                                    // Last field confirmed — start restore.
+                                    let dialog = app.restore_cred_dialog.take().unwrap();
+                                    let service_id = match svc {
+                                        RestoreCredService::OpenCart => "opencart",
+                                        RestoreCredService::PrestaShop => "prestashop",
+                                    };
+                                    let creds = dialog.into_credentials();
+                                    app.start_restore(service_id, Some(creds));
+                                } else {
+                                    // Advance to next field.
+                                    if let Some(ref mut dlg) = app.restore_cred_dialog {
+                                        dlg.focused = dlg.focused.next(svc);
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            if let Some(ref mut dlg) = app.restore_cred_dialog {
+                                let idx = dlg.focused as usize;
+                                dlg.fields[idx].pop();
+                            }
+                        }
+                        KeyCode::Char(c) => {
+                            if let Some(ref mut dlg) = app.restore_cred_dialog {
+                                let idx = dlg.focused as usize;
+                                dlg.fields[idx].push(c);
+                            }
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 match key.code {
                     KeyCode::Char('q') => break,
                     KeyCode::Char(d @ '1'..='8') => {
@@ -1265,7 +1484,19 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                             app.start_backup(step_id);
                         } else if app.tab == Tab::ServiceRestore && !app.restore_running {
                             let service_id = RESTORE_SERVICES[app.restore_cursor].0;
-                            app.start_restore(service_id);
+                            match service_id {
+                                "opencart" => {
+                                    app.restore_cred_dialog = Some(RestoreCredDialog::new(
+                                        RestoreCredService::OpenCart,
+                                    ));
+                                }
+                                "prestashop" => {
+                                    app.restore_cred_dialog = Some(RestoreCredDialog::new(
+                                        RestoreCredService::PrestaShop,
+                                    ));
+                                }
+                                _ => app.start_restore(service_id, None),
+                            }
                         }
                     }
                     KeyCode::Char('x') => {
@@ -1497,6 +1728,11 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
     // Wizard overlay renders on top of the full terminal area.
     if let Some(ref wizard) = app.active_wizard {
         wizard.render(f, size);
+    }
+
+    // Credential dialog renders on top of the service restore tab.
+    if let Some(ref dlg) = app.restore_cred_dialog {
+        render_restore_cred_dialog(f, size, dlg);
     }
 
     // User input modal renders on top of everything.
@@ -2719,4 +2955,67 @@ fn draw_box_select(
     let help = Paragraph::new("[↑↓] select   [Enter] confirm   [q] quit")
         .style(Style::default().fg(Color::DarkGray));
     f.render_widget(help, inner_rows[4]);
+}
+
+/// Render the credential input dialog for web-app restores.
+fn render_restore_cred_dialog(f: &mut ratatui::Frame, area: Rect, dlg: &RestoreCredDialog) {
+    use crate::wizards::modal_popup;
+
+    let title = match dlg.service {
+        RestoreCredService::OpenCart => " OpenCart Credentials ",
+        RestoreCredService::PrestaShop => " PrestaShop Credentials ",
+    };
+    let inner = modal_popup(f, area, 60, 80, title);
+
+    let n = dlg.field_count();
+    let mut constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Length(3)).collect();
+    constraints.push(Constraint::Min(0));
+    constraints.push(Constraint::Length(2));
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    let focused_idx = dlg.focused as usize;
+    for i in 0..n {
+        let is_focused = i == focused_idx;
+        let label = dlg.field_label(i);
+        let value = &dlg.fields[i];
+        // Mask password fields (indices with "Password" in the label).
+        let display = if label.to_lowercase().contains("password") {
+            "*".repeat(value.len())
+        } else {
+            value.clone()
+        };
+        let border_style = if is_focused {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let text = if is_focused {
+            format!("{}_", display)
+        } else {
+            display
+        };
+        f.render_widget(
+            Paragraph::new(text).block(
+                Block::default()
+                    .title(format!(" {} ", label))
+                    .borders(Borders::ALL)
+                    .border_style(border_style),
+            ),
+            rows[i],
+        );
+    }
+
+    let hint = if focused_idx == n - 1 {
+        "[Tab/↓] prev field   [Enter] start restore   [Esc] cancel"
+    } else {
+        "[Tab/↓] next field   [↑] prev field   [Enter] advance   [Esc] cancel"
+    };
+    f.render_widget(
+        Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
+        rows[n + 1],
+    );
 }

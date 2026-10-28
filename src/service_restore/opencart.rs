@@ -37,6 +37,36 @@ use super::webserver::{
     download_file, extract_zip, find_php, fix_permissions, reload_webserver, resolve_web_root,
 };
 
+/// Credentials collected by the TUI dialog (or the CLI prompts) before install.
+#[derive(Debug, Clone)]
+pub struct OpenCartCredentials {
+    pub db_host: String,
+    pub db_user: String,
+    pub db_pass: String,
+    pub db_name: String,
+    pub db_port: String,
+    pub http_server: String,
+    pub admin_user: String,
+    pub admin_pass: String,
+    pub admin_email: String,
+}
+
+impl Default for OpenCartCredentials {
+    fn default() -> Self {
+        Self {
+            db_host: "localhost".into(),
+            db_user: String::new(),
+            db_pass: String::new(),
+            db_name: "opencart".into(),
+            db_port: "3306".into(),
+            http_server: "http://localhost/".into(),
+            admin_user: "admin".into(),
+            admin_pass: String::new(),
+            admin_email: String::new(),
+        }
+    }
+}
+
 /// Pinned release version embedded in the default download URL.
 const OPENCART_VERSION: &str = "4.1.0.4";
 
@@ -51,12 +81,21 @@ const TMP_ZIP: &str = "/tmp/defender-opencart.zip";
 const STORAGE_DEST: &str = "/var/opencart-storage";
 
 /// Download, install, and configure OpenCart on this host.
-pub fn run(ctx: &DefenderContext, web_root: &Path, download_url: Option<&str>) -> Result<()> {
+///
+/// When `credentials` is `Some`, all interactive prompts are skipped and the
+/// provided values are used directly — this is the path taken by the TUI.
+/// When `credentials` is `None`, the operator is prompted on the terminal.
+pub fn run(
+    ctx: &DefenderContext,
+    web_root: &Path,
+    download_url: Option<&str>,
+    credentials: Option<&OpenCartCredentials>,
+) -> Result<()> {
     ensure_root_or_reexec()?;
 
-    let root = resolve_web_root(web_root)?;
+    let root = resolve_web_root(web_root, ctx)?;
     let distro = Distro::detect()?;
-    let php = find_php(&distro)?;
+    let php = find_php(&distro, ctx)?;
     let url = download_url.unwrap_or(OPENCART_DEFAULT_URL);
 
     ctx.debug(&format!("opencart url: {url}"));
@@ -64,21 +103,23 @@ pub fn run(ctx: &DefenderContext, web_root: &Path, download_url: Option<&str>) -
     ctx.debug(&format!("php: {php}"));
     ctx.debug(&format!("distro: {}", distro.name()));
 
-    println!(
+    ctx.progress(&format!(
         "[!] OpenCart {OPENCART_VERSION} will be installed to {}.",
         root.display()
-    );
-    println!("[!] Existing PHP files (except config.php / admin/config.php) will be overwritten.");
-    if !prompt_yes("[?] Continue? (y/N)")? {
-        println!("[-] Skipping OpenCart restore");
+    ));
+    ctx.progress("[!] Existing PHP files (except config.php / admin/config.php) will be overwritten.");
+
+    // Skip confirmation prompt when credentials are pre-supplied (TUI path).
+    if credentials.is_none() && !prompt_yes("[?] Continue? (y/N)")? {
+        ctx.progress("[-] Skipping OpenCart restore");
         return Ok(());
     }
 
     // ── 1. Download ───────────────────────────────────────────────────────────
-    download_file(url, Path::new(TMP_ZIP), &distro)?;
+    download_file(url, Path::new(TMP_ZIP), &distro, ctx)?;
 
     // ── 2. Extract upload/ subtree to web root ────────────────────────────────
-    println!("[+] Extracting to {}...", root.display());
+    ctx.progress(&format!("[+] Extracting to {}...", root.display()));
     extract_zip(
         Path::new(TMP_ZIP),
         &root,
@@ -87,7 +128,7 @@ pub fn run(ctx: &DefenderContext, web_root: &Path, download_url: Option<&str>) -
     )?;
 
     // ── 3. Rename config-dist.php → config.php (if not already there) ─────────
-    rename_dist_config(&root)?;
+    rename_dist_config(&root, ctx)?;
 
     // ── 4. chmod 0777 on config files (installer writes into them) ────────────
     for cfg in &["config.php", "admin/config.php"] {
@@ -97,27 +138,52 @@ pub fn run(ctx: &DefenderContext, web_root: &Path, download_url: Option<&str>) -
             fs::set_permissions(&p, fs::Permissions::from_mode(0o777))?;
         }
     }
-    println!("[✓] Config files made writable");
+    ctx.progress("[✓] Config files made writable");
 
     // ── 5. Collect credentials ────────────────────────────────────────────────
-    println!("\n[+] Database and admin credentials (press Enter to accept defaults):");
-    let db_host = prompt_string_default("  Database hostname", "localhost")?;
-    let db_user = prompt_string("  Database username")?;
-    let db_pass = prompt_string("  Database password")?;
-    let db_name = prompt_string_default("  Database name", "opencart")?;
-    let db_port = prompt_string_default("  Database port", "3306")?;
-    let http_server = prompt_string_default(
-        "  HTTP base URL (include trailing slash)",
-        "http://localhost/",
-    )?;
-    println!();
-    println!("[+] Admin account:");
-    let admin_user = prompt_string_default("  Admin username", "admin")?;
-    let admin_pass = prompt_string("  Admin password")?;
-    let admin_email = prompt_string("  Admin email")?;
+    let owned;
+    let creds = if let Some(c) = credentials {
+        c
+    } else {
+        ctx.progress("[+] Database and admin credentials (press Enter to accept defaults):");
+        let db_host = prompt_string_default("  Database hostname", "localhost")?;
+        let db_user = prompt_string("  Database username")?;
+        let db_pass = prompt_string("  Database password")?;
+        let db_name = prompt_string_default("  Database name", "opencart")?;
+        let db_port = prompt_string_default("  Database port", "3306")?;
+        let http_server = prompt_string_default(
+            "  HTTP base URL (include trailing slash)",
+            "http://localhost/",
+        )?;
+        ctx.progress("[+] Admin account:");
+        let admin_user = prompt_string_default("  Admin username", "admin")?;
+        let admin_pass = prompt_string("  Admin password")?;
+        let admin_email = prompt_string("  Admin email")?;
+        owned = OpenCartCredentials {
+            db_host,
+            db_user,
+            db_pass,
+            db_name,
+            db_port,
+            http_server,
+            admin_user,
+            admin_pass,
+            admin_email,
+        };
+        &owned
+    };
+    let db_host = &creds.db_host;
+    let db_user = &creds.db_user;
+    let db_pass = &creds.db_pass;
+    let db_name = &creds.db_name;
+    let db_port = &creds.db_port;
+    let http_server = &creds.http_server;
+    let admin_user = &creds.admin_user;
+    let admin_pass = &creds.admin_pass;
+    let admin_email = &creds.admin_email;
 
     // ── 6. Run CLI installer ──────────────────────────────────────────────────
-    println!("\n[+] Running OpenCart CLI installer...");
+    ctx.progress("[+] Running OpenCart CLI installer...");
     let cli_script = root.join("install/cli_install.php");
     if !cli_script.exists() {
         return Err(DefenderError::Other(format!(
@@ -129,25 +195,25 @@ pub fn run(ctx: &DefenderContext, web_root: &Path, download_url: Option<&str>) -
         .arg(cli_script.as_os_str())
         .arg("install")
         .arg("--db_hostname")
-        .arg(&db_host)
+        .arg(db_host)
         .arg("--db_username")
-        .arg(&db_user)
+        .arg(db_user)
         .arg("--db_password")
-        .arg(&db_pass)
+        .arg(db_pass)
         .arg("--db_database")
-        .arg(&db_name)
+        .arg(db_name)
         .arg("--db_port")
-        .arg(&db_port)
+        .arg(db_port)
         .arg("--db_driver")
         .arg("mysqli")
         .arg("--username")
-        .arg(&admin_user)
+        .arg(admin_user)
         .arg("--password")
-        .arg(&admin_pass)
+        .arg(admin_pass)
         .arg("--email")
-        .arg(&admin_email)
+        .arg(admin_email)
         .arg("--http_server")
-        .arg(&http_server)
+        .arg(http_server)
         .status()
         .map_err(|e| DefenderError::Command(format!("cli_install.php: {e}")))?;
 
@@ -156,39 +222,38 @@ pub fn run(ctx: &DefenderContext, web_root: &Path, download_url: Option<&str>) -
             "OpenCart CLI installer returned non-zero; check output above for details".into(),
         ));
     }
-    println!("[✓] OpenCart installation complete");
+    ctx.progress("[✓] OpenCart installation complete");
 
     // ── 7. Delete web-accessible installer ───────────────────────────────────
     let install_dir = root.join("install");
     if install_dir.exists() {
         fs::remove_dir_all(&install_dir)?;
-        println!("[✓] Deleted install/ directory");
+        ctx.progress("[✓] Deleted install/ directory");
     }
 
     // ── 8. Move storage/ outside the web root ─────────────────────────────────
-    move_storage(&root)?;
+    move_storage(&root, ctx)?;
 
     // ── 9. Permissions and web server ─────────────────────────────────────────
-    println!("[+] Fixing ownership and permissions...");
-    fix_permissions(&root, &distro)?;
+    ctx.progress("[+] Fixing ownership and permissions...");
+    fix_permissions(&root, &distro, ctx)?;
 
-    println!("[+] Reloading web server...");
+    ctx.progress("[+] Reloading web server...");
     reload_webserver(ctx)?;
 
-    // Cleanup temp zip
     let _ = fs::remove_file(TMP_ZIP);
 
     ctx.log(&format!("[ok] opencart installed to {}", root.display()))?;
-    println!("\n[✓] OpenCart restored at {http_server}");
-    println!(
+    ctx.progress(&format!("[✓] OpenCart restored at {http_server}"));
+    ctx.progress(&format!(
         "[!] Admin panel: {http_server}admin/  (rename the admin/ directory when you have time)"
-    );
+    ));
     Ok(())
 }
 
 /// Rename `config-dist.php` → `config.php` and `admin/config-dist.php` →
 /// `admin/config.php` if the target files don't already exist.
-fn rename_dist_config(root: &Path) -> Result<()> {
+fn rename_dist_config(root: &Path, ctx: &DefenderContext) -> Result<()> {
     for (dist, target) in &[
         ("config-dist.php", "config.php"),
         ("admin/config-dist.php", "admin/config.php"),
@@ -197,12 +262,12 @@ fn rename_dist_config(root: &Path) -> Result<()> {
         let target_path = root.join(target);
 
         if target_path.exists() {
-            ctx_debug_noop(&format!("{} already exists, skipping rename", target));
+            ctx.debug(&format!("{} already exists, skipping rename", target));
             continue;
         }
         if dist_path.exists() {
             fs::rename(&dist_path, &target_path)?;
-            println!("[✓] Renamed {} → {}", dist, target);
+            ctx.progress(&format!("[✓] Renamed {} → {}", dist, target));
         } else {
             return Err(DefenderError::Other(format!(
                 "{} not found in web root — is the archive correct?",
@@ -215,26 +280,24 @@ fn rename_dist_config(root: &Path) -> Result<()> {
 
 /// Move `<root>/system/storage/` to [`STORAGE_DEST`] and update the path in
 /// both config files.
-fn move_storage(root: &Path) -> Result<()> {
+fn move_storage(root: &Path, ctx: &DefenderContext) -> Result<()> {
     let src = root.join("system/storage");
     if !src.exists() {
-        println!("[!] system/storage/ not found; skipping storage relocation");
+        ctx.progress("[!] system/storage/ not found; skipping storage relocation");
         return Ok(());
     }
 
     let dest = Path::new(STORAGE_DEST);
     if dest.exists() {
-        // Already relocated from a previous install — leave it.
-        println!(
+        ctx.progress(&format!(
             "[✓] {} already exists; storage already relocated",
             STORAGE_DEST
-        );
-        patch_storage_path(root, STORAGE_DEST)?;
+        ));
+        patch_storage_path(root, STORAGE_DEST, ctx)?;
         return Ok(());
     }
 
     fs::create_dir_all(dest)?;
-    // Use `cp -r` then `rm -rf` so we cross filesystem boundaries safely.
     let cp = Command::new("cp")
         .args(["-r", src.to_str().unwrap_or("."), STORAGE_DEST])
         .status()
@@ -245,28 +308,27 @@ fn move_storage(root: &Path) -> Result<()> {
         ));
     }
     fs::remove_dir_all(&src)?;
-    println!("[✓] Moved system/storage/ → {STORAGE_DEST}");
+    ctx.progress(&format!("[✓] Moved system/storage/ → {STORAGE_DEST}"));
 
-    patch_storage_path(root, STORAGE_DEST)?;
+    patch_storage_path(root, STORAGE_DEST, ctx)?;
     Ok(())
 }
 
 /// Update `DIR_STORAGE` in both config files to point at `new_path`.
-fn patch_storage_path(root: &Path, new_path: &str) -> Result<()> {
+fn patch_storage_path(root: &Path, new_path: &str, ctx: &DefenderContext) -> Result<()> {
     for cfg in &["config.php", "admin/config.php"] {
         let p = root.join(cfg);
         if !p.exists() {
             continue;
         }
         let contents = fs::read_to_string(&p)?;
-        // Replace the define line regardless of what path was there before.
         let patched = replace_define_line(
             &contents,
             "DIR_STORAGE",
             &format!("{}/", new_path.trim_end_matches('/')),
         );
         fs::write(&p, patched)?;
-        println!("[✓] Patched DIR_STORAGE in {}", p.display());
+        ctx.progress(&format!("[✓] Patched DIR_STORAGE in {}", p.display()));
     }
     Ok(())
 }
@@ -287,8 +349,6 @@ fn replace_define_line(src: &str, key: &str, value: &str) -> String {
         .join("\n")
 }
 
-/// Inline no-op for debug messages inside functions that don't take a `ctx`.
-fn ctx_debug_noop(_msg: &str) {}
 
 #[cfg(test)]
 mod tests {

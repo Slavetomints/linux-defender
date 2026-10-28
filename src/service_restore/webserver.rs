@@ -387,6 +387,35 @@ pub fn ensure_webserver(distro: &Distro, ctx: &DefenderContext) -> Result<()> {
     Ok(())
 }
 
+/// Ensure the Apache PHP module and MySQL/MariaDB driver are installed.
+///
+/// `php-cli` alone is enough to run the CLI installer, but Apache needs its
+/// own PHP module to execute `.php` files over HTTP. This installs both the
+/// web module and the MySQL driver, then restarts the web server so the new
+/// module is active.
+pub fn ensure_php_apache(distro: &Distro, ctx: &DefenderContext) -> Result<()> {
+    let (php_mod, mysql_ext) = match distro {
+        Distro::Debian => ("libapache2-mod-php", "php-mysql"),
+        Distro::Rhel => ("php", "php-mysqlnd"),
+        Distro::Arch => ("php-apache", "php"),
+        Distro::Suse => ("apache2-mod_php8", "php8-mysql"),
+        Distro::Alpine => ("php-apache2", "php-pdo_mysql"),
+    };
+
+    ctx.progress(&format!(
+        "[+] Installing PHP Apache module ({php_mod}) and MySQL driver ({mysql_ext})..."
+    ));
+    install_package(distro, &[php_mod, mysql_ext], ctx)?;
+
+    let svc = match distro {
+        Distro::Rhel => "httpd",
+        _ => "apache2",
+    };
+    enable_and_restart(svc, ctx)?;
+    ctx.progress("[✓] PHP Apache module active");
+    Ok(())
+}
+
 // ── Site verification ─────────────────────────────────────────────────────────
 
 /// Curl `url` and confirm the response body matches `pattern`.

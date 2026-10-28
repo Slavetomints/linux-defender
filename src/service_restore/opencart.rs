@@ -34,8 +34,8 @@ use crate::core::{
 
 use super::distro::{Distro, ensure_root_or_reexec};
 use super::webserver::{
-    download_file, ensure_webserver, extract_zip, find_php, fix_permissions, reload_webserver,
-    resolve_web_root, verify_site,
+    download_file, ensure_php_apache, ensure_webserver, extract_zip, find_php, fix_permissions,
+    reload_webserver, resolve_web_root, verify_site,
 };
 
 /// Credentials collected by the TUI dialog (or the CLI prompts) before install.
@@ -115,6 +115,8 @@ pub fn run(
 
     // Guarantee a web server is present before we install into the web root.
     ensure_webserver(&distro, ctx)?;
+    // Ensure the Apache PHP module + MySQL driver are installed and active.
+    ensure_php_apache(&distro, ctx)?;
 
     ctx.progress(&format!(
         "[!] OpenCart {OPENCART_VERSION} will be installed to {}.",

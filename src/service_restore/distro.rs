@@ -10,7 +10,7 @@ use std::process::Command;
 
 use nix::unistd::Uid;
 
-use crate::core::{DefenderContext, DefenderError, Result, prompt_yes};
+use crate::core::{DefenderContext, DefenderError, Result};
 
 /// Package-manager family detected on this host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,18 +174,13 @@ pub fn ensure_root_or_reexec() -> Result<()> {
         return Ok(());
     }
 
-    eprintln!("[!] This command requires root privileges.");
-    if prompt_yes("[?] Re-run with sudo? (y/N)")? {
-        let args: Vec<String> = std::env::args().collect();
-        let status = Command::new("sudo")
-            .args(&args)
-            .status()
-            .map_err(|e| DefenderError::Command(format!("sudo: {e}")))?;
-        // Hand the exit code back to the shell and stop this non-root process.
-        std::process::exit(status.code().unwrap_or(1));
-    }
-
-    Err(DefenderError::NotRoot)
+    eprintln!("[!] This command requires root privileges — re-running with sudo...");
+    let args: Vec<String> = std::env::args().collect();
+    let status = Command::new("sudo")
+        .args(&args)
+        .status()
+        .map_err(|e| DefenderError::Command(format!("sudo: {e}")))?;
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 // ── Service lifecycle ─────────────────────────────────────────────────────────

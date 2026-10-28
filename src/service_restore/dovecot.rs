@@ -27,20 +27,20 @@ pub fn run(ctx: &DefenderContext) -> Result {
         _ => &["dovecot"],
     };
 
-    if !prompt_yes(&format!(
+    if ctx.interactive() && !prompt_yes(&format!(
         "[?] Reinstall {} via {} and restart the service? (y/N)",
         packages.join(" "),
         distro.name()
     ))? {
-        println!("[-] Skipping Dovecot restore");
+        ctx.progress("[-] Skipping Dovecot restore");
         return Ok(());
     }
 
-    println!(
+    ctx.progress(&format!(
         "[+] Reinstalling {} ({})...",
         packages.join(" "),
         distro.name()
-    );
+    ));
     let output = distro
         .reinstall_cmd(packages)
         .output()
@@ -52,7 +52,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    println!("[✓] Reinstalled {}", packages.join(", "));
+    ctx.progress(&format!("[✓] Reinstalled {}", packages.join(", ")));
 
     enable_and_restart(SERVICE, ctx)?;
 

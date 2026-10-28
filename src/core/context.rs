@@ -28,6 +28,10 @@ pub struct DefenderContext {
     pub verbose: bool,
     /// When set, emit() sends findings here instead of printing.
     pub finding_tx: Option<Sender<Finding>>,
+    /// When set, progress()/log_msg() lines are sent here instead of stdout.
+    /// Used by the TUI's restore/hardening background threads to avoid
+    /// corrupting ratatui's alternate screen.
+    pub progress_tx: Option<Sender<String>>,
     /// When the competition started — artifacts created after this time are
     /// flagged as more suspicious.
     pub competition_start: Option<SystemTime>,
@@ -51,8 +55,37 @@ impl DefenderContext {
             start_time: SystemTime::now(),
             verbose,
             finding_tx: None,
+            progress_tx: None,
             competition_start: None,
         }
+    }
+
+    /// Attach a progress channel so that `progress()` sends lines to the TUI
+    /// output pane instead of writing them to stdout.
+    pub fn with_progress(mut self, tx: Sender<String>) -> Self {
+        self.progress_tx = Some(tx);
+        self
+    }
+
+    /// Emit a plain status line.
+    ///
+    /// In TUI mode (progress channel attached) the line is sent to the output
+    /// pane.  In CLI mode it is printed to stdout.
+    pub fn progress(&self, msg: &str) {
+        if let Some(tx) = &self.progress_tx {
+            let _ = tx.send(msg.to_string());
+        } else {
+            println!("{}", msg);
+        }
+    }
+
+    /// Returns `true` when stdin/stdout are a real terminal and interactive
+    /// prompts (`prompt_yes`, `prompt_string`) are safe to call.
+    ///
+    /// Returns `false` inside the TUI (progress channel is attached) — callers
+    /// must skip prompts and proceed with defaults or supplied values.
+    pub fn interactive(&self) -> bool {
+        self.progress_tx.is_none() && self.finding_tx.is_none()
     }
 
     /// Send a structured finding to the TUI, or print it in legacy mode.

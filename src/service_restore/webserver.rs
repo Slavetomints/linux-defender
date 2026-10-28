@@ -22,32 +22,32 @@ use super::distro::{Distro, enable_and_restart};
 
 /// Download `url` to `dest` using `curl` (preferred) or `wget`.
 ///
-/// If neither tool is found, the operator is offered the chance to install
-/// `curl` via the system package manager before retrying.
-pub fn download_file(url: &str, dest: &Path, distro: &Distro) -> Result<()> {
-    println!("[+] Downloading {}...", url);
+/// In non-interactive mode (TUI), falls through to an error if neither tool
+/// succeeds rather than prompting to install curl.
+pub fn download_file(url: &str, dest: &Path, distro: &Distro, ctx: &DefenderContext) -> Result<()> {
+    ctx.progress(&format!("[+] Downloading {}...", url));
 
     let dest_str = dest
         .to_str()
         .ok_or_else(|| DefenderError::Other("download path is not valid UTF-8".into()))?;
 
     if try_curl(url, dest_str) {
-        println!("[✓] Download complete");
+        ctx.progress("[✓] Download complete");
         return Ok(());
     }
-    eprintln!("[!] curl failed or not found, trying wget...");
+    ctx.progress("[!] curl failed or not found, trying wget...");
 
     if try_wget(url, dest_str) {
-        println!("[✓] Download complete");
+        ctx.progress("[✓] Download complete");
         return Ok(());
     }
 
-    // Neither worked — offer to install curl.
-    eprintln!("[!] Neither curl nor wget succeeded.");
-    if prompt_yes(&format!("[?] Install curl via {}? (y/N)", distro.name()))? {
-        install_package(distro, &["curl"])?;
+    ctx.progress("[!] Neither curl nor wget succeeded.");
+
+    if ctx.interactive() && prompt_yes(&format!("[?] Install curl via {}? (y/N)", distro.name()))? {
+        install_package(distro, &["curl"], ctx)?;
         if try_curl(url, dest_str) {
-            println!("[✓] Download complete");
+            ctx.progress("[✓] Download complete");
             return Ok(());
         }
     }
@@ -75,9 +75,9 @@ fn try_wget(url: &str, dest: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Install packages via the host's package manager, prompting on failure.
-pub fn install_package(distro: &Distro, packages: &[&str]) -> Result<()> {
-    println!("[+] Installing {}...", packages.join(" "));
+/// Install packages via the host's package manager.
+pub fn install_package(distro: &Distro, packages: &[&str], ctx: &DefenderContext) -> Result<()> {
+    ctx.progress(&format!("[+] Installing {}...", packages.join(" ")));
     let output = distro
         .install_cmd(packages)
         .output()
@@ -89,7 +89,7 @@ pub fn install_package(distro: &Distro, packages: &[&str]) -> Result<()> {
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    println!("[✓] Installed {}", packages.join(", "));
+    ctx.progress(&format!("[✓] Installed {}", packages.join(", ")));
     Ok(())
 }
 
@@ -171,7 +171,7 @@ pub fn extract_zip(
         }
     }
 
-    println!("[✓] Extracted {extracted} files, preserved {preserved}");
+    ctx.progress(&format!("[✓] Extracted {extracted} files, preserved {preserved}"));
     ctx.debug(&format!(
         "extraction complete: {extracted} extracted, {preserved} preserved, {total} total entries"
     ));
@@ -179,17 +179,11 @@ pub fn extract_zip(
 }
 
 /// Scan a zip for an `upload/` subtree and return the prefix to strip.
-///
-/// OpenCart zips look like `opencart-4.x.x.x/upload/index.php`; the prefix
-/// returned is `opencart-4.x.x.x/upload/`.  If the zip has a plain `upload/`
-/// at the root, the prefix is `upload/`.  If there is no `upload/` directory
-/// at all (PrestaShop flat layout), `None` is returned.
 fn detect_upload_prefix(zip_path: &Path) -> Result<Option<String>> {
     let file = fs::File::open(zip_path)?;
     let mut archive = ZipArchive::new(file)
         .map_err(|e| DefenderError::Other(format!("cannot open zip for scan: {e}")))?;
 
-    // Look for any entry whose name contains "/upload/" (e.g. "opencart-4.1.0.4/upload/")
     for i in 0..archive.len() {
         let entry = archive
             .by_index(i)
@@ -199,7 +193,6 @@ fn detect_upload_prefix(zip_path: &Path) -> Result<Option<String>> {
         if let Some(pos) = name.find("/upload/") {
             return Ok(Some(name[..pos + "/upload/".len()].to_string()));
         }
-        // Leading "upload/" with no version directory
         if name.starts_with("upload/") {
             return Ok(Some("upload/".to_string()));
         }
@@ -212,9 +205,8 @@ fn detect_upload_prefix(zip_path: &Path) -> Result<Option<String>> {
 
 /// Set ownership and permissions on a web root.
 ///
-/// Directories get `755`, regular files get `644`. Ownership is set to the
-/// first web-server user that exists on this system.
-pub fn fix_permissions(root: &Path, distro: &Distro) -> Result<()> {
+/// Directories get `755`, regular files get `644`.
+pub fn fix_permissions(root: &Path, distro: &Distro, ctx: &DefenderContext) -> Result<()> {
     let candidates: &[&str] = match distro {
         Distro::Debian => &["www-data"],
         Distro::Rhel => &["apache", "www-data"],
@@ -245,12 +237,12 @@ pub fn fix_permissions(root: &Path, distro: &Distro) -> Result<()> {
         .map_err(|e| DefenderError::Command(format!("chown: {e}")))?;
 
     if output.status.success() {
-        println!("[✓] Ownership set to {web_user}:{web_user}");
+        ctx.progress(&format!("[✓] Ownership set to {web_user}:{web_user}"));
     } else {
-        eprintln!(
+        ctx.progress(&format!(
             "[!] chown failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
-        );
+        ));
     }
 
     for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
@@ -262,7 +254,7 @@ pub fn fix_permissions(root: &Path, distro: &Distro) -> Result<()> {
         let _ = fs::set_permissions(entry.path(), fs::Permissions::from_mode(mode));
     }
 
-    println!("[✓] Permissions set (dirs 755, files 644)");
+    ctx.progress("[✓] Permissions set (dirs 755, files 644)");
     Ok(())
 }
 
@@ -279,12 +271,11 @@ pub fn active_webserver() -> Option<&'static str> {
     })
 }
 
-/// Reload the active web server (graceful reload); fall back to restart if
-/// the unit does not support reload.
+/// Reload the active web server; fall back to restart if reload isn't supported.
 pub fn reload_webserver(ctx: &DefenderContext) -> Result<()> {
     match active_webserver() {
         None => {
-            println!("[!] No active web server detected — restart it manually");
+            ctx.progress("[!] No active web server detected — restart it manually");
             Ok(())
         }
         Some(svc) => {
@@ -295,10 +286,10 @@ pub fn reload_webserver(ctx: &DefenderContext) -> Result<()> {
                 .map_err(|e| DefenderError::Command(format!("systemctl reload {svc}: {e}")))?;
 
             if status.success() {
-                println!("[✓] {svc} reloaded");
+                ctx.progress(&format!("[✓] {svc} reloaded"));
                 Ok(())
             } else {
-                eprintln!("[!] reload not supported, falling back to restart");
+                ctx.progress("[!] reload not supported, falling back to restart");
                 enable_and_restart(svc, ctx)
             }
         }
@@ -307,17 +298,16 @@ pub fn reload_webserver(ctx: &DefenderContext) -> Result<()> {
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
-/// Return `path` as a [`PathBuf`].
+/// Return `path` as a [`PathBuf`], creating it if the operator agrees.
 ///
-/// If the directory does not exist, the operator is offered the chance to
-/// create it with `mkdir -p`. A path that exists but is not a directory is
-/// always an error.
-pub fn resolve_web_root(path: &Path) -> Result<PathBuf> {
+/// In non-interactive mode (TUI), a missing path returns an error immediately
+/// rather than prompting.
+pub fn resolve_web_root(path: &Path, ctx: &DefenderContext) -> Result<PathBuf> {
     if !path.exists() {
-        eprintln!("[!] {} does not exist.", path.display());
-        if prompt_yes(&format!("[?] Create {} now? (y/N)", path.display()))? {
+        ctx.progress(&format!("[!] {} does not exist.", path.display()));
+        if ctx.interactive() && prompt_yes(&format!("[?] Create {} now? (y/N)", path.display()))? {
             fs::create_dir_all(path)?;
-            println!("[✓] Created {}", path.display());
+            ctx.progress(&format!("[✓] Created {}", path.display()));
         } else {
             return Err(DefenderError::Other(format!(
                 "web root {} does not exist",
@@ -336,27 +326,29 @@ pub fn resolve_web_root(path: &Path) -> Result<PathBuf> {
 
 /// Locate an available PHP binary, preferring the newest version.
 ///
-/// If no `php` executable is found, the operator is offered the chance to
-/// install the distribution's PHP CLI package before retrying.
-pub fn find_php(distro: &Distro) -> Result<String> {
+/// In non-interactive mode (TUI), errors immediately if PHP is not found rather
+/// than prompting to install it.
+pub fn find_php(distro: &Distro, ctx: &DefenderContext) -> Result<String> {
     if let Some(bin) = probe_php() {
         return Ok(bin);
     }
 
-    // PHP not found — offer to install it.
-    let pkg = distro.php_package();
-    eprintln!("[!] PHP not found on this system.");
-    if prompt_yes(&format!("[?] Install {pkg} via {}? (y/N)", distro.name()))? {
-        install_package(distro, &[pkg])?;
-        if let Some(bin) = probe_php() {
-            println!("[✓] PHP is now available: {bin}");
-            return Ok(bin);
+    ctx.progress("[!] PHP not found on this system.");
+
+    if ctx.interactive() {
+        let pkg = distro.php_package();
+        if prompt_yes(&format!("[?] Install {pkg} via {}? (y/N)", distro.name()))? {
+            install_package(distro, &[pkg], ctx)?;
+            if let Some(bin) = probe_php() {
+                ctx.progress(&format!("[✓] PHP is now available: {bin}"));
+                return Ok(bin);
+            }
+            return Err(DefenderError::Other(
+                "PHP was installed but no php binary found on $PATH; \
+                 you may need to log out and back in, or run `hash -r`"
+                    .into(),
+            ));
         }
-        return Err(DefenderError::Other(
-            "PHP was installed but no php binary found on $PATH; \
-             you may need to log out and back in, or run `hash -r`"
-                .into(),
-        ));
     }
 
     Err(DefenderError::Other(

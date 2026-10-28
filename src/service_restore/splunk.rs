@@ -32,9 +32,9 @@ pub fn run(ctx: &DefenderContext) -> Result {
         )));
     }
 
-    println!("[!] This will wipe all files in {LOCAL_DIR} and restart Splunk.");
-    if !prompt_yes("[?] Continue? (y/N)")? {
-        println!("[-] Skipping Splunk restore");
+    ctx.progress(&format!("[!] This will wipe all files in {LOCAL_DIR} and restart Splunk."));
+    if ctx.interactive() && !prompt_yes("[?] Continue? (y/N)")? {
+        ctx.progress("[-] Skipping Splunk restore");
         return Ok(());
     }
 
@@ -43,14 +43,14 @@ pub fn run(ctx: &DefenderContext) -> Result {
     splunk_start(ctx)?;
 
     ctx.log("[ok] splunk local-override layer cleared and daemon restarted")?;
-    println!("[✓] Splunk restored");
+    ctx.progress("[✓] Splunk restored");
     Ok(())
 }
 
 /// Stop the Splunk daemon.
 fn splunk_stop(ctx: &DefenderContext) -> Result {
     ctx.debug("stopping splunk");
-    println!("[+] Stopping Splunk...");
+    ctx.progress("[+] Stopping Splunk...");
 
     let output = Command::new(SPLUNK_BIN)
         .arg("stop")
@@ -58,13 +58,12 @@ fn splunk_stop(ctx: &DefenderContext) -> Result {
         .map_err(|e| DefenderError::Command(format!("splunk stop: {e}")))?;
 
     if !output.status.success() {
-        // Splunk returns non-zero if it was already stopped; warn but continue.
-        eprintln!(
+        ctx.progress(&format!(
             "[!] splunk stop returned non-zero: {}",
             String::from_utf8_lossy(&output.stderr).trim()
-        );
+        ));
     } else {
-        println!("[✓] Splunk stopped");
+        ctx.progress("[✓] Splunk stopped");
     }
     Ok(())
 }
@@ -74,12 +73,12 @@ fn wipe_local(ctx: &DefenderContext) -> Result {
     let local = Path::new(LOCAL_DIR);
 
     if !local.exists() {
-        println!("[✓] {LOCAL_DIR} does not exist — nothing to wipe");
+        ctx.progress(&format!("[✓] {LOCAL_DIR} does not exist — nothing to wipe"));
         return Ok(());
     }
 
     ctx.debug(&format!("wiping {LOCAL_DIR}"));
-    println!("[+] Clearing {LOCAL_DIR}...");
+    ctx.progress(&format!("[+] Clearing {LOCAL_DIR}..."));
 
     let mut wiped = 0usize;
     for entry in fs::read_dir(local)? {
@@ -96,14 +95,14 @@ fn wipe_local(ctx: &DefenderContext) -> Result {
         wiped += 1;
     }
 
-    println!("[✓] Removed {wiped} entries from {LOCAL_DIR}");
+    ctx.progress(&format!("[✓] Removed {wiped} entries from {LOCAL_DIR}"));
     Ok(())
 }
 
 /// Start the Splunk daemon.
 fn splunk_start(ctx: &DefenderContext) -> Result {
     ctx.debug("starting splunk");
-    println!("[+] Starting Splunk...");
+    ctx.progress("[+] Starting Splunk...");
 
     let output = Command::new(SPLUNK_BIN)
         .arg("start")
@@ -117,6 +116,6 @@ fn splunk_start(ctx: &DefenderContext) -> Result {
         )));
     }
 
-    println!("[✓] Splunk started");
+    ctx.progress("[✓] Splunk started");
     Ok(())
 }

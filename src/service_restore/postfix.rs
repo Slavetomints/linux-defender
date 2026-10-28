@@ -20,15 +20,15 @@ pub fn run(ctx: &DefenderContext) -> Result {
     let distro = Distro::detect()?;
     ctx.debug(&format!("detected distro: {}", distro.name()));
 
-    if !prompt_yes(&format!(
+    if ctx.interactive() && !prompt_yes(&format!(
         "[?] Reinstall postfix via {} and restart the service? (y/N)",
         distro.name()
     ))? {
-        println!("[-] Skipping Postfix restore");
+        ctx.progress("[-] Skipping Postfix restore");
         return Ok(());
     }
 
-    println!("[+] Reinstalling postfix ({})...", distro.name());
+    ctx.progress(&format!("[+] Reinstalling postfix ({})...", distro.name()));
     let output = distro
         .reinstall_cmd(&["postfix"])
         .output()
@@ -40,7 +40,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    println!("[✓] Reinstalled postfix");
+    ctx.progress("[✓] Reinstalled postfix");
 
     enable_and_restart(SERVICE, ctx)?;
 

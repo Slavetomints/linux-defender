@@ -216,7 +216,7 @@ pub fn enable_and_restart(service: &str, ctx: &DefenderContext) -> Result {
         )));
     }
 
-    println!("[✓] {service} is running");
+    ctx.progress(&format!("[✓] {service} is running"));
     Ok(())
 }
 

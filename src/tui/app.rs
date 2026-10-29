@@ -466,25 +466,25 @@ impl RestoreCredDialog {
         let fields = match service {
             RestoreCredService::OpenCart => [
                 "localhost".into(),         // 0  DB Hostname
-                String::new(),              // 1  DB Username
+                "root".into(),              // 1  DB Username
                 String::new(),              // 2  DB Password
                 "opencart".into(),          // 3  DB Name
                 "3306".into(),              // 4  DB Port
                 "http://localhost/".into(), // 5  HTTP base URL
                 "admin".into(),             // 6  Admin Username
                 String::new(),              // 7  Admin Password
-                String::new(),              // 8  Admin Email
+                "admin@example.com".into(), // 8  Admin Email
             ],
             RestoreCredService::PrestaShop => [
-                "localhost".into(),  // 0  Shop Domain
-                "localhost".into(),  // 1  DB Server
-                "prestashop".into(), // 2  DB Name
-                String::new(),       // 3  DB Username
-                String::new(),       // 4  DB Password
-                String::new(),       // 5  Admin Email
-                String::new(),       // 6  Admin Password
-                String::new(),       // 7  (unused)
-                String::new(),       // 8  (unused)
+                "localhost".into(),         // 0  Shop Domain
+                "localhost".into(),         // 1  DB Server
+                "prestashop".into(),        // 2  DB Name
+                "root".into(),              // 3  DB Username
+                String::new(),              // 4  DB Password
+                "admin@example.com".into(), // 5  Admin Email
+                String::new(),              // 6  Admin Password
+                String::new(),              // 7  (unused)
+                String::new(),              // 8  (unused)
             ],
         };
         Self {
@@ -1369,6 +1369,21 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                 let svc = dlg.service;
                                 let max_field = dlg.field_count() - 1;
                                 if dlg.focused as usize == max_field {
+                                    // Validate required fields before submitting.
+                                    let missing = match svc {
+                                        // OpenCart: DB user(1), DB pass(2), admin pass(7)
+                                        RestoreCredService::OpenCart => [1, 2, 7]
+                                            .iter()
+                                            .any(|&i| dlg.fields[i].trim().is_empty()),
+                                        // PrestaShop: DB user(3), DB pass(4), admin pass(6)
+                                        RestoreCredService::PrestaShop => [3, 4, 6]
+                                            .iter()
+                                            .any(|&i| dlg.fields[i].trim().is_empty()),
+                                    };
+                                    if missing {
+                                        // Required field empty — stay on dialog, do nothing.
+                                        return Ok(());
+                                    }
                                     // Last field confirmed — start restore.
                                     let dialog = app.restore_cred_dialog.take().unwrap();
                                     let service_id = match svc {

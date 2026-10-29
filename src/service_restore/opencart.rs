@@ -35,7 +35,7 @@ use crate::core::{
 use super::distro::Distro;
 use super::webserver::{
     download_file, ensure_mysql, ensure_php_apache, ensure_ssl, ensure_webserver, extract_zip,
-    find_php, open_http_firewall,
+    find_php, open_http_firewall, verify_site_insecure,
     fix_permissions, reload_webserver, resolve_web_root, verify_site,
 };
 
@@ -339,9 +339,12 @@ pub fn run(
         "[!] Admin panel: {http_server}admin/  (rename the admin/ directory when you have time)"
     ));
 
-    // Verify the storefront is actually serving an OpenCart page.
+    // Verify both HTTP and HTTPS serve an OpenCart page.
     if let Err(e) = verify_site(&http_server, r"(?i)opencart|powered by opencart", ctx) {
-        ctx.progress(&format!("[!] Site check failed: {e}"));
+        ctx.progress(&format!("[!] HTTP site check failed: {e}"));
+    }
+    if let Err(e) = verify_site_insecure(&https_server, r"(?i)opencart|powered by opencart", ctx) {
+        ctx.progress(&format!("[!] HTTPS site check failed: {e}"));
     }
 
     Ok(())

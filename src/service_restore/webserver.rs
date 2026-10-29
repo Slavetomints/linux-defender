@@ -538,10 +538,30 @@ pub fn ensure_mysql(
 /// Uses a 15-second timeout. Returns `Ok(())` if the pattern matches,
 /// `Err` if curl fails or the body does not match.
 pub fn verify_site(url: &str, pattern: &str, ctx: &DefenderContext) -> Result<()> {
+    verify_site_impl(url, pattern, false, ctx)
+}
+
+/// Like [`verify_site`] but passes `-k` to accept self-signed TLS certificates.
+pub fn verify_site_insecure(url: &str, pattern: &str, ctx: &DefenderContext) -> Result<()> {
+    verify_site_impl(url, pattern, true, ctx)
+}
+
+fn verify_site_impl(
+    url: &str,
+    pattern: &str,
+    insecure: bool,
+    ctx: &DefenderContext,
+) -> Result<()> {
     ctx.progress(&format!("[+] Verifying site at {url}..."));
 
+    let mut args = vec!["-s", "-L", "--max-time", "15"];
+    if insecure {
+        args.push("-k");
+    }
+    args.push(url);
+
     let output = Command::new("curl")
-        .args(["-s", "-L", "--max-time", "15", url])
+        .args(&args)
         .output()
         .map_err(|e| DefenderError::Command(format!("curl verify: {e}")))?;
 

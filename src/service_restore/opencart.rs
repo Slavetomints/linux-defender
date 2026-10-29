@@ -34,8 +34,8 @@ use crate::core::{
 
 use super::distro::Distro;
 use super::webserver::{
-    download_file, ensure_mysql, ensure_php_apache, ensure_webserver, extract_zip, find_php,
-    open_http_firewall,
+    download_file, ensure_mysql, ensure_php_apache, ensure_ssl, ensure_webserver, extract_zip,
+    find_php, open_http_firewall,
     fix_permissions, reload_webserver, resolve_web_root, verify_site,
 };
 
@@ -114,10 +114,12 @@ pub fn run(
 
     // Guarantee a web server is present before we install into the web root.
     ensure_webserver(&distro, ctx)?;
-    // Open port 80 unconditionally — firewall rules can be dropped by red team.
+    // Open ports 80 and 443 unconditionally — firewall rules can be dropped by red team.
     open_http_firewall(ctx);
     // Ensure the Apache PHP module + MySQL driver are installed and active.
     ensure_php_apache(&distro, ctx)?;
+    // Install mod_ssl and enable HTTPS.
+    ensure_ssl(&distro, ctx)?;
     // Ensure MariaDB is installed, running, and the target database exists.
     // We need the credentials for this, so defer until after we collect them.
 
@@ -198,6 +200,7 @@ pub fn run(
     let db_name = &creds.db_name;
     let db_port = &creds.db_port;
     let http_server = &creds.http_server;
+    let https_server = http_server.replacen("http://", "https://", 1);
     let admin_user = &creds.admin_user;
     let admin_pass = &creds.admin_pass;
     let admin_email = &creds.admin_email;
@@ -250,6 +253,8 @@ pub fn run(
         .arg(admin_email)
         .arg("--http_server")
         .arg(http_server)
+        .arg("--https_server")
+        .arg(&https_server)
         .arg("--db_prefix")
         .arg("oc_")
         .arg("--language")
@@ -287,6 +292,19 @@ pub fn run(
 
     // ── 8. Move storage/ outside the web root ─────────────────────────────────
     move_storage(&root, ctx)?;
+
+    // Patch HTTPS_SERVER in both config files so OpenCart knows its HTTPS URL.
+    for cfg in &["config.php", "admin/config.php"] {
+        let p = root.join(cfg);
+        if !p.exists() {
+            continue;
+        }
+        if let Ok(contents) = fs::read_to_string(&p) {
+            let patched = replace_define_line(&contents, "HTTPS_SERVER", &https_server);
+            let _ = fs::write(&p, patched);
+        }
+    }
+    ctx.progress(&format!("[✓] HTTPS_SERVER set to {https_server}"));
 
     // ── 9. Permissions and web server ─────────────────────────────────────────
     // Ensure the image cache directory exists and is writable by Apache.

@@ -581,12 +581,12 @@ fn probe_php() -> Option<String> {
     None
 }
 
-/// Open TCP port 80 in the host firewall, silently ignoring errors.
+/// Open TCP ports 80 and 443 in the host firewall, silently ignoring errors.
 ///
 /// Tries firewalld first (RHEL/Rocky default), then ufw (Debian/Ubuntu).
 /// No-ops on systems without a managed firewall.
 pub fn open_http_firewall(ctx: &DefenderContext) {
-    let firewalld = Command::new("firewall-cmd")
+    let firewalld_80 = Command::new("firewall-cmd")
         .args(["--add-port=80/tcp", "--permanent"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -594,25 +594,91 @@ pub fn open_http_firewall(ctx: &DefenderContext) {
         .map(|s| s.success())
         .unwrap_or(false);
 
-    if firewalld {
+    if firewalld_80 {
+        let _ = Command::new("firewall-cmd")
+            .args(["--add-port=443/tcp", "--permanent"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
         let _ = Command::new("firewall-cmd")
             .arg("--reload")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
-        ctx.progress("[✓] firewalld: port 80 opened");
+        ctx.progress("[✓] firewalld: ports 80 and 443 opened");
         return;
     }
 
-    let ufw_ok = Command::new("ufw")
+    let ufw_80 = Command::new("ufw")
         .args(["allow", "80/tcp"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
+    let _ = Command::new("ufw")
+        .args(["allow", "443/tcp"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 
-    if ufw_ok {
-        ctx.progress("[✓] ufw: port 80 opened");
+    if ufw_80 {
+        ctx.progress("[✓] ufw: ports 80 and 443 opened");
     }
+}
+
+/// Install and enable the Apache SSL module with a self-signed certificate.
+///
+/// On RHEL/Rocky, `mod_ssl` ships its own default VirtualHost and generates
+/// a self-signed cert automatically.  On Debian/Ubuntu the `ssl-cert` package
+/// provides the snakeoil cert; `a2enmod ssl` and `a2ensite default-ssl` wire
+/// it into Apache.
+pub fn ensure_ssl(distro: &Distro, ctx: &DefenderContext) -> Result<()> {
+    ctx.progress("[+] Configuring HTTPS/SSL...");
+
+    let svc = match distro {
+        Distro::Rhel => "httpd",
+        _ => "apache2",
+    };
+
+    match distro {
+        Distro::Rhel => {
+            install_package(distro, &["mod_ssl"], ctx)?;
+        }
+        Distro::Debian => {
+            install_package(distro, &["ssl-cert"], ctx)?;
+            let _ = Command::new("a2enmod")
+                .arg("ssl")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            let _ = Command::new("a2ensite")
+                .arg("default-ssl")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        Distro::Arch => {
+            // On Arch, mod_ssl is built in; just uncomment LoadModule ssl_module
+            // in /etc/httpd/conf/httpd.conf — handled by a2enmod equivalent.
+            let _ = Command::new("sed")
+                .args([
+                    "-i",
+                    "s|#LoadModule ssl_module|LoadModule ssl_module|",
+                    "/etc/httpd/conf/httpd.conf",
+                ])
+                .status();
+        }
+        Distro::Suse => {
+            install_package(distro, &["apache2-mod_ssl"], ctx)?;
+            let _ = Command::new("a2enmod").arg("ssl").status();
+        }
+        Distro::Alpine => {
+            // Alpine apache2 has ssl built in; enable via conf.
+        }
+    }
+
+    enable_and_restart(svc, ctx)?;
+    ctx.progress("[✓] HTTPS/SSL enabled");
+    Ok(())
 }

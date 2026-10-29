@@ -95,6 +95,49 @@ pub fn install_package(distro: &Distro, packages: &[&str], ctx: &DefenderContext
     Ok(())
 }
 
+// ── Web root purge ────────────────────────────────────────────────────────────
+
+/// Delete every entry inside `root` so the next extract starts from a clean slate.
+///
+/// The directory itself is kept (web server vhost still points at it).  Any
+/// entry that cannot be removed is logged and skipped rather than aborting —
+/// a partial purge is still far better than leaving attacker-planted files.
+pub fn purge_web_root(root: &Path, ctx: &DefenderContext) -> Result<()> {
+    if !root.exists() {
+        fs::create_dir_all(root)?;
+        ctx.progress(&format!("[✓] {} created (was absent)", root.display()));
+        return Ok(());
+    }
+
+    ctx.progress(&format!("[+] Purging {}...", root.display()));
+    let mut removed = 0usize;
+    let mut failed = 0usize;
+
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ok = if path.is_dir() {
+            fs::remove_dir_all(&path).is_ok()
+        } else {
+            fs::remove_file(&path).is_ok()
+        };
+        if ok {
+            removed += 1;
+        } else {
+            ctx.progress(&format!("[!] Could not remove {}", path.display()));
+            failed += 1;
+        }
+    }
+
+    ctx.progress(&format!(
+        "[✓] Purged {} entries ({} failed) from {}",
+        removed,
+        failed,
+        root.display()
+    ));
+    Ok(())
+}
+
 // ── Zip extraction ────────────────────────────────────────────────────────────
 
 /// Extract a zip archive from disk onto `dest`, skipping `preserve` paths.
@@ -440,6 +483,16 @@ pub fn ensure_php_apache(distro: &Distro, ctx: &DefenderContext) -> Result<()> {
         ],
     };
 
+    // Rocky 9's default AppStream PHP stream is 8.0, which OpenCart 4.x rejects.
+    // Enable php:8.2 before installing so every package lands on 8.2.
+    if matches!(distro, Distro::Rhel) {
+        let _ = Command::new("dnf")
+            .args(["module", "enable", "-y", "php:8.2"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
     ctx.progress("[+] Installing PHP Apache module and required extensions...");
     install_package(distro, pkgs, ctx)?;
 
@@ -585,9 +638,27 @@ fn verify_site_impl(
     }
 }
 
-/// Try each php binary name; return the first one that responds.
+/// Parse `php --version` output into a (major, minor) tuple.
+fn php_semver(bin: &str) -> Option<(u8, u8)> {
+    let out = Command::new(bin).arg("--version").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    // "PHP 8.2.10 (cli) ..."
+    let ver = text.split_whitespace().nth(1)?;
+    let mut parts = ver.split('.');
+    let major: u8 = parts.next()?.parse().ok()?;
+    let minor: u8 = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// Try each php binary name; return the first one that is >= 8.1.
+///
+/// Versioned binaries are probed before the generic `php` so that a distro
+/// default of PHP 8.0 is bypassed when a newer version is also installed.
 fn probe_php() -> Option<String> {
-    for candidate in ["php", "php8.3", "php8.2", "php8.1", "php8.0"] {
+    for candidate in ["php8.3", "php8.2", "php8.1"] {
         if Command::new(candidate)
             .arg("--version")
             .output()
@@ -595,6 +666,12 @@ fn probe_php() -> Option<String> {
             .unwrap_or(false)
         {
             return Some(candidate.to_string());
+        }
+    }
+    // Accept generic `php` only if it meets the minimum version requirement.
+    if let Some((major, minor)) = php_semver("php") {
+        if major > 8 || (major == 8 && minor >= 1) {
+            return Some("php".to_string());
         }
     }
     None

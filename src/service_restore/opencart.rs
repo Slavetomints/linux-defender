@@ -35,8 +35,8 @@ use crate::core::{
 use super::distro::Distro;
 use super::webserver::{
     download_file, ensure_mysql, ensure_php_apache, ensure_ssl, ensure_webserver, extract_zip,
-    find_php, open_http_firewall, verify_site_insecure,
-    fix_permissions, reload_webserver, resolve_web_root, verify_site,
+    find_php, fix_permissions, open_http_firewall, purge_web_root, reload_webserver,
+    resolve_web_root, verify_site, verify_site_insecure,
 };
 
 /// Credentials collected by the TUI dialog (or the CLI prompts) before install.
@@ -104,12 +104,10 @@ pub fn run(
 ) -> Result<()> {
     let root = resolve_web_root(web_root, ctx)?;
     let distro = Distro::detect()?;
-    let php = find_php(&distro, ctx)?;
     let url = download_url.unwrap_or(OPENCART_DEFAULT_URL);
 
     ctx.debug(&format!("opencart url: {url}"));
     ctx.debug(&format!("web root: {}", root.display()));
-    ctx.debug(&format!("php: {php}"));
     ctx.debug(&format!("distro: {}", distro.name()));
 
     // Guarantee a web server is present before we install into the web root.
@@ -117,7 +115,11 @@ pub fn run(
     // Open ports 80 and 443 unconditionally — firewall rules can be dropped by red team.
     open_http_firewall(ctx);
     // Ensure the Apache PHP module + MySQL driver are installed and active.
+    // On RHEL/Rocky this also enables php:8.2 — find_php() must run AFTER so
+    // it can see the newly-installed 8.2 binary rather than the stock 8.0.
     ensure_php_apache(&distro, ctx)?;
+    let php = find_php(&distro, ctx)?;
+    ctx.debug(&format!("php: {php}"));
     // Install mod_ssl and enable HTTPS.
     ensure_ssl(&distro, ctx)?;
     // Ensure MariaDB is installed, running, and the target database exists.
@@ -127,9 +129,7 @@ pub fn run(
         "[!] OpenCart {OPENCART_VERSION} will be installed to {}.",
         root.display()
     ));
-    ctx.progress(
-        "[!] Existing PHP files (except config.php / admin/config.php) will be overwritten.",
-    );
+    ctx.progress("[!] Web root will be PURGED then rebuilt from the official release zip.");
 
     // Skip confirmation prompt when credentials are pre-supplied (TUI path).
     if credentials.is_none() && !prompt_yes("[?] Continue? (y/N)")? {
@@ -140,12 +140,15 @@ pub fn run(
     // ── 1. Download ───────────────────────────────────────────────────────────
     download_file(url, Path::new(TMP_ZIP), &distro, ctx)?;
 
+    // ── 1b. Purge web root — full clean slate, no attacker files survive ──────
+    purge_web_root(&root, ctx)?;
+
     // ── 2. Extract upload/ subtree to web root ────────────────────────────────
     ctx.progress(&format!("[+] Extracting to {}...", root.display()));
     extract_zip(
         Path::new(TMP_ZIP),
         &root,
-        &["config.php", "admin/config.php"],
+        &[], // nothing to preserve — web root was just purged
         ctx,
     )?;
 
@@ -224,12 +227,7 @@ pub fn run(
         if !Path::new(TMP_ZIP).exists() {
             download_file(url, Path::new(TMP_ZIP), &distro, ctx)?;
         }
-        extract_zip(
-            Path::new(TMP_ZIP),
-            &root,
-            &["config.php", "admin/config.php"],
-            ctx,
-        )?;
+        extract_zip(Path::new(TMP_ZIP), &root, &[], ctx)?;
     }
     if !cli_script.exists() {
         return Err(DefenderError::Other(format!(

@@ -522,14 +522,13 @@ pub fn ensure_mysql(
 
     if output.status.success() {
         ctx.progress(&format!("[✓] Database '{db_name}' ready"));
-    } else {
-        ctx.progress(&format!(
-            "[!] Could not create database: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        return Ok(());
     }
 
-    Ok(())
+    Err(DefenderError::Command(format!(
+        "Could not create database: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
 }
 
 // ── Site verification ─────────────────────────────────────────────────────────

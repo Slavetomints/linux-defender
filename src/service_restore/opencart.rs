@@ -199,7 +199,9 @@ pub fn run(
     let db_pass = &creds.db_pass;
     let db_name = &creds.db_name;
     let db_port = &creds.db_port;
-    let http_server = &creds.http_server;
+    // Normalize: ensure trailing slash so URLs like http://1.2.3.4admin/ don't occur.
+    let http_server_raw = creds.http_server.trim_end_matches('/').to_string();
+    let http_server = format!("{http_server_raw}/");
     let https_server = http_server.replacen("http://", "https://", 1);
     let admin_user = &creds.admin_user;
     let admin_pass = &creds.admin_pass;
@@ -209,6 +211,11 @@ pub fn run(
     ensure_mysql(&distro, db_name, db_pass, ctx)?;
 
     // ── 6. Run CLI installer ──────────────────────────────────────────────────
+    // Truncate config.php before running so the post-install empty-check is
+    // reliable even when a previous run left a valid config in place.
+    let _ = fs::write(root.join("config.php"), "");
+    let _ = fs::write(root.join("admin/config.php"), "");
+
     ctx.progress("[+] Running OpenCart CLI installer...");
     let cli_script = root.join("install/cli_install.php");
     if !cli_script.exists() {
@@ -252,7 +259,7 @@ pub fn run(
         .arg("--email")
         .arg(admin_email)
         .arg("--http_server")
-        .arg(http_server)
+        .arg(&http_server)
         .arg("--https_server")
         .arg(&https_server)
         .arg("--db_prefix")
@@ -333,7 +340,7 @@ pub fn run(
     ));
 
     // Verify the storefront is actually serving an OpenCart page.
-    if let Err(e) = verify_site(http_server, r"(?i)opencart|powered by opencart", ctx) {
+    if let Err(e) = verify_site(&http_server, r"(?i)opencart|powered by opencart", ctx) {
         ctx.progress(&format!("[!] Site check failed: {e}"));
     }
 

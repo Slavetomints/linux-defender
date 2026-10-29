@@ -459,21 +459,34 @@ pub(crate) struct RestoreCredDialog {
     focused: RestoreCredField,
 }
 
+/// Return `http://<primary-ip>/` using `hostname -I`, falling back to `localhost`.
+fn detect_http_base_url() -> String {
+    use std::process::Command;
+    let out = Command::new("hostname").arg("-I").output().ok();
+    if let Some(o) = out {
+        let s = String::from_utf8_lossy(&o.stdout);
+        if let Some(ip) = s.split_whitespace().next() {
+            return format!("http://{ip}/");
+        }
+    }
+    "http://localhost/".into()
+}
+
 impl RestoreCredDialog {
     /// Build a new dialog pre-populated with sensible defaults for `service`.
     fn new(service: RestoreCredService) -> Self {
         // Fields are indexed 0..=8 and must match field_label() and into_credentials() exactly.
         let fields = match service {
             RestoreCredService::OpenCart => [
-                "localhost".into(),         // 0  DB Hostname
-                "root".into(),              // 1  DB Username
-                String::new(),              // 2  DB Password
-                "opencart".into(),          // 3  DB Name
-                "3306".into(),              // 4  DB Port
-                "http://localhost/".into(), // 5  HTTP base URL
-                "admin".into(),             // 6  Admin Username
-                String::new(),              // 7  Admin Password
-                "admin@example.com".into(), // 8  Admin Email
+                "localhost".into(),                     // 0  DB Hostname
+                "root".into(),                          // 1  DB Username
+                String::new(),                          // 2  DB Password
+                "opencart".into(),                      // 3  DB Name
+                "3306".into(),                          // 4  DB Port
+                detect_http_base_url(),                 // 5  HTTP base URL
+                "admin".into(),                         // 6  Admin Username
+                String::new(),                          // 7  Admin Password
+                "admin@example.com".into(),             // 8  Admin Email
             ],
             RestoreCredService::PrestaShop => [
                 "localhost".into(),         // 0  Shop Domain

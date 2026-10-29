@@ -383,6 +383,7 @@ pub fn ensure_webserver(distro: &Distro, ctx: &DefenderContext) -> Result<()> {
 
     install_package(distro, &[pkg], ctx)?;
     enable_and_restart(svc, ctx)?;
+    open_http_firewall(ctx);
     ctx.progress(&format!("[✓] {svc} installed and running"));
     Ok(())
 }
@@ -578,4 +579,40 @@ fn probe_php() -> Option<String> {
         }
     }
     None
+}
+
+/// Open TCP port 80 in the host firewall, silently ignoring errors.
+///
+/// Tries firewalld first (RHEL/Rocky default), then ufw (Debian/Ubuntu).
+/// No-ops on systems without a managed firewall.
+pub fn open_http_firewall(ctx: &DefenderContext) {
+    let firewalld = Command::new("firewall-cmd")
+        .args(["--add-port=80/tcp", "--permanent"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if firewalld {
+        let _ = Command::new("firewall-cmd")
+            .arg("--reload")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        ctx.progress("[✓] firewalld: port 80 opened");
+        return;
+    }
+
+    let ufw_ok = Command::new("ufw")
+        .args(["allow", "80/tcp"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if ufw_ok {
+        ctx.progress("[✓] ufw: port 80 opened");
+    }
 }

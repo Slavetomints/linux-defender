@@ -35,6 +35,7 @@ use crate::core::{
 use super::distro::Distro;
 use super::webserver::{
     download_file, ensure_mysql, ensure_php_apache, ensure_webserver, extract_zip, find_php,
+    open_http_firewall,
     fix_permissions, reload_webserver, resolve_web_root, verify_site,
 };
 
@@ -113,6 +114,8 @@ pub fn run(
 
     // Guarantee a web server is present before we install into the web root.
     ensure_webserver(&distro, ctx)?;
+    // Open port 80 unconditionally — firewall rules can be dropped by red team.
+    open_http_firewall(ctx);
     // Ensure the Apache PHP module + MySQL driver are installed and active.
     ensure_php_apache(&distro, ctx)?;
     // Ensure MariaDB is installed, running, and the target database exists.
@@ -286,6 +289,17 @@ pub fn run(
     move_storage(&root, ctx)?;
 
     // ── 9. Permissions and web server ─────────────────────────────────────────
+    // Ensure the image cache directory exists and is writable by Apache.
+    // On SELinux systems the cache dir needs httpd_sys_rw_content_t or PHP
+    // cannot create subdirectories inside it on first request.
+    let image_cache = root.join("image/cache");
+    let _ = fs::create_dir_all(&image_cache);
+    if let Some(s) = image_cache.to_str() {
+        let _ = Command::new("chcon")
+            .args(["-R", "-t", "httpd_sys_rw_content_t", s])
+            .output();
+    }
+
     ctx.progress("[+] Fixing ownership and permissions...");
     fix_permissions(&root, &distro, ctx)?;
 
@@ -339,24 +353,33 @@ fn rename_dist_config(root: &Path, ctx: &DefenderContext) -> Result<()> {
 /// both config files.
 fn move_storage(root: &Path, ctx: &DefenderContext) -> Result<()> {
     let src = root.join("system/storage");
+    let dest = Path::new(STORAGE_DEST);
+
     if !src.exists() {
         ctx.progress("[!] system/storage/ not found; skipping storage relocation");
+        if dest.exists() {
+            ensure_storage_subdirs(dest)?;
+        }
         return Ok(());
     }
 
-    let dest = Path::new(STORAGE_DEST);
     if dest.exists() {
         ctx.progress(&format!(
-            "[✓] {} already exists; storage already relocated",
+            "[✓] {} already exists; ensuring layout and ownership",
             STORAGE_DEST
         ));
+        ensure_storage_subdirs(dest)?;
         patch_storage_path(root, STORAGE_DEST, ctx)?;
         return Ok(());
     }
 
-    fs::create_dir_all(dest)?;
+    // cp -r src dst when dst does NOT exist creates dst as a copy of src (contents directly inside).
+    // If we pre-create dst first, cp nests src inside it — so we must NOT call create_dir_all here.
+    let src_str = src.to_str().unwrap_or(".");
     let cp = Command::new("cp")
-        .args(["-r", src.to_str().unwrap_or("."), STORAGE_DEST])
+        .args(["-r", src_str, STORAGE_DEST])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map_err(|e| DefenderError::Command(format!("cp storage: {e}")))?;
     if !cp.success() {
@@ -365,9 +388,28 @@ fn move_storage(root: &Path, ctx: &DefenderContext) -> Result<()> {
         ));
     }
     fs::remove_dir_all(&src)?;
+
+    ensure_storage_subdirs(dest)?;
     ctx.progress(&format!("[✓] Moved system/storage/ → {STORAGE_DEST}"));
 
     patch_storage_path(root, STORAGE_DEST, ctx)?;
+    Ok(())
+}
+
+/// Create required storage subdirectories, fix ownership, and set SELinux context.
+fn ensure_storage_subdirs(dest: &Path) -> Result<()> {
+    for subdir in &["logs", "cache", "download", "upload", "modification"] {
+        fs::create_dir_all(dest.join(subdir))?;
+    }
+    let dest_str = dest.to_str().unwrap_or(".");
+    let _ = Command::new("chown")
+        .args(["-R", "apache:apache", dest_str])
+        .output();
+    // On SELinux systems (RHEL/Rocky), httpd needs httpd_sys_rw_content_t to
+    // both read and write files outside /var/www (cache, logs, uploads, etc.).
+    let _ = Command::new("chcon")
+        .args(["-R", "-t", "httpd_sys_rw_content_t", dest_str])
+        .output();
     Ok(())
 }
 

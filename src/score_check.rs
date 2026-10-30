@@ -15,9 +15,13 @@
 //! - [`CheckKind::Dns`] — `dig` query, check for an ANSWER section
 
 use std::collections::VecDeque;
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant, SystemTime};
+
+/// Path where score-check results are logged for post-mortem debugging.
+pub const SCORE_LOG: &str = "/tmp/defender-score.log";
 
 /// How the check verifies the service.
 #[derive(Debug, Clone)]
@@ -204,11 +208,32 @@ fn run_check(svc: &ServiceCheck) -> CheckResult {
         CheckKind::Pop3 => check_pop3(svc.host, svc.port),
         CheckKind::Dns { query } => check_dns(svc.host, svc.port, query),
     };
+    let latency_ms = start.elapsed().as_millis() as u64;
+    log_check_result(svc, up, latency_ms, &detail);
     CheckResult {
         up,
-        latency_ms: start.elapsed().as_millis() as u64,
+        latency_ms,
         detail,
         checked_at: SystemTime::now(),
+    }
+}
+
+/// Append one line to [`SCORE_LOG`] for every check result so failures can be
+/// diagnosed without needing to read TUI detail (which isn't rendered).
+fn log_check_result(svc: &ServiceCheck, up: bool, latency_ms: u64, detail: &str) {
+    use std::time::UNIX_EPOCH;
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let status = if up { "UP  " } else { "DOWN" };
+    let line = format!(
+        "[{ts}] {status} {name:<16} :{port:<5} {latency_ms:>4}ms  {detail}\n",
+        name = svc.name,
+        port = svc.port,
+    );
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(SCORE_LOG) {
+        let _ = f.write_all(line.as_bytes());
     }
 }
 

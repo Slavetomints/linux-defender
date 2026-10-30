@@ -102,6 +102,10 @@ fn render_services(
                 .avg_latency_ms()
                 .map(|ms| format!(" {:>4}ms", ms))
                 .unwrap_or_else(|| "   ---".into());
+            let detail = h
+                .last()
+                .map(|r| r.detail.clone())
+                .unwrap_or_default();
             let line = Line::from(vec![
                 Span::styled(symbol, Style::default().fg(color)),
                 Span::raw(format!(" {:<14} :{:<6}", h.check.name, h.check.port)),
@@ -110,6 +114,10 @@ fn render_services(
                     Style::default().fg(if up { Color::Green } else { Color::Red }),
                 ),
                 Span::styled(latency, Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("  {}", detail),
+                    Style::default().fg(if up { Color::DarkGray } else { Color::Yellow }),
+                ),
             ]);
             ListItem::new(line)
         })

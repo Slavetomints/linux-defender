@@ -28,8 +28,9 @@ const SPLUNK_BIN: &str = "/opt/splunk/bin/splunk";
 const LOCAL_DIR: &str = "/opt/splunk/etc/system/local";
 
 /// Pinned Splunk 10.0.2 .deb URL (Debian/Ubuntu).
+/// Splunk 10.x dropped the old "linux-2.6-amd64" infix — filename is now "linux-amd64.deb".
 const SPLUNK_DEB_URL: &str = "https://download.splunk.com/products/splunk/releases/10.0.2/linux/\
-                               splunk-10.0.2-17e00679ea65-linux-2.6-amd64.deb";
+                               splunk-10.0.2-17e00679ea65-linux-amd64.deb";
 /// Pinned Splunk 10.0.2 .rpm URL (RHEL/Fedora).
 const SPLUNK_RPM_URL: &str = "https://download.splunk.com/products/splunk/releases/10.0.2/linux/\
                                splunk-10.0.2-17e00679ea65.x86_64.rpm";

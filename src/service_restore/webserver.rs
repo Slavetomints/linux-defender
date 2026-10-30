@@ -79,6 +79,9 @@ fn try_wget(url: &str, dest: &str) -> bool {
 
 /// Install packages via the host's package manager.
 pub fn install_package(distro: &Distro, packages: &[&str], ctx: &DefenderContext) -> Result<()> {
+    if matches!(distro, Distro::Debian) {
+        fix_debian_apt_sources(ctx);
+    }
     ctx.progress(&format!("[+] Installing {}...", packages.join(" ")));
     let output = distro
         .install_cmd(packages)
@@ -93,6 +96,35 @@ pub fn install_package(distro: &Distro, packages: &[&str], ctx: &DefenderContext
     }
     ctx.progress(&format!("[✓] Installed {}", packages.join(", ")));
     Ok(())
+}
+
+/// Comment out any `deb cdrom:` lines in `/etc/apt/sources.list` and run
+/// `apt-get update` so subsequent installs don't fail with "Failed to fetch
+/// cdrom://" on VMs that still have the installation-media source configured.
+fn fix_debian_apt_sources(ctx: &DefenderContext) {
+    let sources = "/etc/apt/sources.list";
+    if let Ok(content) = std::fs::read_to_string(sources) {
+        if content.lines().any(|l| l.trim_start().starts_with("deb cdrom:")) {
+            let fixed: String = content
+                .lines()
+                .map(|l| {
+                    if l.trim_start().starts_with("deb cdrom:") {
+                        format!("# {l}")
+                    } else {
+                        l.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let _ = std::fs::write(sources, fixed + "\n");
+            ctx.progress("[+] Disabled cdrom apt source; running apt-get update...");
+            let _ = Command::new("apt-get")
+                .args(["update", "-q"])
+                .env("DEBIAN_FRONTEND", "noninteractive")
+                .stdout(std::process::Stdio::null())
+                .status();
+        }
+    }
 }
 
 // ── Web root purge ────────────────────────────────────────────────────────────

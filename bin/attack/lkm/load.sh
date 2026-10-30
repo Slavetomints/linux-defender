@@ -15,28 +15,61 @@ install_headers() {
         # Disable cdrom source that blocks installs on DVD-provisioned machines.
         sed -i 's|^deb cdrom:|#deb cdrom:|g' /etc/apt/sources.list 2>/dev/null || true
 
-        # Ensure standard Debian network repos are present.  Many competition
-        # images ship with only the cdrom source, so the exact kernel headers
-        # package (linux-headers-X.Y.Z-N-amd64) is never found without this.
+        # Ensure standard Debian network repos are present (main, updates,
+        # backports, security).  Competition images often only have cdrom.
         local codename
         codename=$(. /etc/os-release 2>/dev/null && printf '%s' "${VERSION_CODENAME:-bookworm}")
         local src_file="/etc/apt/sources.list.d/debian-rt-main.list"
         if ! grep -rqE "deb.debian.org/debian[[:space:]]+${codename}[[:space:]]+main" \
                 /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
-            echo "[*] Adding Debian ${codename} main/updates/security repos..."
+            echo "[*] Adding Debian ${codename} repos..."
             cat > "${src_file}" <<EOF
 deb http://deb.debian.org/debian ${codename} main
 deb http://deb.debian.org/debian ${codename}-updates main
+deb http://deb.debian.org/debian ${codename}-backports main
 deb http://security.debian.org/debian-security ${codename}-security main
 EOF
         fi
-
         DEBIAN_FRONTEND=noninteractive apt-get update -q
-        # Install the exact running-kernel headers first; no fallback to a
-        # generic meta-package (which installs headers for a DIFFERENT kernel
-        # version and leaves /lib/modules/${KVER}/build missing).
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
-            "linux-headers-${KVER}" build-essential
+
+        # Try exact running-kernel headers from standard repos first.
+        if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
+                "linux-headers-${KVER}" build-essential 2>/dev/null; then
+            # The exact kernel version may have been superseded and removed from
+            # live repos.  Fall back to snapshot.debian.org which keeps every
+            # historical .deb.
+            echo "[*] Not in live repos — trying snapshot.debian.org..."
+            local dl snap_path tmp_deb
+            dl=$(command -v wget || command -v curl || true)
+            if [[ -n "$dl" ]]; then
+                if [[ "$dl" == *wget ]]; then
+                    snap_path=$(wget -qO- \
+                        "https://snapshot.debian.org/binary/linux-headers-${KVER}/" \
+                        2>/dev/null \
+                        | grep -oE '/archive/debian/[^"]+linux-headers-[^"]+_amd64\.deb' \
+                        | tail -1 || true)
+                else
+                    snap_path=$(curl -s \
+                        "https://snapshot.debian.org/binary/linux-headers-${KVER}/" \
+                        2>/dev/null \
+                        | grep -oE '/archive/debian/[^"]+linux-headers-[^"]+_amd64\.deb' \
+                        | tail -1 || true)
+                fi
+                if [[ -n "$snap_path" ]]; then
+                    tmp_deb=$(mktemp /tmp/lhdr-XXXXXX.deb)
+                    if [[ "$dl" == *wget ]]; then
+                        wget -q "https://snapshot.debian.org${snap_path}" -O "$tmp_deb" 2>/dev/null || true
+                    else
+                        curl -s "https://snapshot.debian.org${snap_path}" -o "$tmp_deb" 2>/dev/null || true
+                    fi
+                    DEBIAN_FRONTEND=noninteractive dpkg -i "$tmp_deb" 2>/dev/null || true
+                    DEBIAN_FRONTEND=noninteractive apt-get install -f -y -q 2>/dev/null || true
+                    rm -f "$tmp_deb"
+                fi
+            fi
+            # build-essential may still need installing even if headers came from snapshot
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -q build-essential 2>/dev/null || true
+        fi
     elif command -v dnf &>/dev/null; then
         # Try exact running-kernel version first; repo may have rolled forward,
         # so fall back to unversioned kernel-devel (latest available).

@@ -12,20 +12,22 @@ LOGIN_SHELL=$(command -v bash 2>/dev/null || command -v sh)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-# Schedule one at job; return the job number via atq (avoids parsing at's
-# locale-sensitive output which varies across Debian/RHEL/Alpine).
+# Schedule one at job; return the job number via atq diff.
+# Uses temp files instead of process substitution to stay safe under
+# set -euo pipefail (process substitution + grep exit-1 breaks pipefail).
 schedule_at() {
     local delay_min="$1"
-    # Snapshot job IDs before and after so we can identify the new one.
-    local before after new_id
-    before=$(atq 2>/dev/null | awk '{print $1}' | sort -n | tr '\n' ' ')
+    local f_before f_after new_id=""
+    f_before=$(mktemp)
+    f_after=$(mktemp)
+    atq 2>/dev/null | awk '{print $1}' | sort > "$f_before"
     echo "bash $PAYLOAD" | at "now + ${delay_min} minutes" 2>/dev/null || true
-    after=$(atq 2>/dev/null | awk '{print $1}' | sort -n | tr '\n' ' ')
-    # The new job ID is whatever appeared in after but not in before.
-    new_id=$(comm -13 <(echo "$before" | tr ' ' '\n' | grep -v '^$' | sort) \
-                      <(echo "$after"  | tr ' ' '\n' | grep -v '^$' | sort) \
-             | head -1 || true)
-    echo "${new_id:-}"
+    sleep 0.2
+    atq 2>/dev/null | awk '{print $1}' | sort > "$f_after"
+    # comm -13: lines only in file2 (after) = newly added job IDs
+    new_id=$(comm -13 "$f_before" "$f_after" | head -1 || true)
+    rm -f "$f_before" "$f_after"
+    printf '%s' "${new_id:-}"
 }
 
 # Lock the spool file for a given job number.

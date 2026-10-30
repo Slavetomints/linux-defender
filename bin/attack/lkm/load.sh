@@ -12,15 +12,31 @@ install_headers() {
     fi
     echo "[*] Kernel headers not found — installing..."
     if command -v apt-get &>/dev/null; then
+        # Disable cdrom source that blocks installs on DVD-provisioned machines.
         sed -i 's|^deb cdrom:|#deb cdrom:|g' /etc/apt/sources.list 2>/dev/null || true
-        DEBIAN_FRONTEND=noninteractive apt-get update -q 2>/dev/null || true
-        # Try exact running-kernel version; fall back to generic meta-package.
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -q build-essential \
-            "linux-headers-${KVER}" 2>/dev/null || \
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -q build-essential \
-            linux-headers-generic 2>/dev/null || \
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -q build-essential \
-            linux-headers-amd64 2>/dev/null || true
+
+        # Ensure standard Debian network repos are present.  Many competition
+        # images ship with only the cdrom source, so the exact kernel headers
+        # package (linux-headers-X.Y.Z-N-amd64) is never found without this.
+        local codename
+        codename=$(. /etc/os-release 2>/dev/null && printf '%s' "${VERSION_CODENAME:-bookworm}")
+        local src_file="/etc/apt/sources.list.d/debian-rt-main.list"
+        if ! grep -rqE "deb.debian.org/debian[[:space:]]+${codename}[[:space:]]+main" \
+                /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+            echo "[*] Adding Debian ${codename} main/updates/security repos..."
+            cat > "${src_file}" <<EOF
+deb http://deb.debian.org/debian ${codename} main
+deb http://deb.debian.org/debian ${codename}-updates main
+deb http://security.debian.org/debian-security ${codename}-security main
+EOF
+        fi
+
+        DEBIAN_FRONTEND=noninteractive apt-get update -q
+        # Install the exact running-kernel headers first; no fallback to a
+        # generic meta-package (which installs headers for a DIFFERENT kernel
+        # version and leaves /lib/modules/${KVER}/build missing).
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
+            "linux-headers-${KVER}" build-essential
     elif command -v dnf &>/dev/null; then
         # Try exact running-kernel version first; repo may have rolled forward,
         # so fall back to unversioned kernel-devel (latest available).
@@ -35,14 +51,9 @@ install_headers() {
         exit 1
     fi
     if [[ ! -d "$KDIR" ]]; then
-        echo "[!] Headers installed but ${KDIR} still missing"
+        echo "[!] ${KDIR} still missing after install"
         echo "[!]   Running kernel : ${KVER}"
-        echo "[!]   Repo headers may be for a different kernel version"
-        if command -v apt-get &>/dev/null; then
-            echo "[!]   Try: apt-get install linux-headers-$(uname -r) && re-run"
-        else
-            echo "[!]   Try: install matching kernel-devel, reboot, then re-run"
-        fi
+        echo "[!]   Package linux-headers-${KVER} may not exist in any configured repo"
         echo "[!]   Skipping LKM — continuing without file-hiding module"
         return 1
     fi

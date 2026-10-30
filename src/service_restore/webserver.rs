@@ -60,9 +60,10 @@ pub fn download_file(url: &str, dest: &Path, distro: &Distro, ctx: &DefenderCont
 }
 
 /// Attempt a download with `curl`; returns `true` on success.
+/// --fail causes curl to exit non-zero on HTTP 4xx/5xx instead of saving an error page.
 fn try_curl(url: &str, dest: &str) -> bool {
     Command::new("curl")
-        .args(["-L", "--progress-bar", "-o", dest, url])
+        .args(["-L", "--fail", "--progress-bar", "-o", dest, url])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)

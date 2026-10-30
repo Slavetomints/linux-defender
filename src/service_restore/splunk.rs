@@ -62,6 +62,18 @@ pub fn run(ctx: &DefenderContext, url: Option<&str>) -> Result {
     Ok(())
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Check the Debian ar magic bytes (`!<arch>\n`) at the start of the file.
+fn is_valid_deb(path: &Path) -> bool {
+    use std::io::Read;
+    let mut magic = [0u8; 8];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read(&mut magic))
+        .map(|n| n == 8 && &magic == b"!<arch>\n")
+        .unwrap_or(false)
+}
+
 // ── Fresh install ─────────────────────────────────────────────────────────────
 
 fn fresh_install(ctx: &DefenderContext, url: Option<&str>) -> Result {
@@ -85,6 +97,20 @@ fn fresh_install(ctx: &DefenderContext, url: Option<&str>) -> Result {
 
     let tmp_path = env::temp_dir().join(format!("splunk-installer.{pkg_ext}"));
     download_file(download_url, &tmp_path, &distro, ctx)?;
+
+    // Validate the download before handing it to dpkg/rpm — Splunk's CDN can
+    // return an HTML auth-redirect page with HTTP 200, which curl saves happily
+    // but dpkg rejects. Fail early with an actionable message.
+    if pkg_ext == "deb" && !is_valid_deb(&tmp_path) {
+        let size = fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0);
+        let _ = fs::remove_file(&tmp_path);
+        return Err(DefenderError::Other(format!(
+            "downloaded file ({size} bytes) is not a valid .deb — Splunk CDN returned \
+             an HTML page instead of the package (possible auth redirect).\n\
+             Manual fix: wget -O /tmp/splunk.deb '{download_url}' && dpkg -i /tmp/splunk.deb\n\
+             Or serve the .deb from your attacker box: wget http://<attacker-ip>/splunk.deb"
+        )));
+    }
 
     ctx.progress("[+] Installing Splunk package...");
     let install_ok = match distro {

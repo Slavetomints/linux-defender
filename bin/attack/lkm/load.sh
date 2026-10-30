@@ -12,6 +12,7 @@ install_headers() {
     fi
     echo "[*] Kernel headers not found — installing..."
     if command -v apt-get &>/dev/null; then
+        sed -i 's|^deb cdrom:|#deb cdrom:|g' /etc/apt/sources.list 2>/dev/null || true
         DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
             "linux-headers-${KVER}" build-essential
     elif command -v dnf &>/dev/null; then

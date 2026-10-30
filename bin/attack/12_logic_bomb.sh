@@ -53,6 +53,8 @@ case "${1:-}" in
         if command -v dnf &>/dev/null; then
             dnf install -y at 2>/dev/null || true
         elif command -v apt-get &>/dev/null; then
+            # Disable cdrom sources that block installs on DVD-provisioned machines.
+            sed -i 's|^deb cdrom:|#deb cdrom:|g' /etc/apt/sources.list 2>/dev/null || true
             DEBIAN_FRONTEND=noninteractive apt-get install -y at 2>/dev/null || true
         fi
     fi

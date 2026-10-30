@@ -32,7 +32,9 @@ pub fn download_file(url: &str, dest: &Path, distro: &Distro, ctx: &DefenderCont
         .to_str()
         .ok_or_else(|| DefenderError::Other("download path is not valid UTF-8".into()))?;
 
-    let quiet = ctx.in_tui();
+    // Suppress subprocess output whenever we have a progress channel (TUI restore thread)
+    // or a findings channel (TUI mode). ctx.interactive() is only true when neither is set.
+    let quiet = !ctx.interactive();
     if try_wget(url, dest_str, quiet) {
         ctx.progress("[✓] Download complete");
         return Ok(());
@@ -50,7 +52,7 @@ pub fn download_file(url: &str, dest: &Path, distro: &Distro, ctx: &DefenderCont
     {
         install_package(distro, &["wget"], ctx)?;
         if try_wget(url, dest_str, quiet) {
-            ctx.progress("[✓] Download complete");
+            ctx.progress("[✓] Download complete (wget, fallback after install)");
             return Ok(());
         }
     }
@@ -66,23 +68,27 @@ pub fn download_file(url: &str, dest: &Path, distro: &Distro, ctx: &DefenderCont
 /// actual binary to Wget's default User-Agent but return an HTML redirect
 /// page to curl, causing a silent corrupt download.
 fn try_wget(url: &str, dest: &str, quiet: bool) -> bool {
-    let progress = if quiet { "-q" } else { "--progress=bar:force" };
-    Command::new("wget")
-        .args([progress, "-O", dest, url])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let mut cmd = Command::new("wget");
+    cmd.args(["--progress=bar:force", "-O", dest, url]);
+    if quiet {
+        // Redirect at the OS level — more reliable than -q, which some wget
+        // versions ignore or which still writes headers before suppressing.
+        cmd.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+    }
+    cmd.status().map(|s| s.success()).unwrap_or(false)
 }
 
 /// Attempt a download with `curl`; returns `true` on success.
 /// --fail causes curl to exit non-zero on HTTP 4xx/5xx instead of saving an error page.
 fn try_curl(url: &str, dest: &str, quiet: bool) -> bool {
-    let progress = if quiet { "-s" } else { "--progress-bar" };
-    Command::new("curl")
-        .args(["-L", "--fail", progress, "-o", dest, url])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let mut cmd = Command::new("curl");
+    cmd.args(["-L", "--fail", "--progress-bar", "-o", dest, url]);
+    if quiet {
+        cmd.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+    }
+    cmd.status().map(|s| s.success()).unwrap_or(false)
 }
 
 /// Install packages via the host's package manager.

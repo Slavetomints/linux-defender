@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use crate::core::scan::{
     effective_line, read_text_files, references_untrusted_dir, suspicious_matches,
 };
-use crate::core::{DefenderContext, Result};
+use crate::core::{Action, DefenderContext, Finding, Result, Severity};
 
 /// Admin-managed rules. Distribution directories are deliberately excluded.
 const RULES_DIR: &str = "/etc/udev/rules.d";
@@ -32,7 +32,9 @@ pub struct Rule {
 pub fn run(ctx: &DefenderContext) -> Result {
     let dir = Path::new(RULES_DIR);
     if !dir.is_dir() {
-        println!("[✓] {} does not exist", RULES_DIR);
+        if !ctx.in_tui() {
+            println!("[✓] {} does not exist", RULES_DIR);
+        }
         return Ok(());
     }
 
@@ -56,27 +58,62 @@ pub fn run(ctx: &DefenderContext) -> Result {
     }
 
     if executing.is_empty() {
-        println!("[✓] No udev rules in {} execute programs", RULES_DIR);
+        if !ctx.in_tui() {
+            println!("[✓] No udev rules in {} execute programs", RULES_DIR);
+        }
         return Ok(());
     }
 
     let flagged = executing.iter().filter(|r| !r.reasons.is_empty()).count();
-    println!(
-        "[+] {} rule(s) in {} execute a program, {} flagged:",
-        executing.len(),
-        RULES_DIR,
-        flagged
-    );
 
-    for rule in &executing {
-        println!("    {}", rule.file.display());
-        println!("      {}", rule.line);
-        println!("      runs: {}", rule.command);
-        if !rule.reasons.is_empty() {
-            println!("      [!] {}", rule.reasons.join(", "));
+    if ctx.in_tui() {
+        for rule in &executing {
+            let severity = if rule.reasons.is_empty() {
+                Severity::Info
+            } else {
+                Severity::High
+            };
+            ctx.emit(
+                Finding::new(
+                    severity,
+                    "udev",
+                    format!("udev rule executes: {}", rule.command),
+                    format!(
+                        "File: {}\nRule: {}\nCommand: {}{}",
+                        rule.file.display(),
+                        rule.line,
+                        rule.command,
+                        if rule.reasons.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\nReasons: {}", rule.reasons.join(", "))
+                        }
+                    ),
+                )
+                .with_path(rule.file.clone())
+                .with_action(Action::Manual(format!(
+                    "Review {} and remove the suspicious RUN+= directive",
+                    rule.file.display()
+                ))),
+            );
         }
+    } else {
+        println!(
+            "[+] {} rule(s) in {} execute a program, {} flagged:",
+            executing.len(),
+            RULES_DIR,
+            flagged
+        );
+        for rule in &executing {
+            println!("    {}", rule.file.display());
+            println!("      {}", rule.line);
+            println!("      runs: {}", rule.command);
+            if !rule.reasons.is_empty() {
+                println!("      [!] {}", rule.reasons.join(", "));
+            }
+        }
+        println!("[!] udev rules are not auto-removed — a wrong deletion can break devices.");
     }
-    println!("[!] udev rules are not auto-removed — a wrong deletion can break devices.");
 
     Ok(())
 }

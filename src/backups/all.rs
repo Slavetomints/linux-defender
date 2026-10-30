@@ -51,8 +51,8 @@ pub fn run_with_paths(
         )?;
     }
 
-    println!("[!] Hash file -> {}", hash_path.display());
-    println!("[!] Log file  -> {}", log_path.display());
+    ctx.progress(&format!("[!] Hash file -> {}", hash_path.display()));
+    ctx.progress(&format!("[!] Log file  -> {}", log_path.display()));
 
     writeln!(
         log,
@@ -102,23 +102,23 @@ pub fn run_with_paths(
                 path,
                 String::from_utf8_lossy(&output.stderr).trim()
             )?;
-            eprintln!(
+            ctx.progress(&format!(
                 "[!] Failed to back up {} (see {})",
                 path,
                 log_path.display()
-            );
+            ));
         }
     }
 
     writeln!(log, "[✓] Complete. {} copied, {} skipped", copied, skipped)?;
     log.flush()?;
 
-    println!(
+    ctx.progress(&format!(
         "[✓] Backup complete: {} copied, {} skipped",
         copied, skipped
-    );
-    println!("[✓] Hashes written to {}", hash_path.display());
-    println!("[✓] Logs written to {}", log_path.display());
+    ));
+    ctx.progress(&format!("[✓] Hashes written to {}", hash_path.display()));
+    ctx.progress(&format!("[✓] Logs written to {}", log_path.display()));
 
     Ok(())
 }

@@ -388,6 +388,7 @@ impl Fail2BanWizard {
             }
 
             push!("→ Writing /etc/fail2ban/jail.local…");
+            let _ = std::fs::create_dir_all("/etc/fail2ban");
             let config = build_jail_config(&enabled, &maxretry, &bantime, &findtime);
             match std::fs::write("/etc/fail2ban/jail.local", &config) {
                 Ok(_) => push!("  ✓ Written"),

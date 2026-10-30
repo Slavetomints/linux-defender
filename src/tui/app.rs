@@ -603,6 +603,8 @@ pub struct App {
     pub nft_config: Option<String>,
     /// Status message shown in the Tools tab during downloads.
     pub download_status: Option<String>,
+    /// Receives the result string from a background download thread.
+    download_result_rx: Receiver<String>,
     /// Flat cursor in the Tools tab (binaries first, then wizards).
     pub tools_cursor: usize,
     /// Currently open TUI wizard overlay, if any.
@@ -710,6 +712,7 @@ impl App {
         let (monitor_progress_tx, monitor_progress_rx) = mpsc::channel::<String>();
         let (backups_progress_tx, backups_progress_rx) = mpsc::channel::<String>();
         let (restore_progress_tx, restore_progress_rx) = mpsc::channel::<String>();
+        let (_download_result_tx_placeholder, download_result_rx) = mpsc::channel::<String>();
         let scan_selected = vec![true; SCAN_MODULES.len()];
         let authorized_users = vec!["root".to_string()];
         let sessions = poll_sessions(&authorized_users);
@@ -734,6 +737,7 @@ impl App {
             action_feedback: None,
             nft_config,
             download_status: None,
+            download_result_rx,
             tools_cursor: 0,
             active_wizard: None,
             sessions,
@@ -877,6 +881,10 @@ impl App {
         while let Ok(id) = self.auto_scan_done_rx.try_recv() {
             self.auto_scan_running.remove(id);
         }
+        // Pick up download result when the background thread finishes.
+        if let Ok(msg) = self.download_result_rx.try_recv() {
+            self.download_status = Some(msg);
+        }
         if self.auto_scan_enabled {
             self.tick_auto_scan();
         }
@@ -940,6 +948,9 @@ impl App {
                 let report = PathBuf::from("/tmp/defender-autoscan.log");
                 let mut ctx = DefenderContext::new(report, false);
                 ctx.finding_tx = Some(finding_tx);
+                let (progress_sink_tx, progress_sink_rx) = mpsc::channel::<String>();
+                std::thread::spawn(move || while progress_sink_rx.recv().is_ok() {});
+                ctx.progress_tx = Some(progress_sink_tx);
                 if is_ap {
                     let _ = crate::anti_persistence::run_module(id_str, &ctx);
                 } else {
@@ -980,6 +991,9 @@ impl App {
             let report = PathBuf::from("/tmp/defender-scan.log");
             let mut ctx = DefenderContext::new(report, false);
             ctx.finding_tx = Some(finding_tx);
+            let (progress_sink_tx, progress_sink_rx) = mpsc::channel::<String>();
+            std::thread::spawn(move || while progress_sink_rx.recv().is_ok() {});
+            ctx.progress_tx = Some(progress_sink_tx);
 
             for (id, is_ap) in selected {
                 let _ = progress_tx.send(id.to_string());
@@ -1007,7 +1021,8 @@ impl App {
 
         std::thread::spawn(move || {
             let report = PathBuf::from("/tmp/defender-hardening.log");
-            let mut ctx = DefenderContext::new(report, false);
+            let mut ctx = DefenderContext::new(report, false)
+                .with_progress(progress_tx.clone());
             ctx.finding_tx = Some(finding_tx);
 
             let args = crate::system_hardening::CliArgs {
@@ -1041,7 +1056,8 @@ impl App {
         std::thread::spawn(move || {
             let _ = progress_tx.send(format!("Running {}…", module_id));
             let report = PathBuf::from("/tmp/defender-monitor.log");
-            let mut ctx = DefenderContext::new(report, false);
+            let mut ctx = DefenderContext::new(report, false)
+                .with_progress(progress_tx.clone());
             ctx.finding_tx = Some(finding_tx);
             match crate::monitoring::run_module(module_id, &ctx) {
                 Ok(()) => {
@@ -1074,7 +1090,8 @@ impl App {
         std::thread::spawn(move || {
             let _ = progress_tx.send(format!("Starting: {}…", label));
             let report = PathBuf::from("/tmp/defender-backup.log");
-            let ctx = DefenderContext::new(report, false);
+            let ctx = DefenderContext::new(report, false)
+                .with_progress(progress_tx.clone());
             let mut args = crate::backups::CliArgs {
                 all: false,
                 compare_hashes: false,
@@ -1131,9 +1148,11 @@ impl App {
             let report = PathBuf::from("/tmp/defender-restore.log");
             let ctx = DefenderContext::new(report, false).with_progress(progress_tx.clone());
             let mut args = crate::service_restore::CliArgs {
+                ssh: false,
                 postfix: false,
                 dovecot: false,
                 splunk: false,
+                splunk_url: None,
                 opencart: false,
                 opencart_path: PathBuf::from("/var/www/html"),
                 opencart_url: None,
@@ -1142,6 +1161,7 @@ impl App {
                 prestashop_url: None,
             };
             match service_id {
+                "ssh" => args.ssh = true,
                 "postfix" => args.postfix = true,
                 "dovecot" => args.dovecot = true,
                 "splunk" => args.splunk = true,
@@ -1667,8 +1687,14 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                 use crate::tools::catalog::NFTBUILD;
                                 app.download_status = Some("nftbuild: downloading…".into());
                                 let tool = NFTBUILD.clone();
+                                let (dl_tx, dl_rx) = mpsc::channel::<String>();
+                                app.download_result_rx = dl_rx;
                                 std::thread::spawn(move || {
-                                    let _ = crate::tools::downloader::download(&tool);
+                                    let msg = match crate::tools::downloader::download(&tool) {
+                                        Ok(result) => format!("nftbuild: downloaded to {}", result.path.display()),
+                                        Err(e) => format!("nftbuild: download failed — {}", e),
+                                    };
+                                    let _ = dl_tx.send(msg);
                                 });
                             }
                         }

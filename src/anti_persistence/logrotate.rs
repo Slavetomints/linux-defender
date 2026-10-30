@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::scan::{read_text_file, read_text_files, suspicious_matches};
-use crate::core::{DefenderContext, Result};
+use crate::core::{Action, DefenderContext, Finding, Result, Severity};
 
 /// The top-level logrotate configuration.
 const MAIN_CONFIG: &str = "/etc/logrotate.conf";
@@ -55,27 +55,57 @@ pub fn run(ctx: &DefenderContext) -> Result {
     }
 
     if blocks.is_empty() {
-        println!("[✓] No logrotate script blocks found");
+        if !ctx.in_tui() {
+            println!("[✓] No logrotate script blocks found");
+        }
         return Ok(());
     }
 
     let flagged = blocks.iter().filter(|b| !b.reasons.is_empty()).count();
-    println!(
-        "[+] {} logrotate script block(s), {} flagged:",
-        blocks.len(),
-        flagged
-    );
 
-    for block in &blocks {
-        println!("    {} — {}", block.file.display(), block.directive);
-        for line in &block.body {
-            println!("      {}", line);
+    if ctx.in_tui() {
+        for block in &blocks {
+            let severity = if block.reasons.is_empty() {
+                Severity::Info
+            } else {
+                Severity::High
+            };
+            ctx.emit(
+                Finding::new(
+                    severity,
+                    "logrotate",
+                    format!(
+                        "logrotate {} block in {}",
+                        block.directive,
+                        block.file.display()
+                    ),
+                    block.body.join("\n"),
+                )
+                .with_path(block.file.clone())
+                .with_action(Action::Manual(format!(
+                    "Review and remove the {} block in {}",
+                    block.directive,
+                    block.file.display()
+                ))),
+            );
         }
-        if !block.reasons.is_empty() {
-            println!("      [!] {}", block.reasons.join(", "));
+    } else {
+        println!(
+            "[+] {} logrotate script block(s), {} flagged:",
+            blocks.len(),
+            flagged
+        );
+        for block in &blocks {
+            println!("    {} — {}", block.file.display(), block.directive);
+            for line in &block.body {
+                println!("      {}", line);
+            }
+            if !block.reasons.is_empty() {
+                println!("      [!] {}", block.reasons.join(", "));
+            }
         }
+        println!("[!] logrotate configs are not auto-edited — review each block by hand.");
     }
-    println!("[!] logrotate configs are not auto-edited — review each block by hand.");
 
     Ok(())
 }

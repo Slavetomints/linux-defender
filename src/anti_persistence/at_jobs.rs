@@ -6,16 +6,21 @@
 
 use std::process::{Command, Stdio};
 
-use crate::core::{DefenderContext, DefenderError, Result, prompt_yes, require_root};
+use crate::core::{Action, DefenderContext, DefenderError, Finding, Result, Severity, prompt_yes,
+    require_root};
 
 /// Review every queued `at` job and remove the ones the operator flags.
 pub fn run(ctx: &DefenderContext) -> Result {
     if require_root().is_err() {
-        eprintln!("[!] Not running as root - stopping at_jobs check.");
+        if !ctx.in_tui() {
+            eprintln!("[!] Not running as root - stopping at_jobs check.");
+        }
         return Err(DefenderError::NotRoot);
     }
 
-    println!("[+] Checking for at jobs");
+    if !ctx.in_tui() {
+        println!("[+] Checking for at jobs");
+    }
 
     let output = Command::new("atq")
         .stderr(Stdio::null())
@@ -26,11 +31,15 @@ pub fn run(ctx: &DefenderContext) -> Result {
     let jobs: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
 
     if jobs.is_empty() {
-        println!("[+] No at jobs found");
+        if !ctx.in_tui() {
+            println!("[+] No at jobs found");
+        }
         return Ok(());
     }
 
-    println!("[+] Found {} at job(s)", jobs.len());
+    if !ctx.in_tui() {
+        println!("[+] Found {} at job(s)", jobs.len());
+    }
 
     for job in jobs {
         let Some(job_id) = job.split_whitespace().next() else {
@@ -38,6 +47,20 @@ pub fn run(ctx: &DefenderContext) -> Result {
         };
 
         ctx.debug(&format!("at job line: {}", job));
+
+        if ctx.in_tui() {
+            ctx.emit(
+                Finding::new(
+                    Severity::High,
+                    "at_jobs",
+                    format!("Queued at job: {}", job),
+                    format!("Job ID: {}", job_id),
+                )
+                .with_action(Action::Manual(format!("atrm {}", job_id))),
+            );
+            continue;
+        }
+
         println!("[!] at job: {}", job);
 
         if !prompt_yes("[?] Remove this at job? (y/N)")? {
@@ -56,6 +79,8 @@ pub fn run(ctx: &DefenderContext) -> Result {
         }
     }
 
-    println!("[+] at job cleanup complete");
+    if !ctx.in_tui() {
+        println!("[+] at job cleanup complete");
+    }
     Ok(())
 }

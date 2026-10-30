@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::scan::{effective_line, read_text_file, read_text_files, suspicious_matches};
-use crate::core::{DefenderContext, Result};
+use crate::core::{Action, DefenderContext, Finding, Result, Severity};
 
 /// Where the kernel command line is configured.
 const DEFAULT_GRUB: &str = "/etc/default/grub";
@@ -62,10 +62,12 @@ pub fn run(ctx: &DefenderContext) -> Result {
 /// Report `GRUB_CMDLINE_*` entries that weaken or redirect the boot.
 fn check_kernel_params(ctx: &DefenderContext) {
     let Some(contents) = read_text_file(Path::new(DEFAULT_GRUB)) else {
-        println!(
-            "[!] {} not found, skipping kernel parameter check",
-            DEFAULT_GRUB
-        );
+        if !ctx.in_tui() {
+            println!(
+                "[!] {} not found, skipping kernel parameter check",
+                DEFAULT_GRUB
+            );
+        }
         return;
     };
 
@@ -73,14 +75,33 @@ fn check_kernel_params(ctx: &DefenderContext) {
     ctx.debug(&format!("{} parameter finding(s)", findings.len()));
 
     if findings.is_empty() {
-        println!("[✓] No dangerous kernel parameters in {}", DEFAULT_GRUB);
+        if !ctx.in_tui() {
+            println!("[✓] No dangerous kernel parameters in {}", DEFAULT_GRUB);
+        }
         return;
     }
 
-    println!("[!] Dangerous kernel parameters in {}:", DEFAULT_GRUB);
-    for (line, reason) in findings {
-        println!("    {}", line);
-        println!("      [!] {}", reason);
+    if ctx.in_tui() {
+        for (line, reason) in findings {
+            ctx.emit(
+                Finding::new(
+                    Severity::High,
+                    "grub",
+                    format!("Dangerous kernel parameter: {}", reason),
+                    format!("File: {}\nLine: {}\nReason: {}", DEFAULT_GRUB, line, reason),
+                )
+                .with_action(Action::Manual(format!(
+                    "Edit {} and remove the dangerous parameter",
+                    DEFAULT_GRUB
+                ))),
+            );
+        }
+    } else {
+        println!("[!] Dangerous kernel parameters in {}:", DEFAULT_GRUB);
+        for (line, reason) in findings {
+            println!("    {}", line);
+            println!("      [!] {}", reason);
+        }
     }
 }
 
@@ -88,7 +109,9 @@ fn check_kernel_params(ctx: &DefenderContext) {
 fn check_grub_d(ctx: &DefenderContext) {
     let dir = Path::new(GRUB_D);
     if !dir.is_dir() {
-        println!("[!] {} not found, skipping boot script check", GRUB_D);
+        if !ctx.in_tui() {
+            println!("[!] {} not found, skipping boot script check", GRUB_D);
+        }
         return;
     }
 
@@ -101,7 +124,19 @@ fn check_grub_d(ctx: &DefenderContext) {
         .filter(|path| !is_stock_script(path))
         .collect();
 
-    if unexpected.is_empty() {
+    if ctx.in_tui() {
+        for path in &unexpected {
+            ctx.emit(
+                Finding::new(
+                    Severity::Medium,
+                    "grub",
+                    format!("Non-stock grub.d script: {}", path.display()),
+                    format!("Script {} is not on the known-stock list. Verify it is expected.", path.display()),
+                )
+                .with_path((*path).clone()),
+            );
+        }
+    } else if unexpected.is_empty() {
         println!("[✓] {} contains only recognised scripts", GRUB_D);
     } else {
         println!(
@@ -119,7 +154,19 @@ fn check_grub_d(ctx: &DefenderContext) {
     for (path, contents) in &files {
         let reasons = suspicious_matches(contents);
         if !reasons.is_empty() {
-            println!("[!] {} contains: {}", path.display(), reasons.join(", "));
+            if ctx.in_tui() {
+                ctx.emit(
+                    Finding::new(
+                        Severity::High,
+                        "grub",
+                        format!("Suspicious content in grub.d script: {}", path.display()),
+                        reasons.join(", "),
+                    )
+                    .with_path(path.clone()),
+                );
+            } else {
+                println!("[!] {} contains: {}", path.display(), reasons.join(", "));
+            }
         }
     }
 }

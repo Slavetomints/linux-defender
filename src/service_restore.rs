@@ -26,6 +26,7 @@ pub mod opencart;
 pub mod postfix;
 pub mod prestashop;
 pub mod splunk;
+pub mod ssh;
 pub mod webserver;
 
 /// Pre-supplied credentials for web-app restores (avoids blocking stdin prompts).
@@ -43,6 +44,10 @@ pub struct RestoreCredentials {
 #[derive(Args, Debug)]
 #[command(arg_required_else_help = true)]
 pub struct CliArgs {
+    /// Reinstall OpenSSH server and restart the service
+    #[arg(long)]
+    pub ssh: bool,
+
     /// Reinstall Postfix and restart the service
     #[arg(long)]
     pub postfix: bool,
@@ -51,9 +56,13 @@ pub struct CliArgs {
     #[arg(long)]
     pub dovecot: bool,
 
-    /// Wipe Splunk's local-override layer and restart the daemon
+    /// Wipe Splunk's local-override layer and restart the daemon (or install from scratch)
     #[arg(long)]
     pub splunk: bool,
+
+    /// Override the Splunk installer URL (defaults to pinned 10.0.2 release)
+    #[arg(long)]
+    pub splunk_url: Option<String>,
 
     /// Download and reinstall OpenCart, preserving config.php if present
     #[arg(long)]
@@ -89,20 +98,24 @@ pub fn run(
     args: &CliArgs,
     creds: Option<&RestoreCredentials>,
 ) -> Result<()> {
+    if args.ssh {
+        ctx.progress("[+] Restoring SSH");
+        ssh::run(ctx)?;
+    }
     if args.postfix {
-        println!("[+] Restoring Postfix");
+        ctx.progress("[+] Restoring Postfix");
         postfix::run(ctx)?;
     }
     if args.dovecot {
-        println!("[+] Restoring Dovecot");
+        ctx.progress("[+] Restoring Dovecot");
         dovecot::run(ctx)?;
     }
     if args.splunk {
-        println!("[+] Restoring Splunk");
-        splunk::run(ctx)?;
+        ctx.progress("[+] Restoring Splunk");
+        splunk::run(ctx, args.splunk_url.as_deref())?;
     }
     if args.opencart {
-        println!("[+] Restoring OpenCart at {}", args.opencart_path.display());
+        ctx.progress(&format!("[+] Restoring OpenCart at {}", args.opencart_path.display()));
         let oc_creds = creds.and_then(|c| c.opencart.as_ref());
         opencart::run(
             ctx,
@@ -112,10 +125,10 @@ pub fn run(
         )?;
     }
     if args.prestashop {
-        println!(
+        ctx.progress(&format!(
             "[+] Restoring PrestaShop at {}",
             args.prestashop_path.display()
-        );
+        ));
         let ps_creds = creds.and_then(|c| c.prestashop.as_ref());
         prestashop::run(
             ctx,

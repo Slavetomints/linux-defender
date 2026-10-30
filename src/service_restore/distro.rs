@@ -4,8 +4,9 @@
 //! major package-manager families so each restore module can issue the
 //! right install or reinstall command without duplicating detection logic.
 
+use std::ffi::OsStr;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use nix::unistd::Uid;
@@ -70,7 +71,9 @@ impl Distro {
         match self {
             Distro::Debian => {
                 let mut cmd = Command::new("apt-get");
-                cmd.args(["install", "-y"]);
+                // Suppress all interactive prompts (e.g. postfix mail-type dialog).
+                cmd.env("DEBIAN_FRONTEND", "noninteractive");
+                cmd.args(["install", "-y", "-q"]);
                 cmd.args(packages);
                 cmd
             }
@@ -107,7 +110,8 @@ impl Distro {
         match self {
             Distro::Debian => {
                 let mut cmd = Command::new("apt-get");
-                cmd.args(["install", "--reinstall", "-y"]);
+                cmd.env("DEBIAN_FRONTEND", "noninteractive");
+                cmd.args(["install", "--reinstall", "-y", "-q"]);
                 cmd.args(packages);
                 cmd
             }
@@ -146,6 +150,48 @@ impl Distro {
             Distro::Arch => "php",
             Distro::Suse => "php8-cli",
             Distro::Alpine => "php-cli",
+        }
+    }
+
+    /// Build a remove/purge [`Command`] for packages that may be installed.
+    ///
+    /// On Debian `apt-get purge` is used so that config files are also removed,
+    /// giving a truly clean slate before the follow-up `install`.  Errors from
+    /// this command should be ignored by callers — it is fine if the package
+    /// is not currently installed.
+    pub fn remove_cmd(&self, packages: &[&str]) -> Command {
+        match self {
+            Distro::Debian => {
+                let mut cmd = Command::new("apt-get");
+                cmd.env("DEBIAN_FRONTEND", "noninteractive");
+                cmd.args(["purge", "-y", "-q"]);
+                cmd.args(packages);
+                cmd
+            }
+            Distro::Rhel => {
+                let mut cmd = Command::new(rhel_bin());
+                cmd.args(["remove", "-y"]);
+                cmd.args(packages);
+                cmd
+            }
+            Distro::Arch => {
+                let mut cmd = Command::new("pacman");
+                cmd.args(["-Rns", "--noconfirm"]);
+                cmd.args(packages);
+                cmd
+            }
+            Distro::Suse => {
+                let mut cmd = Command::new("zypper");
+                cmd.args(["remove", "-y"]);
+                cmd.args(packages);
+                cmd
+            }
+            Distro::Alpine => {
+                let mut cmd = Command::new("apk");
+                cmd.args(["del"]);
+                cmd.args(packages);
+                cmd
+            }
         }
     }
 
@@ -217,6 +263,84 @@ pub fn enable_and_restart(service: &str, ctx: &DefenderContext) -> Result {
 
     ctx.progress(&format!("[✓] {service} is running"));
     Ok(())
+}
+
+// ── Backup config restore ─────────────────────────────────────────────────────
+
+/// Try to restore `config_path` (e.g. `/etc/postfix`) from the most recent
+/// `/etc/ccdc-b@ckup-*` directory created by the backup module.
+///
+/// The backup stores `/etc/postfix` as `_etc_postfix.bak/` inside the backup
+/// dir (see `backups/all.rs`).  This function finds the newest backup dir,
+/// locates the `.bak` entry for `config_path`, and overlays it onto
+/// `config_path` with `cp -rT` (copy source contents INTO dest, not nested).
+///
+/// Returns `Ok(true)` if a backup was found and applied, `Ok(false)` if no
+/// backup exists (caller should warn the operator), or `Err` on a copy failure.
+pub fn restore_config_from_backup(config_path: &str, ctx: &DefenderContext) -> Result<bool> {
+    let backup_dir = match latest_backup_dir() {
+        Some(d) => d,
+        None => {
+            ctx.progress(&format!(
+                "[!] No backup found — {config_path} AD/integration config was NOT restored"
+            ));
+            return Ok(false);
+        }
+    };
+
+    // The backup module replaces '/' with '_', e.g. /etc/postfix → _etc_postfix.bak
+    let bak_name = format!("{}.bak", config_path.replace('/', "_"));
+    let bak_path = backup_dir.join(&bak_name);
+
+    if !bak_path.exists() {
+        ctx.progress(&format!(
+            "[!] Backup entry not found for {config_path} in {} — AD config NOT restored",
+            backup_dir.display()
+        ));
+        return Ok(false);
+    }
+
+    ctx.progress(&format!(
+        "[+] Restoring {config_path} from backup {}...",
+        backup_dir.display()
+    ));
+
+    // cp -rT copies the SOURCE contents into DEST (not a nested copy).
+    let out = Command::new("cp")
+        .args(["-rT", "--", bak_path.to_str().unwrap_or(""), config_path])
+        .output()
+        .map_err(|e| DefenderError::Command(format!("cp config restore: {e}")))?;
+
+    if !out.status.success() {
+        return Err(DefenderError::Command(format!(
+            "config restore failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+
+    ctx.progress(&format!("[✓] {config_path} restored from backup"));
+    Ok(true)
+}
+
+/// Return the path of the most recently created `/etc/ccdc-b@ckup-*` directory.
+fn latest_backup_dir() -> Option<PathBuf> {
+    let base = Path::new("/etc");
+    let mut dirs: Vec<PathBuf> = fs::read_dir(base)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .and_then(OsStr::to_str)
+                    .map(|n| n.starts_with("ccdc-b@ckup-"))
+                    .unwrap_or(false)
+        })
+        .collect();
+
+    // Sort lexicographically — the timestamp suffix (YYYYMMDDTHHMMSSz) sorts correctly.
+    dirs.sort();
+    dirs.into_iter().next_back()
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

@@ -44,7 +44,7 @@ pub fn compute(paths: &[&str]) -> Result<BTreeMap<String, String>> {
                     hashes.insert((*path).to_string(), digest);
                 }
                 Err(_) => {
-                    eprintln!("[!] Cannot read {path} (skipped)");
+                    // unreadable path — skip silently; backup.log records the failure
                 }
             }
         } else if src.is_dir() {
@@ -59,7 +59,6 @@ pub fn compute(paths: &[&str]) -> Result<BTreeMap<String, String>> {
                     match hash_file(entry_path) {
                         Ok(d) => d,
                         Err(_) => {
-                            eprintln!("[!] Cannot read {} (skipped)", entry_path.display());
                             continue;
                         }
                     }

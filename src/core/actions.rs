@@ -3,6 +3,8 @@
 //! Each [`Action`] variant maps to a concrete system operation. The caller is
 //! responsible for confirming with the operator before invoking this.
 
+use std::process::Stdio;
+
 use super::finding::Action;
 use super::{DefenderError, Result};
 
@@ -16,6 +18,8 @@ pub fn execute(action: &Action) -> Result<String> {
         Action::RemoveImmutable(path) => {
             let status = std::process::Command::new("chattr")
                 .args(["-i", &path.to_string_lossy()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status()?;
             if status.success() {
                 Ok(format!("Removed immutable flag from {}", path.display()))
@@ -29,6 +33,8 @@ pub fn execute(action: &Action) -> Result<String> {
         Action::RestartService(name) => {
             let status = std::process::Command::new("systemctl")
                 .args(["restart", name])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status()?;
             if status.success() {
                 Ok(format!("Restarted {}", name))

@@ -1,32 +1,52 @@
-//! Reinstall Dovecot and restart the service.
+//! Reinstall Dovecot (with LDAP support) and restart the service.
 //!
-//! Debian-based distributions split Dovecot into separate packages for the
-//! core daemon, IMAP, and POP3 (`dovecot-core`, `dovecot-imapd`,
-//! `dovecot-pop3d`). Every other supported family ships a single `dovecot`
-//! package that pulls in all protocols.
+//! A bare Dovecot reinstall breaks AD/LDAP authentication because the LDAP
+//! driver lives in a separate package on most distros. This module installs
+//! the full set needed for an AD-integrated mail stack, then overlays the
+//! backed-up config so auth bindings and mailbox settings are restored without
+//! manual re-integration.
+//!
+//! Package sets per distro family:
+//!   - Debian/Ubuntu: `dovecot-core dovecot-imapd dovecot-pop3d dovecot-lmtpd dovecot-ldap`
+//!   - RHEL/Fedora:   `dovecot dovecot-ldap`
+//!   - Arch:          `dovecot`            (LDAP built in)
+//!   - openSUSE:      `dovecot dovecot-ldap`
+//!   - Alpine:        `dovecot dovecot-ldap dovecot-lmtpd`
 
 use crate::core::{DefenderContext, DefenderError, Result, prompt_yes};
 
-use super::distro::{Distro, enable_and_restart};
+use super::distro::{Distro, enable_and_restart, restore_config_from_backup};
 
 /// systemd service name for Dovecot.
 const SERVICE: &str = "dovecot";
 
-/// Reinstall Dovecot via the host's package manager and bring it back up.
+/// Full package set needed for an AD-integrated Dovecot deployment.
+fn packages(distro: Distro) -> &'static [&'static str] {
+    match distro {
+        Distro::Debian => &[
+            "dovecot-core",
+            "dovecot-imapd",
+            "dovecot-pop3d",
+            "dovecot-lmtpd",
+            "dovecot-ldap",
+        ],
+        Distro::Rhel => &["dovecot", "dovecot-ldap"],
+        Distro::Arch => &["dovecot"],
+        Distro::Suse => &["dovecot", "dovecot-ldap"],
+        Distro::Alpine => &["dovecot", "dovecot-ldap", "dovecot-lmtpd"],
+    }
+}
+
+/// Remove any existing Dovecot installation, install fresh, and bring it up.
 pub fn run(ctx: &DefenderContext) -> Result {
     let distro = Distro::detect()?;
     ctx.debug(&format!("detected distro: {}", distro.name()));
 
-    // Debian splits Dovecot across three packages; everyone else ships one.
-    let packages: &[&str] = match distro {
-        Distro::Debian => &["dovecot-core", "dovecot-imapd", "dovecot-pop3d"],
-        _ => &["dovecot"],
-    };
+    let pkgs = packages(distro);
 
     if ctx.interactive()
         && !prompt_yes(&format!(
-            "[?] Reinstall {} via {} and restart the service? (y/N)",
-            packages.join(" "),
+            "[?] Reinstall Dovecot (with LDAP support) from scratch via {} and restart? (y/N)",
             distro.name()
         ))?
     {
@@ -34,26 +54,31 @@ pub fn run(ctx: &DefenderContext) -> Result {
         return Ok(());
     }
 
-    ctx.progress(&format!(
-        "[+] Reinstalling {} ({})...",
-        packages.join(" "),
-        distro.name()
-    ));
+    // Purge the full package set so no stale configs or binaries remain.
+    ctx.progress(&format!("[+] Removing existing packages ({})...", distro.name()));
+    let _ = distro.remove_cmd(pkgs).output();
+    ctx.progress("[✓] Removed (or were not present)");
+
+    // Install the full set in one pass.
+    ctx.progress(&format!("[+] Installing {} ({})...", pkgs.join(" "), distro.name()));
     let output = distro
-        .reinstall_cmd(packages)
+        .install_cmd(pkgs)
         .output()
         .map_err(|e| DefenderError::Command(format!("package manager: {e}")))?;
 
     if !output.status.success() {
         return Err(DefenderError::Command(format!(
-            "reinstall failed: {}",
+            "install failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    ctx.progress(&format!("[✓] Reinstalled {}", packages.join(", ")));
+    ctx.progress(&format!("[✓] Installed {}", pkgs.join(", ")));
+
+    // Restore AD/LDAP auth config from backup (covers conf.d/, dovecot.conf, etc.).
+    restore_config_from_backup("/etc/dovecot", ctx)?;
 
     enable_and_restart(SERVICE, ctx)?;
 
-    ctx.log("[ok] dovecot reinstalled and restarted")?;
+    ctx.log("[ok] dovecot installed from scratch and restarted")?;
     Ok(())
 }

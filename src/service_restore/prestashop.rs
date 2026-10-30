@@ -32,7 +32,8 @@ use crate::core::{
 
 use super::distro::Distro;
 use super::webserver::{
-    download_file, extract_zip, find_php, fix_permissions, reload_webserver, resolve_web_root,
+    download_file, extract_zip, find_php, fix_permissions, purge_web_root, reload_webserver,
+    resolve_web_root,
 };
 
 /// Credentials collected by the TUI dialog (or CLI prompts) before install.
@@ -97,14 +98,6 @@ const WRITABLE_DIRS: &[&str] = &[
     "var",
 ];
 
-/// Files whose contents hold live database credentials; preserved on overlay.
-const PRESERVE: &[&str] = &[
-    "app/config/parameters.php",
-    "config/settings.inc.php",
-    ".env",
-    ".env.local",
-];
-
 /// Download, install, and configure PrestaShop on this host.
 ///
 /// When `credentials` is `Some`, all interactive prompts are skipped — TUI path.
@@ -129,7 +122,7 @@ pub fn run(
         "[!] PrestaShop {PRESTASHOP_VERSION} will be installed to {}.",
         root.display()
     ));
-    ctx.progress("[!] Existing PHP files (except credential files) will be overwritten.");
+    ctx.progress("[!] Web root will be PURGED then rebuilt from the official release zip.");
 
     if credentials.is_none() && !prompt_yes("[?] Continue? (y/N)")? {
         ctx.progress("[-] Skipping PrestaShop restore");
@@ -139,9 +132,17 @@ pub fn run(
     // ── 1. Download ───────────────────────────────────────────────────────────
     download_file(url, Path::new(TMP_ZIP), &distro, ctx)?;
 
+    // ── 1b. Purge web root — full clean slate, no attacker files survive ──────
+    purge_web_root(&root, ctx)?;
+
     // ── 2. Extract flat zip to web root ───────────────────────────────────────
     ctx.progress(&format!("[+] Extracting to {}...", root.display()));
-    extract_zip(Path::new(TMP_ZIP), &root, PRESERVE, ctx)?;
+    extract_zip(
+        Path::new(TMP_ZIP),
+        &root,
+        &[], // nothing to preserve — web root was just purged
+        ctx,
+    )?;
 
     // ── 3. Set writable directories ───────────────────────────────────────────
     set_writable_dirs(&root, ctx)?;

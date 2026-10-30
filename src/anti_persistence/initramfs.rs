@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::core::scan::{read_text_files, suspicious_matches};
-use crate::core::{DefenderContext, Result};
+use crate::core::{Action, DefenderContext, Finding, Result, Severity};
 
 /// Directories whose contents are baked into the next initramfs build.
 const HOOK_DIRS: &[&str] = &[
@@ -27,8 +27,10 @@ pub fn run(ctx: &DefenderContext) -> Result {
     check_hooks(ctx);
     check_image_age(ctx);
 
-    println!("[!] This does not unpack the initramfs image.");
-    println!("[!] To inspect one directly: lsinitramfs /boot/initrd.img-$(uname -r)");
+    if !ctx.in_tui() {
+        println!("[!] This does not unpack the initramfs image.");
+        println!("[!] To inspect one directly: lsinitramfs /boot/initrd.img-$(uname -r)");
+    }
 
     Ok(())
 }
@@ -43,21 +45,51 @@ fn check_hooks(ctx: &DefenderContext) {
     ctx.debug(&format!("Read {} initramfs script(s)", scripts.len()));
 
     if scripts.is_empty() {
-        println!("[✓] No custom initramfs hooks or scripts found");
+        if !ctx.in_tui() {
+            println!("[✓] No custom initramfs hooks or scripts found");
+        }
         return;
     }
 
-    println!("[+] {} custom initramfs script(s):", scripts.len());
-    for (path, contents) in &scripts {
-        let reasons = suspicious_matches(contents);
-        if reasons.is_empty() {
-            println!("    - {}", path.display());
-        } else {
-            println!("    - {}", path.display());
-            println!("      [!] {}", reasons.join(", "));
+    if ctx.in_tui() {
+        for (path, contents) in &scripts {
+            let reasons = suspicious_matches(contents);
+            let severity = if reasons.is_empty() {
+                Severity::Info
+            } else {
+                Severity::High
+            };
+            ctx.emit(
+                Finding::new(
+                    severity,
+                    "initramfs",
+                    format!("Custom initramfs hook: {}", path.display()),
+                    if reasons.is_empty() {
+                        String::new()
+                    } else {
+                        reasons.join(", ")
+                    },
+                )
+                .with_path(path.clone())
+                .with_action(Action::Manual(format!(
+                    "Review {} — runs as root before the root filesystem is mounted",
+                    path.display()
+                ))),
+            );
         }
+    } else {
+        println!("[+] {} custom initramfs script(s):", scripts.len());
+        for (path, contents) in &scripts {
+            let reasons = suspicious_matches(contents);
+            if reasons.is_empty() {
+                println!("    - {}", path.display());
+            } else {
+                println!("    - {}", path.display());
+                println!("      [!] {}", reasons.join(", "));
+            }
+        }
+        println!("[!] Anything here runs as root before the root filesystem is mounted.");
     }
-    println!("[!] Anything here runs as root before the root filesystem is mounted.");
 }
 
 /// An initramfs newer than its kernel suggests a rebuild after install, which
@@ -65,12 +97,16 @@ fn check_hooks(ctx: &DefenderContext) {
 fn check_image_age(ctx: &DefenderContext) {
     let boot = Path::new(BOOT_DIR);
     if !boot.is_dir() {
-        println!("[!] {} not found, skipping image age check", BOOT_DIR);
+        if !ctx.in_tui() {
+            println!("[!] {} not found, skipping image age check", BOOT_DIR);
+        }
         return;
     }
 
     let Ok(entries) = std::fs::read_dir(boot) else {
-        println!("[!] Could not read {}, skipping image age check", BOOT_DIR);
+        if !ctx.in_tui() {
+            println!("[!] Could not read {}, skipping image age check", BOOT_DIR);
+        }
         return;
     };
 
@@ -100,12 +136,16 @@ fn check_image_age(ctx: &DefenderContext) {
     ));
 
     if images.is_empty() {
-        println!("[!] No initramfs images found in {}", BOOT_DIR);
+        if !ctx.in_tui() {
+            println!("[!] No initramfs images found in {}", BOOT_DIR);
+        }
         return;
     }
 
     let Some(kernel_time) = newest_kernel else {
-        println!("[!] No kernel image found to compare against");
+        if !ctx.in_tui() {
+            println!("[!] No kernel image found to compare against");
+        }
         return;
     };
 
@@ -116,7 +156,21 @@ fn check_image_age(ctx: &DefenderContext) {
         .collect();
 
     if newer.is_empty() {
-        println!("[✓] No initramfs image is newer than its kernel");
+        if !ctx.in_tui() {
+            println!("[✓] No initramfs image is newer than its kernel");
+        }
+    } else if ctx.in_tui() {
+        for path in newer {
+            ctx.emit(
+                Finding::new(
+                    Severity::Medium,
+                    "initramfs",
+                    format!("initramfs image newer than kernel: {}", path.display()),
+                    "Expected after a kernel or driver update; suspicious otherwise.".to_string(),
+                )
+                .with_path(path.clone()),
+            );
+        }
     } else {
         println!(
             "[+] {} initramfs image(s) newer than the kernel:",

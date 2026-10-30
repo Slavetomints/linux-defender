@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::core::{DefenderContext, DefenderError, Result};
+use crate::core::{Action, DefenderContext, DefenderError, Finding, Result, Severity};
 
 /// Capabilities that hand an attacker root, or the means to get it, on any
 /// binary that carries them.
@@ -42,7 +42,9 @@ pub struct CapabilityFile {
 
 /// Sweep the filesystem for files carrying capabilities and flag the dangerous ones.
 pub fn run(ctx: &DefenderContext) -> Result {
-    println!("[+] Searching for files with capabilities. This may take a moment...");
+    if !ctx.in_tui() {
+        println!("[+] Searching for files with capabilities. This may take a moment...");
+    }
 
     let output = Command::new("getcap")
         .args(["-r", "/"])
@@ -62,27 +64,55 @@ pub fn run(ctx: &DefenderContext) -> Result {
     ctx.debug(&format!("getcap reported {} file(s)", found.len()));
 
     if found.is_empty() {
-        println!("[✓] No files carry capabilities");
+        if !ctx.in_tui() {
+            println!("[✓] No files carry capabilities");
+        }
         return Ok(());
     }
 
     let flagged = found.iter().filter(|f| !f.reasons.is_empty()).count();
-    println!(
-        "[+] {} file(s) carry capabilities, {} flagged:",
-        found.len(),
-        flagged
-    );
 
-    for file in &found {
-        println!("    {} — {}", file.path.display(), file.capabilities);
-        if !file.reasons.is_empty() {
-            println!("      [!] {}", file.reasons.join("; "));
+    if ctx.in_tui() {
+        for file in &found {
+            let severity = if file.reasons.is_empty() {
+                Severity::Info
+            } else {
+                Severity::High
+            };
+            ctx.emit(
+                Finding::new(
+                    severity,
+                    "capabilities",
+                    format!("{} — {}", file.path.display(), file.capabilities),
+                    if file.reasons.is_empty() {
+                        String::new()
+                    } else {
+                        file.reasons.join("; ")
+                    },
+                )
+                .with_path(file.path.clone())
+                .with_action(Action::Manual(format!(
+                    "setcap -r {}",
+                    file.path.display()
+                ))),
+            );
         }
-    }
-
-    if flagged > 0 {
-        println!("[!] Remove an unexpected capability with: setcap -r <file>");
-        println!("[!] Not done automatically — some are legitimate (ping, dumpcap).");
+    } else {
+        println!(
+            "[+] {} file(s) carry capabilities, {} flagged:",
+            found.len(),
+            flagged
+        );
+        for file in &found {
+            println!("    {} — {}", file.path.display(), file.capabilities);
+            if !file.reasons.is_empty() {
+                println!("      [!] {}", file.reasons.join("; "));
+            }
+        }
+        if flagged > 0 {
+            println!("[!] Remove an unexpected capability with: setcap -r <file>");
+            println!("[!] Not done automatically — some are legitimate (ping, dumpcap).");
+        }
     }
 
     Ok(())

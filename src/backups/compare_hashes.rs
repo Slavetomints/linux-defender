@@ -54,20 +54,20 @@ pub fn run(ctx: &DefenderContext, save_location: &Option<PathBuf>) -> Result {
 
     let diff = compare(&previous, &current);
 
-    println!("Comparison results against {}:", hash_file_path.display());
-    println!("  Added: {}", diff.added.len());
+    ctx.progress(&format!("Comparison results against {}:", hash_file_path.display()));
+    ctx.progress(&format!("  Added: {}", diff.added.len()));
     for k in &diff.added {
-        println!("    + {}", k);
+        ctx.progress(&format!("    + {}", k));
     }
-    println!("  Removed: {}", diff.removed.len());
+    ctx.progress(&format!("  Removed: {}", diff.removed.len()));
     for k in &diff.removed {
-        println!("    - {}", k);
+        ctx.progress(&format!("    - {}", k));
     }
-    println!("  Changed: {}", diff.changed.len());
+    ctx.progress(&format!("  Changed: {}", diff.changed.len()));
     for (k, prev, curr) in &diff.changed {
-        println!("    * {}\n      prev: {}\n      curr: {}", k, prev, curr);
+        ctx.progress(&format!("    * {}\n      prev: {}\n      curr: {}", k, prev, curr));
     }
-    println!("  Unchanged: {}", diff.unchanged);
+    ctx.progress(&format!("  Unchanged: {}", diff.unchanged));
 
     Ok(())
 }

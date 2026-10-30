@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use crate::core::scan::{effective_line, read_text_file, suspicious_matches};
-use crate::core::{DefenderContext, Result, prompt_yes, require_root};
+use crate::core::{Action, DefenderContext, Finding, Result, Severity, prompt_yes, require_root};
 
 /// Boot and shutdown scripts run as root, across distributions.
 const RC_FILES: &[&str] = &[
@@ -38,6 +38,40 @@ pub fn run(ctx: &DefenderContext) -> Result {
         }
 
         found_any = true;
+
+        if ctx.in_tui() {
+            let detail = commands
+                .iter()
+                .map(|c| {
+                    let reasons = suspicious_matches(c);
+                    if reasons.is_empty() {
+                        c.clone()
+                    } else {
+                        format!("{}  [!] {}", c, reasons.join(", "))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            ctx.emit(
+                Finding::new(
+                    Severity::High,
+                    "rc_local",
+                    format!(
+                        "{} runs {} command(s) at boot",
+                        path.display(),
+                        commands.len()
+                    ),
+                    detail,
+                )
+                .with_path(path.to_path_buf())
+                .with_action(Action::Manual(format!(
+                    "printf '#!/bin/sh\\nexit 0\\n' > {}",
+                    path.display()
+                ))),
+            );
+            continue;
+        }
+
         println!(
             "[!] {} runs {} command(s) at boot:",
             path.display(),
@@ -67,7 +101,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
         }
     }
 
-    if !found_any {
+    if !found_any && !ctx.in_tui() {
         println!("[✓] No rc.local scripts contain active commands");
     }
 

@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::scan::{effective_line, read_text_files, references_untrusted_dir};
-use crate::core::{DefenderContext, Result};
+use crate::core::{Action, DefenderContext, Finding, Result, Severity};
 
 /// Directory holding one PAM stack per service.
 const PAM_DIR: &str = "/etc/pam.d";
@@ -31,7 +31,9 @@ pub struct PamFinding {
 pub fn run(ctx: &DefenderContext) -> Result {
     let dir = Path::new(PAM_DIR);
     if !dir.is_dir() {
-        println!("[!] {} does not exist, skipping PAM check", PAM_DIR);
+        if !ctx.in_tui() {
+            println!("[!] {} does not exist, skipping PAM check", PAM_DIR);
+        }
         return Ok(());
     }
 
@@ -41,18 +43,42 @@ pub fn run(ctx: &DefenderContext) -> Result {
     let findings = inspect_all(&files);
 
     if findings.is_empty() {
-        println!("[✓] No PAM backdoor patterns found in {}", PAM_DIR);
+        if !ctx.in_tui() {
+            println!("[✓] No PAM backdoor patterns found in {}", PAM_DIR);
+        }
         return Ok(());
     }
 
-    println!("[!] {} suspicious PAM directive(s):", findings.len());
-    for finding in &findings {
-        println!("    {}", finding.file.display());
-        println!("      {}", finding.line);
-        println!("      [!] {}", finding.reason);
+    if ctx.in_tui() {
+        for finding in &findings {
+            ctx.emit(
+                Finding::new(
+                    Severity::Critical,
+                    "pam",
+                    format!(
+                        "PAM backdoor in {}: {}",
+                        finding.file.display(),
+                        finding.reason
+                    ),
+                    format!("File: {}\nDirective: {}\nReason: {}", finding.file.display(), finding.line, finding.reason),
+                )
+                .with_path(finding.file.clone())
+                .with_action(Action::Manual(format!(
+                    "Review and restore {} from a known-good config",
+                    finding.file.display()
+                ))),
+            );
+        }
+    } else {
+        println!("[!] {} suspicious PAM directive(s):", findings.len());
+        for finding in &findings {
+            println!("    {}", finding.file.display());
+            println!("      {}", finding.line);
+            println!("      [!] {}", finding.reason);
+        }
+        println!("[!] PAM edits are not auto-reverted — a wrong change locks you out.");
+        println!("[!] Review each against a known-good config before editing by hand.");
     }
-    println!("[!] PAM edits are not auto-reverted — a wrong change locks you out.");
-    println!("[!] Review each against a known-good config before editing by hand.");
 
     Ok(())
 }

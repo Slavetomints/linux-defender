@@ -190,6 +190,8 @@ fn parse_unit_line(line: &str) -> Option<String> {
 fn check_active(service: &str) -> bool {
     Command::new("systemctl")
         .args(["is-active", "--quiet", service])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)

@@ -7,6 +7,7 @@
 //! Check kinds:
 //! - [`CheckKind::Tcp`] — TCP connect only (fast fallback)
 //! - [`CheckKind::Http`] — send a raw HTTP/1.0 GET, verify the status code
+//! - [`CheckKind::HttpCurl`] — `curl` over plain HTTP with redirect following (`-L`)
 //! - [`CheckKind::Https`] — `curl` subprocess with SNI, verify status code
 //! - [`CheckKind::Smtp`] — connect and read the greeting banner (`220 …`)
 //! - [`CheckKind::Imap`] — connect and read the greeting banner (`* OK …`)
@@ -28,6 +29,14 @@ pub enum CheckKind {
         /// URL path to request, e.g. `"/"`.
         path: &'static str,
         /// HTTP status code that counts as "up", e.g. `200`.
+        expected_status: u16,
+    },
+    /// Plain HTTP via `curl` with redirect following (`-L`); expects `expected_status`
+    /// after all redirects. Use this instead of `Http` when the service redirects.
+    HttpCurl {
+        /// URL path to request.
+        path: &'static str,
+        /// HTTP status code that counts as "up" (final, after redirects).
         expected_status: u16,
     },
     /// HTTPS via `curl`; expects `expected_status`.
@@ -182,6 +191,10 @@ fn run_check(svc: &ServiceCheck) -> CheckResult {
             path,
             expected_status,
         } => check_http(svc.host, svc.port, path, *expected_status),
+        CheckKind::HttpCurl {
+            path,
+            expected_status,
+        } => check_http_curl(svc.host, svc.port, path, *expected_status),
         CheckKind::Https {
             path,
             expected_status,
@@ -247,6 +260,43 @@ fn check_http(host: &str, port: u16, path: &str, expected: u16) -> (bool, String
                 resp.chars().take(40).collect::<String>()
             ),
         ),
+    }
+}
+
+/// Plain HTTP check via `curl` with redirect following (`-L`).
+///
+/// Use this for services that return 3xx redirects (e.g. Splunk web on port 8000
+/// redirects `GET /` → `GET /en-US/account/login`).  The raw [`check_http`]
+/// function cannot follow redirects; this one relies on curl for that.
+fn check_http_curl(host: &str, port: u16, path: &str, expected: u16) -> (bool, String) {
+    let url = format!("http://{}:{}{}", host, port, path);
+    let out = std::process::Command::new("curl")
+        .args([
+            "-s",
+            "-L", // follow redirects
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "--max-time",
+            "3",
+            &url,
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let code_str = String::from_utf8_lossy(&o.stdout);
+            let code: u16 = code_str.trim().parse().unwrap_or(0);
+            (code == expected, format!("HTTP {}", code))
+        }
+        Ok(o) => {
+            let msg = String::from_utf8_lossy(&o.stderr);
+            (
+                false,
+                format!("curl error: {}", msg.chars().take(40).collect::<String>()),
+            )
+        }
+        Err(e) => (false, format!("curl not found: {}", e)),
     }
 }
 
@@ -489,9 +539,10 @@ pub const SPLUNK_CHECKS: &[ServiceCheck] = &[
         name: "Splunk Web",
         host: "127.0.0.1",
         port: 8000,
-        // Splunk web returns 303 → /en-US/account/login on a bare HTTP GET.
-        // Use Https+redirect follow so we land on the login page (200).
-        kind: CheckKind::Https {
+        // Splunk web is plain HTTP (not HTTPS) on port 8000.
+        // GET / → 303 → /en-US/ → 303 → /en-US/account/login → 200.
+        // HttpCurl follows the redirect chain with curl -L over http://.
+        kind: CheckKind::HttpCurl {
             path: "/",
             expected_status: 200,
         },

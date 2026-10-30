@@ -32,31 +32,44 @@ pub fn download_file(url: &str, dest: &Path, distro: &Distro, ctx: &DefenderCont
         .to_str()
         .ok_or_else(|| DefenderError::Other("download path is not valid UTF-8".into()))?;
 
-    if try_curl(url, dest_str) {
-        ctx.progress("[✓] Download complete");
-        return Ok(());
-    }
-    ctx.progress("[!] curl failed or not found, trying wget...");
-
     if try_wget(url, dest_str) {
         ctx.progress("[✓] Download complete");
         return Ok(());
     }
+    ctx.progress("[!] wget failed or not found, trying curl...");
 
-    ctx.progress("[!] Neither curl nor wget succeeded — installing curl automatically...");
+    if try_curl(url, dest_str) {
+        ctx.progress("[✓] Download complete");
+        return Ok(());
+    }
 
-    if !ctx.interactive() || prompt_yes(&format!("[?] Install curl via {}? (y/N)", distro.name()))?
+    ctx.progress("[!] Neither wget nor curl succeeded — installing wget automatically...");
+
+    if !ctx.interactive() || prompt_yes(&format!("[?] Install wget via {}? (y/N)", distro.name()))?
     {
-        install_package(distro, &["curl"], ctx)?;
-        if try_curl(url, dest_str) {
+        install_package(distro, &["wget"], ctx)?;
+        if try_wget(url, dest_str) {
             ctx.progress("[✓] Download complete");
             return Ok(());
         }
     }
 
     Err(DefenderError::Other(
-        "download failed: install curl or wget and ensure the host has internet access".into(),
+        "download failed: install wget or curl and ensure the host has internet access".into(),
     ))
+}
+
+/// Attempt a download with `wget`; returns `true` on success.
+///
+/// wget is tried first because some CDNs (Splunk, in particular) serve the
+/// actual binary to Wget's default User-Agent but return an HTML redirect
+/// page to curl, causing a silent corrupt download.
+fn try_wget(url: &str, dest: &str) -> bool {
+    Command::new("wget")
+        .args(["--progress=bar:force", "-O", dest, url])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Attempt a download with `curl`; returns `true` on success.
@@ -64,15 +77,6 @@ pub fn download_file(url: &str, dest: &Path, distro: &Distro, ctx: &DefenderCont
 fn try_curl(url: &str, dest: &str) -> bool {
     Command::new("curl")
         .args(["-L", "--fail", "--progress-bar", "-o", dest, url])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Attempt a download with `wget`; returns `true` on success.
-fn try_wget(url: &str, dest: &str) -> bool {
-    Command::new("wget")
-        .args(["--progress=bar:force", "-O", dest, url])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)

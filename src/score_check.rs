@@ -18,10 +18,43 @@ use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Path where score-check results are logged for post-mortem debugging.
 pub const SCORE_LOG: &str = "/tmp/defender-score.log";
+
+/// Which external HTTP client is available on this machine.
+enum ExtHttpClient {
+    Curl,
+    Wget,
+    None,
+}
+
+/// Detect curl → wget → neither, cached for the process lifetime.
+fn ext_http_client() -> &'static ExtHttpClient {
+    static CLIENT: OnceLock<ExtHttpClient> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        if cmd_exists("curl") {
+            ExtHttpClient::Curl
+        } else if cmd_exists("wget") {
+            ExtHttpClient::Wget
+        } else {
+            ExtHttpClient::None
+        }
+    })
+}
+
+/// True if `name` resolves to an executable via PATH.
+fn cmd_exists(name: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(name)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
 
 /// How the check verifies the service.
 #[derive(Debug, Clone)]
@@ -288,11 +321,48 @@ fn check_http(host: &str, port: u16, path: &str, expected: u16) -> (bool, String
     }
 }
 
-/// Plain HTTP GET with redirect following (up to 5 hops), pure Rust — no curl.
+/// Plain HTTP GET with redirect following.  Tries curl → wget → pure Rust.
 ///
 /// Used for services that redirect on the root path (e.g. Splunk web on port 8000:
 /// `GET /` → 303 → `/en-US/` → 303 → `/en-US/account/login` → 200).
 fn check_http_curl(host: &str, port: u16, path: &str, expected: u16) -> (bool, String) {
+    let url = format!("http://{}:{}{}", host, port, path);
+    match ext_http_client() {
+        ExtHttpClient::Curl => {
+            let out = std::process::Command::new("curl")
+                .args(["-s", "-L", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "3", &url])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .output();
+            if let Ok(o) = out {
+                let code: u16 = String::from_utf8_lossy(&o.stdout).trim().parse().unwrap_or(0);
+                return (code == expected, format!("HTTP {} (curl)", code));
+            }
+        }
+        ExtHttpClient::Wget => {
+            // wget -S writes headers to stderr; -O /dev/null discards body.
+            let out = std::process::Command::new("wget")
+                .args(["-q", "--max-redirect=10", "-O", "/dev/null", "-S", &url])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .output();
+            if let Ok(o) = out {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                // Last "HTTP/x.x NNN" line is the final status after redirects.
+                let code: u16 = stderr
+                    .lines()
+                    .filter_map(|l| {
+                        let t = l.trim();
+                        if t.starts_with("HTTP/") { parse_http_status(t) } else { None }
+                    })
+                    .last()
+                    .unwrap_or(0);
+                return (code == expected, format!("HTTP {} (wget)", code));
+            }
+        }
+        ExtHttpClient::None => {}
+    }
+    // Pure-Rust fallback: follow redirects in-process via TCP.
     let mut cur_host = host.to_string();
     let mut cur_port = port;
     let mut cur_path = path.to_string();
@@ -383,38 +453,52 @@ fn parse_http_url(url: &str, default_host: &str, default_port: u16) -> Option<(S
     Some((host.to_string(), port, path))
 }
 
-/// HTTPS check via `curl`.
+/// HTTPS check.  Tries curl → wget → TCP-only fallback (port open = up).
 fn check_https(host: &str, port: u16, path: &str, expected: u16) -> (bool, String) {
     let url = format!("https://{}:{}{}", host, port, path);
-    let out = std::process::Command::new("curl")
-        .args([
-            "-s",
-            "-L",            // follow redirects (Splunk 303 → /en-US/account/login)
-            "-o",
-            "/dev/null",
-            "-w",
-            "%{http_code}",
-            "--max-time",
-            "3",
-            "--insecure", // competition certs are self-signed
-            &url,
-        ])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {
-            let code_str = String::from_utf8_lossy(&o.stdout);
-            let code: u16 = code_str.trim().parse().unwrap_or(0);
-            (code == expected, format!("HTTPS {}", code))
+    match ext_http_client() {
+        ExtHttpClient::Curl => {
+            let out = std::process::Command::new("curl")
+                .args([
+                    "-s", "-L", "-o", "/dev/null", "-w", "%{http_code}",
+                    "--max-time", "3",
+                    "--insecure", // competition certs are self-signed
+                    &url,
+                ])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .output();
+            if let Ok(o) = out {
+                let code: u16 = String::from_utf8_lossy(&o.stdout).trim().parse().unwrap_or(0);
+                return (code == expected, format!("HTTPS {} (curl)", code));
+            }
         }
-        Ok(o) => {
-            let msg = String::from_utf8_lossy(&o.stderr);
-            (
-                false,
-                format!("curl error: {}", msg.chars().take(40).collect::<String>()),
-            )
+        ExtHttpClient::Wget => {
+            let out = std::process::Command::new("wget")
+                .args([
+                    "-q", "--no-check-certificate", "--max-redirect=10",
+                    "-O", "/dev/null", "-S", &url,
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .output();
+            if let Ok(o) = out {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let code: u16 = stderr
+                    .lines()
+                    .filter_map(|l| {
+                        let t = l.trim();
+                        if t.starts_with("HTTP/") { parse_http_status(t) } else { None }
+                    })
+                    .last()
+                    .unwrap_or(0);
+                return (code == expected, format!("HTTPS {} (wget)", code));
+            }
         }
-        Err(e) => (false, format!("curl not found: {}", e)),
+        ExtHttpClient::None => {}
     }
+    // No TLS client available — fall back to TCP connect only.
+    check_tcp(host, port)
 }
 
 /// SMTP banner check: connect and expect `220 `.

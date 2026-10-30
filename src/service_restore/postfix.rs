@@ -17,6 +17,7 @@ use std::process::Command;
 use crate::core::{DefenderContext, DefenderError, Result, prompt_yes};
 
 use super::distro::{Distro, enable_and_restart, restore_config_from_backup};
+use super::webserver::verify_tcp_service;
 
 /// systemd service name for Postfix.
 const SERVICE: &str = "postfix";
@@ -85,6 +86,11 @@ pub fn run(ctx: &DefenderContext) -> Result {
     }
 
     enable_and_restart(SERVICE, ctx)?;
+
+    // Verify SMTP port 25 is accepting connections and returns a 220 banner.
+    if let Err(e) = verify_tcp_service(25, "220", ctx) {
+        ctx.progress(&format!("[!] SMTP port 25 check failed: {e}"));
+    }
 
     ctx.log("[ok] postfix installed from scratch and restarted")?;
     Ok(())

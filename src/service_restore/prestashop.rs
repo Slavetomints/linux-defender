@@ -33,7 +33,7 @@ use crate::core::{
 use super::distro::Distro;
 use super::webserver::{
     download_file, extract_zip, find_php, fix_permissions, purge_web_root, reload_webserver,
-    resolve_web_root,
+    resolve_web_root, verify_site, verify_site_insecure,
 };
 
 /// Credentials collected by the TUI dialog (or CLI prompts) before install.
@@ -237,6 +237,15 @@ pub fn run(
     ctx.progress(&format!(
         "[!] Admin panel: http://{domain}/admin-dev/  (rename admin-dev/ when you have time)"
     ));
+
+    // Verify both HTTP and HTTPS serve a PrestaShop page.
+    if let Err(e) = verify_site(&format!("http://{domain}/"), r"(?i)prestashop|powered by prestashop", ctx) {
+        ctx.progress(&format!("[!] HTTP site check failed: {e}"));
+    }
+    if let Err(e) = verify_site_insecure(&format!("https://{domain}/"), r"(?i)prestashop|powered by prestashop", ctx) {
+        ctx.progress(&format!("[!] HTTPS site check failed: {e}"));
+    }
+
     Ok(())
 }
 

@@ -22,7 +22,7 @@ use std::process::Command;
 use crate::core::{DefenderContext, DefenderError, Result, prompt_yes};
 
 use super::distro::{Distro, restore_config_from_backup};
-use super::webserver::download_file;
+use super::webserver::{download_file, verify_site_insecure, verify_tcp_service};
 
 const SPLUNK_BIN: &str = "/opt/splunk/bin/splunk";
 const LOCAL_DIR: &str = "/opt/splunk/etc/system/local";
@@ -59,6 +59,15 @@ pub fn run(ctx: &DefenderContext, url: Option<&str>) -> Result {
 
     ctx.log("[ok] splunk restored")?;
     ctx.progress("[✓] Splunk restored");
+
+    // Verify Splunk web UI (port 8000) and management port (8089) are up.
+    if let Err(e) = verify_site_insecure("http://localhost:8000", r"(?i)splunk", ctx) {
+        ctx.progress(&format!("[!] Splunk web UI check failed: {e}"));
+    }
+    if let Err(e) = verify_tcp_service(8089, "", ctx) {
+        ctx.progress(&format!("[!] Splunk management port (8089) check failed: {e}"));
+    }
+
     Ok(())
 }
 

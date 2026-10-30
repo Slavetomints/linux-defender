@@ -660,6 +660,39 @@ pub fn ensure_mysql(
 ///
 /// Uses a 15-second timeout. Returns `Ok(())` if the pattern matches,
 /// `Err` if curl fails or the body does not match.
+/// Connect to `localhost:port`, read the service banner, and check it contains
+/// `banner_pattern`. Pass an empty pattern to just confirm the port is open.
+pub fn verify_tcp_service(port: u16, banner_pattern: &str, ctx: &DefenderContext) -> Result<()> {
+    use std::io::Read;
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    ctx.progress(&format!("[+] Verifying service on port {port}..."));
+
+    let addr: SocketAddr = format!("127.0.0.1:{port}")
+        .parse()
+        .map_err(|e| DefenderError::Other(format!("bad address: {e}")))?;
+
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
+        .map_err(|e| DefenderError::Other(format!("port {port} not accepting connections: {e}")))?;
+
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+
+    let mut buf = [0u8; 512];
+    let n = stream.read(&mut buf).unwrap_or(0);
+    let banner = String::from_utf8_lossy(&buf[..n]);
+
+    if banner_pattern.is_empty() || banner.contains(banner_pattern) {
+        ctx.progress(&format!("[✓] Port {port} is up"));
+        Ok(())
+    } else {
+        Err(DefenderError::Other(format!(
+            "port {port} responded but banner did not match (got: {})",
+            banner.trim()
+        )))
+    }
+}
+
 pub fn verify_site(url: &str, pattern: &str, ctx: &DefenderContext) -> Result<()> {
     verify_site_impl(url, pattern, false, ctx)
 }

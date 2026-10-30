@@ -16,6 +16,7 @@
 use crate::core::{DefenderContext, DefenderError, Result, prompt_yes};
 
 use super::distro::{Distro, enable_and_restart, restore_config_from_backup};
+use super::webserver::verify_tcp_service;
 
 /// systemd service name for Dovecot.
 const SERVICE: &str = "dovecot";
@@ -78,6 +79,16 @@ pub fn run(ctx: &DefenderContext) -> Result {
     restore_config_from_backup("/etc/dovecot", ctx)?;
 
     enable_and_restart(SERVICE, ctx)?;
+
+    // Verify IMAP port 143 is up (Dovecot sends "* OK ... Dovecot ready." banner).
+    if let Err(e) = verify_tcp_service(143, "* OK", ctx) {
+        ctx.progress(&format!("[!] IMAP port 143 check failed: {e}"));
+    }
+    // Also check IMAPS (port 993) — it won't send a plaintext banner, so just
+    // confirm the port is accepting connections.
+    if let Err(e) = verify_tcp_service(993, "", ctx) {
+        ctx.progress(&format!("[!] IMAPS port 993 check failed: {e}"));
+    }
 
     ctx.log("[ok] dovecot installed from scratch and restarted")?;
     Ok(())

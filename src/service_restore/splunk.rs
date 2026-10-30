@@ -116,6 +116,8 @@ fn fresh_install(ctx: &DefenderContext, url: Option<&str>) -> Result {
     let install_ok = match distro {
         Distro::Debian => Command::new("dpkg")
             .args(["-i", tmp_path.to_str().unwrap_or("")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false),
@@ -132,6 +134,8 @@ fn fresh_install(ctx: &DefenderContext, url: Option<&str>) -> Result {
             };
             Command::new(bin)
                 .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false)
@@ -141,7 +145,7 @@ fn fresh_install(ctx: &DefenderContext, url: Option<&str>) -> Result {
 
     if !install_ok {
         return Err(DefenderError::Command(
-            "Splunk package install failed — check dpkg/rpm output above".into(),
+            "Splunk package install failed (dpkg/rpm exited non-zero)".into(),
         ));
     }
     ctx.progress("[✓] Splunk package installed");

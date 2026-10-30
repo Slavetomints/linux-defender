@@ -32,13 +32,14 @@ pub fn download_file(url: &str, dest: &Path, distro: &Distro, ctx: &DefenderCont
         .to_str()
         .ok_or_else(|| DefenderError::Other("download path is not valid UTF-8".into()))?;
 
-    if try_wget(url, dest_str) {
+    let quiet = ctx.in_tui();
+    if try_wget(url, dest_str, quiet) {
         ctx.progress("[✓] Download complete");
         return Ok(());
     }
     ctx.progress("[!] wget failed or not found, trying curl...");
 
-    if try_curl(url, dest_str) {
+    if try_curl(url, dest_str, quiet) {
         ctx.progress("[✓] Download complete");
         return Ok(());
     }
@@ -48,7 +49,7 @@ pub fn download_file(url: &str, dest: &Path, distro: &Distro, ctx: &DefenderCont
     if !ctx.interactive() || prompt_yes(&format!("[?] Install wget via {}? (y/N)", distro.name()))?
     {
         install_package(distro, &["wget"], ctx)?;
-        if try_wget(url, dest_str) {
+        if try_wget(url, dest_str, quiet) {
             ctx.progress("[✓] Download complete");
             return Ok(());
         }
@@ -64,9 +65,10 @@ pub fn download_file(url: &str, dest: &Path, distro: &Distro, ctx: &DefenderCont
 /// wget is tried first because some CDNs (Splunk, in particular) serve the
 /// actual binary to Wget's default User-Agent but return an HTML redirect
 /// page to curl, causing a silent corrupt download.
-fn try_wget(url: &str, dest: &str) -> bool {
+fn try_wget(url: &str, dest: &str, quiet: bool) -> bool {
+    let progress = if quiet { "-q" } else { "--progress=bar:force" };
     Command::new("wget")
-        .args(["--progress=bar:force", "-O", dest, url])
+        .args([progress, "-O", dest, url])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -74,9 +76,10 @@ fn try_wget(url: &str, dest: &str) -> bool {
 
 /// Attempt a download with `curl`; returns `true` on success.
 /// --fail causes curl to exit non-zero on HTTP 4xx/5xx instead of saving an error page.
-fn try_curl(url: &str, dest: &str) -> bool {
+fn try_curl(url: &str, dest: &str, quiet: bool) -> bool {
+    let progress = if quiet { "-s" } else { "--progress-bar" };
     Command::new("curl")
-        .args(["-L", "--fail", "--progress-bar", "-o", dest, url])
+        .args(["-L", "--fail", progress, "-o", dest, url])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)

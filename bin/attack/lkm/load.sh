@@ -13,8 +13,14 @@ install_headers() {
     echo "[*] Kernel headers not found — installing..."
     if command -v apt-get &>/dev/null; then
         sed -i 's|^deb cdrom:|#deb cdrom:|g' /etc/apt/sources.list 2>/dev/null || true
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
-            "linux-headers-${KVER}" build-essential
+        DEBIAN_FRONTEND=noninteractive apt-get update -q 2>/dev/null || true
+        # Try exact running-kernel version; fall back to generic meta-package.
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -q build-essential \
+            "linux-headers-${KVER}" 2>/dev/null || \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -q build-essential \
+            linux-headers-generic 2>/dev/null || \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -q build-essential \
+            linux-headers-amd64 2>/dev/null || true
     elif command -v dnf &>/dev/null; then
         # Try exact running-kernel version first; repo may have rolled forward,
         # so fall back to unversioned kernel-devel (latest available).

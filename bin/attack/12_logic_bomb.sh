@@ -93,7 +93,7 @@ PAYLOAD_EOF
     for delay in 120 125 130 150; do
         jid=$(schedule_at "$delay")
         echo "[+]   at +${delay}min → job ${jid:-?}"
-        [[ -n "$jid" ]] && sleep 0.2 && lock_at_job "$jid"
+        sleep 0.2 && lock_at_job "${jid:-}"
     done
 
     # Layer 2: cron fallback at the exact trigger minute

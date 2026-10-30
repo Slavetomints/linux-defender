@@ -288,41 +288,99 @@ fn check_http(host: &str, port: u16, path: &str, expected: u16) -> (bool, String
     }
 }
 
-/// Plain HTTP check via `curl` with redirect following (`-L`).
+/// Plain HTTP GET with redirect following (up to 5 hops), pure Rust — no curl.
 ///
-/// Use this for services that return 3xx redirects (e.g. Splunk web on port 8000
-/// redirects `GET /` → `GET /en-US/account/login`).  The raw [`check_http`]
-/// function cannot follow redirects; this one relies on curl for that.
+/// Used for services that redirect on the root path (e.g. Splunk web on port 8000:
+/// `GET /` → 303 → `/en-US/` → 303 → `/en-US/account/login` → 200).
 fn check_http_curl(host: &str, port: u16, path: &str, expected: u16) -> (bool, String) {
-    let url = format!("http://{}:{}{}", host, port, path);
-    let out = std::process::Command::new("curl")
-        .args([
-            "-s",
-            "-L", // follow redirects
-            "-o",
-            "/dev/null",
-            "-w",
-            "%{http_code}",
-            "--max-time",
-            "3",
-            &url,
-        ])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {
-            let code_str = String::from_utf8_lossy(&o.stdout);
-            let code: u16 = code_str.trim().parse().unwrap_or(0);
-            (code == expected, format!("HTTP {}", code))
+    let mut cur_host = host.to_string();
+    let mut cur_port = port;
+    let mut cur_path = path.to_string();
+
+    for _ in 0..5 {
+        let addr = format!("{}:{}", cur_host, cur_port);
+        let Ok(mut stream) = (match addr.parse::<SocketAddr>() {
+            Ok(sa) => TcpStream::connect_timeout(&sa, CONNECT_TIMEOUT),
+            Err(_) => TcpStream::connect(&addr as &str),
+        }) else {
+            return (false, format!("TCP connect failed ({}:{})", cur_host, cur_port));
+        };
+        let _ = stream.set_read_timeout(Some(CHECK_TIMEOUT));
+        let request = format!(
+            "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            cur_path, cur_host
+        );
+        if stream.write_all(request.as_bytes()).is_err() {
+            return (false, "write failed".into());
         }
-        Ok(o) => {
-            let msg = String::from_utf8_lossy(&o.stderr);
-            (
-                false,
-                format!("curl error: {}", msg.chars().take(40).collect::<String>()),
-            )
+        // 4 KiB is enough to capture all response headers.
+        let mut buf = [0u8; 4096];
+        let n = stream.read(&mut buf).unwrap_or(0);
+        let resp = String::from_utf8_lossy(&buf[..n]);
+        let status = match parse_http_status(&resp) {
+            Some(s) => s,
+            None => {
+                return (
+                    false,
+                    format!("bad response: {}", resp.chars().take(40).collect::<String>()),
+                )
+            }
+        };
+
+        if (300..400).contains(&status) {
+            if let Some(loc) = parse_location_header(&resp) {
+                if let Some((h, p, pth)) = parse_http_url(&loc, &cur_host, cur_port) {
+                    cur_host = h;
+                    cur_port = p;
+                    cur_path = pth;
+                    continue;
+                }
+            }
+            return (false, format!("HTTP {} (no Location)", status));
         }
-        Err(e) => (false, format!("curl not found: {}", e)),
+
+        return (status == expected, format!("HTTP {}", status));
     }
+
+    (false, "too many redirects".into())
+}
+
+/// Extract the value of the `Location:` header from a raw HTTP response.
+fn parse_location_header(response: &str) -> Option<String> {
+    response.lines().find_map(|line| {
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("location:") {
+            Some(line[9..].trim().to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// Parse an HTTP URL (absolute or root-relative) into `(host, port, path)`.
+///
+/// Absolute `https://` URLs are rejected — we only follow plain HTTP redirects.
+/// Relative paths (starting with `/`) reuse the caller's host and port.
+fn parse_http_url(url: &str, default_host: &str, default_port: u16) -> Option<(String, u16, String)> {
+    if url.starts_with('/') {
+        return Some((default_host.to_string(), default_port, url.to_string()));
+    }
+    let rest = url.strip_prefix("http://")?;
+    let (authority, path) = rest
+        .find('/')
+        .map(|i| (&rest[..i], rest[i..].to_string()))
+        .unwrap_or((rest, "/".to_string()));
+    let (host, port) = if let Some(colon) = authority.rfind(':') {
+        let port_str = &authority[colon + 1..];
+        if let Ok(p) = port_str.parse::<u16>() {
+            (&authority[..colon], p)
+        } else {
+            (authority, 80u16)
+        }
+    } else {
+        (authority, 80u16)
+    };
+    Some((host.to_string(), port, path))
 }
 
 /// HTTPS check via `curl`.

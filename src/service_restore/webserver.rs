@@ -397,6 +397,8 @@ pub fn reload_webserver(ctx: &DefenderContext) -> Result<()> {
             ctx.debug(&format!("reloading {svc}"));
             let status = Command::new("systemctl")
                 .args(["reload", svc])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .status()
                 .map_err(|e| DefenderError::Command(format!("systemctl reload {svc}: {e}")))?;
 
@@ -831,11 +833,17 @@ pub fn ensure_ssl(distro: &Distro, ctx: &DefenderContext) -> Result<()> {
                     "s|#LoadModule ssl_module|LoadModule ssl_module|",
                     "/etc/httpd/conf/httpd.conf",
                 ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .status();
         }
         Distro::Suse => {
             install_package(distro, &["apache2-mod_ssl"], ctx)?;
-            let _ = Command::new("a2enmod").arg("ssl").status();
+            let _ = Command::new("a2enmod")
+                .arg("ssl")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
         }
         Distro::Alpine => {
             // Alpine apache2 has ssl built in; enable via conf.

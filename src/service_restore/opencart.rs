@@ -235,7 +235,7 @@ pub fn run(
             cli_script.display()
         )));
     }
-    let status = Command::new(&php)
+    let out = Command::new(&php)
         .arg(cli_script.as_os_str())
         .arg("install")
         .arg("--db_hostname")
@@ -264,13 +264,15 @@ pub fn run(
         .arg("oc_")
         .arg("--language")
         .arg("en-gb")
-        .status()
+        .output()
         .map_err(|e| DefenderError::Command(format!("cli_install.php: {e}")))?;
 
-    if !status.success() {
-        return Err(DefenderError::Command(
-            "OpenCart CLI installer returned non-zero; check output above for details".into(),
-        ));
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(DefenderError::Command(format!(
+            "OpenCart CLI installer returned non-zero: {}",
+            stderr.trim()
+        )));
     }
 
     // The CLI installer exits 0 even on DB connection failure but leaves

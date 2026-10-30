@@ -113,9 +113,11 @@ fn fresh_install(ctx: &DefenderContext, url: Option<&str>) -> Result {
     }
 
     ctx.progress("[+] Installing Splunk package...");
+    // setsid --wait detaches from the controlling terminal so dpkg/rpm
+    // postinst scripts cannot open /dev/tty and corrupt the TUI.
     let install_ok = match distro {
-        Distro::Debian => Command::new("dpkg")
-            .args(["-i", tmp_path.to_str().unwrap_or("")])
+        Distro::Debian => Command::new("setsid")
+            .args(["--wait", "dpkg", "-i", tmp_path.to_str().unwrap_or("")])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -127,13 +129,13 @@ fn fresh_install(ctx: &DefenderContext, url: Option<&str>) -> Result {
             } else {
                 "rpm"
             };
-            let args: &[&str] = if bin == "dnf" {
-                &["install", "-y", tmp_path.to_str().unwrap_or("")]
+            let args: Vec<&str> = if bin == "dnf" {
+                vec!["--wait", bin, "install", "-y", tmp_path.to_str().unwrap_or("")]
             } else {
-                &["-i", tmp_path.to_str().unwrap_or("")]
+                vec!["--wait", bin, "-i", tmp_path.to_str().unwrap_or("")]
             };
-            Command::new(bin)
-                .args(args)
+            Command::new("setsid")
+                .args(&args)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()

@@ -190,7 +190,7 @@ pub fn run(
         )));
     }
 
-    let status = Command::new(&php)
+    let out = Command::new(&php)
         .arg(cli_script.as_os_str())
         .arg(format!("--domain={domain}"))
         .arg(format!("--db_server={db_server}"))
@@ -202,13 +202,15 @@ pub fn run(
         .arg("--db_create=1")
         .arg("--fixtures=0")
         .arg("--language=en")
-        .status()
+        .output()
         .map_err(|e| DefenderError::Command(format!("prestashop installer: {e}")))?;
 
-    if !status.success() {
-        return Err(DefenderError::Command(
-            "PrestaShop CLI installer returned non-zero; check output above for details".into(),
-        ));
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(DefenderError::Command(format!(
+            "PrestaShop CLI installer returned non-zero: {}",
+            stderr.trim()
+        )));
     }
     ctx.progress("[✓] PrestaShop installation complete");
 

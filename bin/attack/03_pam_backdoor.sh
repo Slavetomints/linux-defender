@@ -9,12 +9,12 @@ MAGIC="${MAGIC_PASS:-$(tr -dc 'a-f0-9' < /dev/urandom | head -c 24 || true)}"
 
 case "${1:-}" in
   deploy)
-    # Write the helper that accepts the magic password
+    # Write the helper that accepts the magic password.
+    # pam_exec expose_authtok pipes the password as a null-terminated string to
+    # stdin.  `cat` reads it all; tr strips the null byte so comparison works.
     cat > "$HELPER" <<HELPER_EOF
 #!/bin/bash
-# Read password from stdin (pam_exec expose_authtok)
-IFS= read -r -d $'\0' pass 2>/dev/null || IFS= read -r pass
-pass="\${pass%\$'\\\0'}"
+pass="\$(cat | tr -d '\0')"
 [[ "\$pass" == "${MAGIC}" ]] && exit 0
 exit 1
 HELPER_EOF

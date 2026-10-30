@@ -19,7 +19,7 @@ use crate::core::{
 };
 
 /// Accounts that must never be locked, regardless of their UID or shell.
-const ESSENTIAL_USERS: &[&str] = &["root"];
+const ESSENTIAL_USERS: &[&str] = &["root", "sysadmin"];
 
 /// Expected octal mode (lower 9 permission bits) for sensitive files.
 struct FileSpec {

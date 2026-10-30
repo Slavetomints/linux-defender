@@ -256,6 +256,7 @@ fn check_https(host: &str, port: u16, path: &str, expected: u16) -> (bool, Strin
     let out = std::process::Command::new("curl")
         .args([
             "-s",
+            "-L",            // follow redirects (Splunk 303 → /en-US/account/login)
             "-o",
             "/dev/null",
             "-w",
@@ -488,7 +489,9 @@ pub const SPLUNK_CHECKS: &[ServiceCheck] = &[
         name: "Splunk Web",
         host: "127.0.0.1",
         port: 8000,
-        kind: CheckKind::Http {
+        // Splunk web returns 303 → /en-US/account/login on a bare HTTP GET.
+        // Use Https+redirect follow so we land on the login page (200).
+        kind: CheckKind::Https {
             path: "/",
             expected_status: 200,
         },

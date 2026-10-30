@@ -34,6 +34,8 @@ pub mod webserver;
 /// The TUI collects these via a dialog before spawning the restore thread.
 /// The CLI path leaves both fields as `None` and prompts interactively.
 pub struct RestoreCredentials {
+    /// Credentials for a Splunk admin user seed on fresh install.
+    pub splunk: Option<splunk::SplunkCredentials>,
     /// Credentials for an OpenCart restore, or `None` to prompt interactively.
     pub opencart: Option<opencart::OpenCartCredentials>,
     /// Credentials for a PrestaShop restore, or `None` to prompt interactively.
@@ -112,7 +114,8 @@ pub fn run(
     }
     if args.splunk {
         ctx.progress("[+] Restoring Splunk");
-        splunk::run(ctx, args.splunk_url.as_deref())?;
+        let splunk_creds = creds.and_then(|c| c.splunk.as_ref());
+        splunk::run(ctx, args.splunk_url.as_deref(), splunk_creds)?;
     }
     if args.opencart {
         ctx.progress(&format!("[+] Restoring OpenCart at {}", args.opencart_path.display()));

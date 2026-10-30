@@ -388,6 +388,8 @@ impl Tab {
 /// Which service is waiting for credential input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RestoreCredService {
+    /// Splunk Enterprise.
+    Splunk,
     /// OpenCart web storefront.
     OpenCart,
     /// PrestaShop web storefront.
@@ -420,10 +422,10 @@ enum RestoreCredField {
 impl RestoreCredField {
     /// Advance to the next field, clamping at the last field for the given service.
     fn next(self, service: RestoreCredService) -> Self {
-        let max = if service == RestoreCredService::OpenCart {
-            8
-        } else {
-            6
+        let max = match service {
+            RestoreCredService::Splunk => 1,
+            RestoreCredService::OpenCart => 8,
+            RestoreCredService::PrestaShop => 6,
         };
         let idx = (self as usize + 1).min(max);
         Self::from_idx(idx)
@@ -477,6 +479,17 @@ impl RestoreCredDialog {
     fn new(service: RestoreCredService) -> Self {
         // Fields are indexed 0..=8 and must match field_label() and into_credentials() exactly.
         let fields = match service {
+            RestoreCredService::Splunk => [
+                "admin".into(),  // 0  Admin Username
+                String::new(),   // 1  Admin Password
+                String::new(),   // 2  (unused)
+                String::new(),   // 3  (unused)
+                String::new(),   // 4  (unused)
+                String::new(),   // 5  (unused)
+                String::new(),   // 6  (unused)
+                String::new(),   // 7  (unused)
+                String::new(),   // 8  (unused)
+            ],
             RestoreCredService::OpenCart => [
                 "localhost".into(),                     // 0  DB Hostname
                 "root".into(),                          // 1  DB Username
@@ -510,6 +523,11 @@ impl RestoreCredDialog {
     /// Labels for each field depending on the service.
     fn field_label(&self, idx: usize) -> &'static str {
         match self.service {
+            RestoreCredService::Splunk => match idx {
+                0 => "Admin Username",
+                1 => "Admin Password",
+                _ => "",
+            },
             RestoreCredService::OpenCart => match idx {
                 0 => "DB Hostname",
                 1 => "DB Username",
@@ -538,6 +556,7 @@ impl RestoreCredDialog {
     /// Number of active fields for this service (unused trailing slots are hidden).
     fn field_count(&self) -> usize {
         match self.service {
+            RestoreCredService::Splunk => 2,
             RestoreCredService::OpenCart => 9,
             RestoreCredService::PrestaShop => 7,
         }
@@ -547,7 +566,16 @@ impl RestoreCredDialog {
     fn into_credentials(self) -> crate::service_restore::RestoreCredentials {
         let [f0, f1, f2, f3, f4, f5, f6, f7, f8] = self.fields;
         match self.service {
+            RestoreCredService::Splunk => crate::service_restore::RestoreCredentials {
+                splunk: Some(crate::service_restore::splunk::SplunkCredentials {
+                    admin_user: f0,
+                    admin_pass: f1,
+                }),
+                opencart: None,
+                prestashop: None,
+            },
             RestoreCredService::OpenCart => crate::service_restore::RestoreCredentials {
+                splunk: None,
                 opencart: Some(crate::service_restore::opencart::OpenCartCredentials {
                     db_host: f0,
                     db_user: f1,
@@ -562,6 +590,7 @@ impl RestoreCredDialog {
                 prestashop: None,
             },
             RestoreCredService::PrestaShop => crate::service_restore::RestoreCredentials {
+                splunk: None,
                 opencart: None,
                 prestashop: Some(crate::service_restore::prestashop::PrestaShopCredentials {
                     domain: f0,
@@ -1404,6 +1433,10 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                 if dlg.focused as usize == max_field {
                                     // Validate required fields before submitting.
                                     let missing = match svc {
+                                        // Splunk: admin pass(1)
+                                        RestoreCredService::Splunk => [1]
+                                            .iter()
+                                            .any(|&i| dlg.fields[i].trim().is_empty()),
                                         // OpenCart: DB user(1), DB pass(2), admin pass(7)
                                         RestoreCredService::OpenCart => [1, 2, 7]
                                             .iter()
@@ -1420,6 +1453,7 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                     // Last field confirmed — start restore.
                                     let dialog = app.restore_cred_dialog.take().unwrap();
                                     let service_id = match svc {
+                                        RestoreCredService::Splunk => "splunk",
                                         RestoreCredService::OpenCart => "opencart",
                                         RestoreCredService::PrestaShop => "prestashop",
                                     };
@@ -1582,6 +1616,10 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                         } else if app.tab == Tab::ServiceRestore && !app.restore_running {
                             let service_id = RESTORE_SERVICES[app.restore_cursor].0;
                             match service_id {
+                                "splunk" => {
+                                    app.restore_cred_dialog =
+                                        Some(RestoreCredDialog::new(RestoreCredService::Splunk));
+                                }
                                 "opencart" => {
                                     app.restore_cred_dialog =
                                         Some(RestoreCredDialog::new(RestoreCredService::OpenCart));
@@ -3087,6 +3125,7 @@ fn render_restore_cred_dialog(f: &mut ratatui::Frame, area: Rect, dlg: &RestoreC
     use crate::wizards::modal_popup;
 
     let title = match dlg.service {
+        RestoreCredService::Splunk => " Splunk Admin Credentials ",
         RestoreCredService::OpenCart => " OpenCart Credentials ",
         RestoreCredService::PrestaShop => " PrestaShop Credentials ",
     };

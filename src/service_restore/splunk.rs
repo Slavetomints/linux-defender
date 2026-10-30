@@ -19,7 +19,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use crate::core::{DefenderContext, DefenderError, Result, prompt_yes};
+use crate::core::{DefenderContext, DefenderError, Result, prompt_string, prompt_string_default, prompt_yes};
 
 use super::distro::{Distro, restore_config_from_backup};
 use super::webserver::{download_file, verify_site_insecure, verify_tcp_service};
@@ -34,11 +34,21 @@ const SPLUNK_DEB_URL: &str = "https://download.splunk.com/products/splunk/releas
 const SPLUNK_RPM_URL: &str = "https://download.splunk.com/products/splunk/releases/10.0.2/linux/\
                                splunk-10.0.2-e2d18b4767e9.x86_64.rpm";
 
+/// Credentials for Splunk admin user setup on a fresh install.
+#[derive(Debug, Clone, Default)]
+pub struct SplunkCredentials {
+    /// Splunk admin username (defaults to "admin").
+    pub admin_user: String,
+    /// Splunk admin password.
+    pub admin_pass: String,
+}
+
 /// Restore or install Splunk.
 ///
 /// `url` overrides the pinned download URL for a fresh install; ignored if
-/// Splunk is already installed.
-pub fn run(ctx: &DefenderContext, url: Option<&str>) -> Result {
+/// Splunk is already installed. `creds` provides the admin user to seed on
+/// a fresh install; if `None` the CLI will prompt interactively.
+pub fn run(ctx: &DefenderContext, url: Option<&str>, creds: Option<&SplunkCredentials>) -> Result {
     if Path::new(SPLUNK_BIN).exists() {
         ctx.progress("[+] Splunk is installed — wiping local-override layer and restarting.");
         if ctx.interactive() && !prompt_yes("[?] Continue? (y/N)")? {
@@ -54,7 +64,7 @@ pub fn run(ctx: &DefenderContext, url: Option<&str>) -> Result {
             ctx.progress("[-] Skipping Splunk restore");
             return Ok(());
         }
-        fresh_install(ctx, url)?;
+        fresh_install(ctx, url, creds)?;
     }
 
     ctx.log("[ok] splunk restored")?;
@@ -85,7 +95,7 @@ fn is_valid_deb(path: &Path) -> bool {
 
 // ── Fresh install ─────────────────────────────────────────────────────────────
 
-fn fresh_install(ctx: &DefenderContext, url: Option<&str>) -> Result {
+fn fresh_install(ctx: &DefenderContext, url: Option<&str>, creds: Option<&SplunkCredentials>) -> Result {
     let distro = Distro::detect()?;
     ctx.debug(&format!("detected distro: {}", distro.name()));
 
@@ -166,6 +176,36 @@ fn fresh_install(ctx: &DefenderContext, url: Option<&str>) -> Result {
 
     // Restore config from backup if one exists.
     restore_config_from_backup(LOCAL_DIR, ctx)?;
+
+    // Write user-seed.conf before first start so Splunk creates the admin user.
+    // Without this, Splunk boots into "no users exist" and requires manual setup.
+    let seed_creds = match creds {
+        Some(c) => c.clone(),
+        None if ctx.interactive() => {
+            let user = prompt_string_default("[?] Splunk admin username", "admin")?;
+            let pass = prompt_string("[?] Splunk admin password")?;
+            SplunkCredentials { admin_user: user, admin_pass: pass }
+        }
+        None => {
+            ctx.progress("[!] No Splunk credentials provided — admin user will NOT be created");
+            ctx.progress("[!] After start, run: /opt/splunk/bin/splunk add user admin -role admin -password <pass>");
+            splunk_start(ctx)?;
+            return Ok(());
+        }
+    };
+
+    let local_dir = Path::new(LOCAL_DIR);
+    let _ = fs::create_dir_all(local_dir);
+    let seed_path = local_dir.join("user-seed.conf");
+    let seed_content = format!(
+        "[user_info]\nUSERNAME = {}\nPASSWORD = {}\n",
+        seed_creds.admin_user, seed_creds.admin_pass
+    );
+    if let Err(e) = fs::write(&seed_path, &seed_content) {
+        ctx.progress(&format!("[!] Failed to write user-seed.conf: {e} — admin user may not be created"));
+    } else {
+        ctx.progress(&format!("[✓] Admin user '{}' configured via user-seed.conf", seed_creds.admin_user));
+    }
 
     // First start — must accept the license explicitly.
     splunk_start(ctx)?;

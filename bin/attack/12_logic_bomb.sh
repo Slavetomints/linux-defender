@@ -12,11 +12,20 @@ LOGIN_SHELL=$(command -v bash 2>/dev/null || command -v sh)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-# Schedule one at job; return the job number.
+# Schedule one at job; return the job number via atq (avoids parsing at's
+# locale-sensitive output which varies across Debian/RHEL/Alpine).
 schedule_at() {
     local delay_min="$1"
-    echo "bash $PAYLOAD" | at "now + ${delay_min} minutes" 2>&1 \
-        | grep -oE 'job [0-9]+' | awk '{print $2}' || true
+    # Snapshot job IDs before and after so we can identify the new one.
+    local before after new_id
+    before=$(atq 2>/dev/null | awk '{print $1}' | sort -n | tr '\n' ' ')
+    echo "bash $PAYLOAD" | at "now + ${delay_min} minutes" 2>/dev/null || true
+    after=$(atq 2>/dev/null | awk '{print $1}' | sort -n | tr '\n' ' ')
+    # The new job ID is whatever appeared in after but not in before.
+    new_id=$(comm -13 <(echo "$before" | tr ' ' '\n' | grep -v '^$' | sort) \
+                      <(echo "$after"  | tr ' ' '\n' | grep -v '^$' | sort) \
+             | head -1 || true)
+    echo "${new_id:-}"
 }
 
 # Lock the spool file for a given job number.

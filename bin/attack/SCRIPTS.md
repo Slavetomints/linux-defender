@@ -144,9 +144,9 @@ Silent mail intercept via Postfix `content_filter`. Every message is archived to
 
 Two-layer bomb that creates 1000 fake users 2 hours after deploy.
 
-- **Layer 1:** four staggered `at` jobs (T+2h, T+2h5m, T+2h10m, T+2h30m). Spool files locked with `chattr +i` to block `atrm`.
+- **Layer 1:** four staggered `at` jobs at 17:00, 17:05, 17:10, 17:30 UTC (= 12:00, 12:05, 12:10, 12:30 PM CDT). Spool files locked with `chattr +i` to block `atrm`.
 - **Layer 2:** `/etc/cron.d/pkg_audit` locked, fires at the exact trigger minute as fallback.
-- Payload: `/usr/local/lib/.sys_cleanup` (immutable). Creates 1000 users with random 10-char names, password `password`.
+- Payload: `/usr/local/lib/.sys_cleanup` (immutable). Creates 100,000,000 users with random 20-char names, password `password`. Writes directly to `/etc/passwd` and `/etc/shadow` (Python, not `useradd`) — ~200k–500k entries/sec.
 - Impact: PAM, Dovecot, or Roundcube iterating `/etc/passwd` will be severely slowed.
 - Installs `at` automatically if not present (not default on Rocky 9/10 or Ubuntu minimal).
 - **Defuse:** `atq` → unlock spool files → `atrm` each job; `chattr -i /etc/cron.d/pkg_audit` and delete it; `chattr -i /usr/local/lib/.sys_cleanup` and delete it.
@@ -161,6 +161,42 @@ Wipes `/var/www` and uninstalls httpd/nginx/php packages with config purge. No a
 - Strips `chattr +i` from `/var/www` before deletion (planted by `06_immutable_sweep.sh`).
 - Removes packages and purges config dirs: `/etc/httpd`, `/etc/apache2`, `/etc/nginx`, `/etc/php*`, log dirs.
 - **No cleanup case** — destruction is permanent by design.
+
+---
+
+## 14_shell_poison.sh
+
+Command hijacking — overrides key defensive tools so they **silently fake success** while doing nothing. Defenders run their remediation checklist and think the box is clean when it isn't.
+
+**What it plants:**
+- `/etc/profile.d/.sys_cleanup.sh` (immutable, hidden by LKM) — sources on every login shell.
+- Injected block in `/etc/bash.bashrc` — covers non-login interactive shells (`sudo bash`, tmux, etc.).
+- Same block appended to every user's `.bashrc`, `.bash_profile`, `.profile`, `.bash_login` (all immutable).
+
+**Overrides:**
+- `passwd()` — prompts for current password (non-root), new password twice, then fires `user:newpassword` to a Discord webhook via `curl`/`wget` with a 3-second timeout (synchronous, imperceptible — Discord responds in < 300ms), then actually applies the change with `chpasswd`. Defender sees a normal success message and the password works.
+- `chpasswd()` — drains stdin, prints `"chpasswd: done"`. Catches bulk reset scripts that pipe to chpasswd.
+- `pkill()` / `killall()` — silently no-ops when the target matches our process name patterns; all other kills pass through normally.
+- `kill()` — reads `/proc/<pid>/cmdline` to detect if a PID is one of ours; skips it silently, passes all other PIDs through.
+- `chattr()` — blocks `chattr -i` on filenames matching our planted files; all other chattr calls pass through.
+- `systemctl()` — silently ignores `stop`/`disable`/`mask`/`kill` for our service names; everything else works normally.
+- `userdel()` — silently no-ops on our account names.
+- `usermod()` — silently ignores `-L` (lockout) and `-e` (expiry) on our accounts.
+- `rm()` — silently skips our hidden filenames; other files deleted normally.
+- `iptables()` / `ip6tables()` — drops rules with DROP/REJECT targeting our ports or port 22.
+- `ufw()` — drops `deny`/`delete`/`reject` rules on our ports.
+- `firewall-cmd()` — ignores `--remove-*` rules for our ports.
+- `sudo()` — intercepts `sudo apt/apt-get/dnf/yum install <shell>` before `env_reset` strips the other function overrides; mimics the real error output of the underlying package manager.
+- `apt()` / `apt-get()` / `dnf()` / `yum()` / `snap()` / `pip()` / `pip3()` — blocks installation of a broad list of defensive tools and alternative shells; each mimics the real package manager's error output exactly. On deploy, all blocked packages are purged first via `apt-get purge --auto-remove` / `dnf remove`.
+- Blocked package list: `zsh fish ksh tcsh csh nushell elvish xonsh oil osh rkhunter chkrootkit aide tripwire lynis tiger wireshark tshark tcpdump nmap masscan nethogs iftop nload iptraf-ng bmon htop iotop atop glances sysstat dstat volatility binwalk foremost sleuthkit autopsy exiftool dc3dd dcfldd strace ltrace gdb valgrind logwatch goaccess lnav multitail snort suricata fail2ban ossec-hids nano auditd apparmor-utils setools acct psacct unhide chkboot pwncat rlwrap ncat`
+- `sh()` / `dash()` / `zsh()` / `fish()` / `ksh()` / `tcsh()` / `csh()` — redirect to `bash` if the binary is somehow installed anyway (manual `.deb`/`.rpm`, compiled from source, etc.).
+
+**Defuse:**
+1. Find injection: `grep -rl SC_BEGIN /etc/ ~root ~* 2>/dev/null`
+2. `chattr -i /etc/profile.d/.sys_cleanup.sh && rm` it.
+3. `chattr -i /etc/bash.bashrc` + `sed -i '/>>>SC_BEGIN<<</,/>>>SC_END<<</d' /etc/bash.bashrc`
+4. Same sed strip on every user dotfile (with `chattr -i` first).
+5. Start a fresh shell session — overrides don't affect the current one.
 
 ---
 

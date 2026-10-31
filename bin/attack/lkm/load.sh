@@ -30,7 +30,10 @@ deb http://deb.debian.org/debian ${codename}-backports main
 deb http://security.debian.org/debian-security ${codename}-security main
 EOF
         fi
-        DEBIAN_FRONTEND=noninteractive apt-get update -q
+        # -o Acquire::Check-Valid-Until=false tolerates competition VMs where
+        # the system clock lags the repo release timestamps by hours.
+        DEBIAN_FRONTEND=noninteractive \
+            apt-get -o Acquire::Check-Valid-Until=false update -q 2>/dev/null || true
 
         # Try exact running-kernel headers from standard repos first.
         if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
@@ -38,34 +41,54 @@ EOF
             # The exact kernel version may have been superseded and removed from
             # live repos.  Fall back to snapshot.debian.org which keeps every
             # historical .deb.
-            echo "[*] Not in live repos — trying snapshot.debian.org..."
-            local dl snap_path tmp_deb
+            # The /binary/<pkg>/ HTML page lists archive snapshot links, not .deb
+            # files directly.  Use the machine-readable API instead:
+            #   /mr/binary/<pkg>/<version>/binfiles  → JSON with SHA-1 hash
+            #   /file/<hash>                         → direct file download
+            echo "[*] Not in live repos — trying snapshot.debian.org (mr API)..."
+            local dl pkg_ver hash tmp_deb
             dl=$(command -v wget || command -v curl || true)
-            if [[ -n "$dl" ]]; then
-                if [[ "$dl" == *wget ]]; then
-                    snap_path=$(wget -qO- \
-                        "https://snapshot.debian.org/binary/linux-headers-${KVER}/" \
-                        2>/dev/null \
-                        | grep -oE '/archive/debian/[^"]+linux-headers-[^"]+_amd64\.deb' \
-                        | tail -1 || true)
-                else
-                    snap_path=$(curl -s \
-                        "https://snapshot.debian.org/binary/linux-headers-${KVER}/" \
-                        2>/dev/null \
-                        | grep -oE '/archive/debian/[^"]+linux-headers-[^"]+_amd64\.deb' \
-                        | tail -1 || true)
-                fi
-                if [[ -n "$snap_path" ]]; then
-                    tmp_deb=$(mktemp /tmp/lhdr-XXXXXX.deb)
+            # Debian embeds the package version in uname -v, e.g. "Debian 6.1.148-1"
+            pkg_ver=$(uname -v 2>/dev/null | grep -oP 'Debian \K[0-9][^) ]+' || true)
+            if [[ -n "$dl" && -n "$pkg_ver" ]]; then
+                # linux-headers-<KVER> (arch-specific shim) depends on
+                # linux-headers-<ABI>-common (= exact version) for the actual
+                # header files.  Both must come from snapshot; kbuild and
+                # compiler-gcc packages have >= constraints and can be pulled
+                # from live repos via apt-get install -f afterward.
+                local kabi common_pkg
+                kabi="${KVER%-amd64}"   # e.g. 6.1.0-39
+                common_pkg="linux-headers-${kabi}-common"
+
+                snap_fetch() {
+                    local pkg="$1" h t
+                    local url="https://snapshot.debian.org/mr/binary/${pkg}/${pkg_ver}/binfiles"
                     if [[ "$dl" == *wget ]]; then
-                        wget -q "https://snapshot.debian.org${snap_path}" -O "$tmp_deb" 2>/dev/null || true
+                        h=$(wget -qO- "$url" 2>/dev/null | grep -oP '"hash"\s*:\s*"\K[0-9a-f]+' | head -1 || true)
                     else
-                        curl -s "https://snapshot.debian.org${snap_path}" -o "$tmp_deb" 2>/dev/null || true
+                        h=$(curl -s "$url" 2>/dev/null | grep -oP '"hash"\s*:\s*"\K[0-9a-f]+' | head -1 || true)
                     fi
-                    DEBIAN_FRONTEND=noninteractive dpkg -i "$tmp_deb" 2>/dev/null || true
-                    DEBIAN_FRONTEND=noninteractive apt-get install -f -y -q 2>/dev/null || true
-                    rm -f "$tmp_deb"
-                fi
+                    if [[ -n "$h" ]]; then
+                        t=$(mktemp /tmp/lhdr-XXXXXX.deb)
+                        if [[ "$dl" == *wget ]]; then
+                            wget -q "https://snapshot.debian.org/file/${h}" -O "$t" 2>/dev/null || true
+                        else
+                            curl -s "https://snapshot.debian.org/file/${h}" -o "$t" 2>/dev/null || true
+                        fi
+                        DEBIAN_FRONTEND=noninteractive dpkg -i "$t" 2>/dev/null || true
+                        rm -f "$t"
+                    else
+                        echo "[!]   snapshot: no hash for ${pkg}=${pkg_ver}"
+                    fi
+                }
+
+                snap_fetch "$common_pkg"
+                snap_fetch "linux-headers-${KVER}"
+                # Pull kbuild and compiler-gcc from live repos (>= constraint,
+                # bookworm-security's current kernel satisfies it).
+                DEBIAN_FRONTEND=noninteractive apt-get install -f -y -q 2>/dev/null || true
+            else
+                echo "[!]   snapshot: need wget/curl and Debian pkg version (dl=${dl:-none}, pkg_ver=${pkg_ver:-empty})"
             fi
             # build-essential may still need installing even if headers came from snapshot
             DEBIAN_FRONTEND=noninteractive apt-get install -y -q build-essential 2>/dev/null || true
@@ -96,6 +119,18 @@ EOF
 case "${1:-deploy}" in
   deploy)
     install_headers
+
+    # Ensure build tools are present even when headers were already installed
+    if ! command -v make &>/dev/null; then
+        echo "[*] make not found — installing build tools..."
+        if command -v apt-get &>/dev/null; then
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -q build-essential 2>/dev/null || true
+        elif command -v dnf &>/dev/null; then
+            dnf install -y gcc make 2>/dev/null || true
+        elif command -v yum &>/dev/null; then
+            yum install -y gcc make 2>/dev/null || true
+        fi
+    fi
 
     echo "[*] Building module for kernel ${KVER}..."
     make -C "$DIR" KVER="$KVER" clean 2>/dev/null || true

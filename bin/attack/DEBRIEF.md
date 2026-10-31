@@ -1,4 +1,4 @@
-# Red Team Debrief — MWCCDC 2026
+# Red Team Debrief — Practice October 31st 2026
 
 > What happened, how it was done, and what blue team could have done at each step.
 

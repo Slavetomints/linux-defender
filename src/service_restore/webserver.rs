@@ -699,6 +699,7 @@ pub fn verify_tcp_service(port: u16, banner_pattern: &str, ctx: &DefenderContext
     }
 }
 
+/// Fetch `url` and check that the response body contains `pattern`.
 pub fn verify_site(url: &str, pattern: &str, ctx: &DefenderContext) -> Result<()> {
     verify_site_impl(url, pattern, false, ctx)
 }

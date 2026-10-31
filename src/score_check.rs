@@ -10,8 +10,11 @@
 //! - [`CheckKind::HttpCurl`] — `curl` over plain HTTP with redirect following (`-L`)
 //! - [`CheckKind::Https`] — `curl` subprocess with SNI, verify status code
 //! - [`CheckKind::Smtp`] — connect and read the greeting banner (`220 …`)
+//! - [`CheckKind::SmtpSend`] — full EHLO + MAIL FROM + RCPT TO transaction
 //! - [`CheckKind::Imap`] — connect and read the greeting banner (`* OK …`)
+//! - [`CheckKind::ImapLogin`] — full IMAP LOGIN and SELECT INBOX
 //! - [`CheckKind::Pop3`] — connect and read the greeting banner (`+OK …`)
+//! - [`CheckKind::Pop3Login`] — full POP3 USER/PASS login and STAT
 //! - [`CheckKind::Dns`] — `dig` query, check for an ANSWER section
 
 use std::collections::VecDeque;
@@ -85,10 +88,27 @@ pub enum CheckKind {
     },
     /// SMTP: connect and expect a `220` greeting banner.
     Smtp,
+    /// SMTP functional: EHLO → MAIL FROM → RCPT TO → QUIT (no auth required).
+    SmtpSend {
+        /// Envelope sender, e.g. `"scorer@localhost"`.
+        from: &'static str,
+        /// Envelope recipient, e.g. `"sysadmin@localhost"`.
+        to: &'static str,
+    },
     /// IMAP: connect and expect a `* OK` untagged greeting.
     Imap,
+    /// IMAP functional: LOGIN then SELECT INBOX (password from [`mail_check_pass`]).
+    ImapLogin {
+        /// System account username to log in as.
+        user: &'static str,
+    },
     /// POP3: connect and expect a `+OK` greeting.
     Pop3,
+    /// POP3 functional: USER + PASS login then STAT (password from [`mail_check_pass`]).
+    Pop3Login {
+        /// System account username to log in as.
+        user: &'static str,
+    },
     /// DNS: run `dig @host query` and expect an ANSWER section.
     Dns {
         /// Query name, e.g. `"example.com"`.
@@ -197,6 +217,54 @@ impl ServiceHistory {
     }
 }
 
+/// Create (or reset) the dedicated mail-check account so IMAP/POP3 functional
+/// checks always have a working set of credentials.  Safe to call repeatedly —
+/// it is a no-op if the account already exists with the right password.
+pub fn ensure_mail_test_account() {
+    // Create the user if absent (no home dir needed; /sbin/nologin shell).
+    let exists = std::process::Command::new("id")
+        .arg(MAIL_TEST_USER)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !exists {
+        let _ = std::process::Command::new("useradd")
+            .args(["-m", "-s", "/sbin/nologin", MAIL_TEST_USER])
+            .output();
+    } else {
+        // User already exists — ensure the home directory is present.
+        // Dovecot needs it to create the Maildir on first login.
+        let home = format!("/home/{MAIL_TEST_USER}");
+        if !std::path::Path::new(&home).exists() {
+            if std::process::Command::new("mkhomedir_helper")
+                .arg(MAIL_TEST_USER)
+                .output()
+                .map(|o| !o.status.success())
+                .unwrap_or(true)
+            {
+                // mkhomedir_helper not available — create manually.
+                let _ = std::fs::create_dir_all(&home);
+                let _ = std::process::Command::new("chown")
+                    .args([&format!("{MAIL_TEST_USER}:{MAIL_TEST_USER}"), &home])
+                    .output();
+            }
+        }
+    }
+
+    // Always (re-)set the password so it matches the persisted config value.
+    let chpasswd_input = format!("{MAIL_TEST_USER}:{}\n", mail_check_pass());
+    if let Ok(mut child) = std::process::Command::new("chpasswd")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    {
+        if let Some(stdin) = child.stdin.as_mut() {
+            let _ = std::io::Write::write_all(stdin, chpasswd_input.as_bytes());
+        }
+        let _ = child.wait();
+    }
+}
+
 /// Build a `ServiceHistory` list from a slice of check definitions.
 pub fn build_histories(checks: &[ServiceCheck]) -> Vec<ServiceHistory> {
     checks
@@ -237,8 +305,11 @@ fn run_check(svc: &ServiceCheck) -> CheckResult {
             expected_status,
         } => check_https(svc.host, svc.port, path, *expected_status),
         CheckKind::Smtp => check_smtp(svc.host, svc.port),
+        CheckKind::SmtpSend { from, to } => check_smtp_send(svc.host, svc.port, from, to),
         CheckKind::Imap => check_imap(svc.host, svc.port),
+        CheckKind::ImapLogin { user } => check_imap_login(svc.host, svc.port, user),
         CheckKind::Pop3 => check_pop3(svc.host, svc.port),
+        CheckKind::Pop3Login { user } => check_pop3_login(svc.host, svc.port, user),
         CheckKind::Dns { query } => check_dns(svc.host, svc.port, query),
     };
     let latency_ms = start.elapsed().as_millis() as u64;
@@ -582,6 +653,141 @@ fn check_pop3(host: &str, port: u16) -> (bool, String) {
     }
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn smtp_connect(host: &str, port: u16) -> Option<TcpStream> {
+    let addr = format!("{host}:{port}");
+    let stream = match addr.parse::<SocketAddr>() {
+        Ok(sa) => TcpStream::connect_timeout(&sa, CONNECT_TIMEOUT),
+        Err(_) => TcpStream::connect(&addr as &str),
+    }
+    .ok()?;
+    let _ = stream.set_read_timeout(Some(CHECK_TIMEOUT));
+    Some(stream)
+}
+
+fn smtp_readline(stream: &mut TcpStream) -> String {
+    let mut buf = [0u8; 512];
+    let n = stream.read(&mut buf).unwrap_or(0);
+    String::from_utf8_lossy(&buf[..n])
+        .lines()
+        .last()
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+/// SMTP functional: EHLO → MAIL FROM → RCPT TO → QUIT.
+fn check_smtp_send(host: &str, port: u16, from: &str, to: &str) -> (bool, String) {
+    let Some(mut s) = smtp_connect(host, port) else {
+        return (false, "TCP connect failed".into());
+    };
+    // Drain the greeting
+    let banner = smtp_readline(&mut s);
+    if !banner.starts_with("220") {
+        return (false, format!("no 220 banner: {}", &banner[..banner.len().min(40)]));
+    }
+    let cmds = [
+        (format!("EHLO localhost\r\n"), "250"),
+        (format!("MAIL FROM:<{from}>\r\n"), "250"),
+        (format!("RCPT TO:<{to}>\r\n"), "250"),
+        ("QUIT\r\n".into(), "221"),
+    ];
+    for (cmd, expect) in &cmds {
+        let _ = s.write_all(cmd.as_bytes());
+        let resp = smtp_readline(&mut s);
+        if !resp.starts_with(expect) {
+            return (false, format!("cmd {:?} → {:?}", cmd.trim(), &resp[..resp.len().min(50)]));
+        }
+    }
+    (true, format!("SMTP send path OK ({from} → {to})"))
+}
+
+/// IMAP functional: LOGIN then SELECT INBOX.
+fn check_imap_login(host: &str, port: u16, user: &str) -> (bool, String) {
+    let pass_owned = mail_check_pass();
+    let pass: &str = &pass_owned;
+    let addr = format!("{host}:{port}");
+    let Ok(mut s) = (match addr.parse::<SocketAddr>() {
+        Ok(sa) => TcpStream::connect_timeout(&sa, CONNECT_TIMEOUT),
+        Err(_) => TcpStream::connect(&addr as &str),
+    }) else {
+        return (false, "TCP connect failed".into());
+    };
+    let _ = s.set_read_timeout(Some(CHECK_TIMEOUT));
+    let mut buf = [0u8; 512];
+
+    // Greeting
+    let n = s.read(&mut buf).unwrap_or(0);
+    let greeting = String::from_utf8_lossy(&buf[..n]);
+    if !greeting.contains("* OK") {
+        return (false, "no IMAP greeting".into());
+    }
+
+    let steps: &[(&str, &str)] = &[
+        ("A1 LOGIN {user} {pass}\r\n", "A1 OK"),
+        ("A2 SELECT INBOX\r\n", "A2 OK"),
+        ("A3 LOGOUT\r\n", "A3 OK"),
+    ];
+    for (template, expect) in steps {
+        let cmd = template.replace("{user}", user).replace("{pass}", pass);
+        let _ = s.write_all(cmd.as_bytes());
+        // Read until we see the tagged response (may need multiple reads)
+        let mut resp = String::new();
+        for _ in 0..8 {
+            let n = s.read(&mut buf).unwrap_or(0);
+            if n == 0 { break; }
+            resp.push_str(&String::from_utf8_lossy(&buf[..n]));
+            if resp.contains(expect) || resp.contains("NO ") || resp.contains("BAD ") { break; }
+        }
+        if !resp.contains(expect) {
+            let snippet: String = resp.lines().last().unwrap_or("").chars().take(60).collect();
+            return (false, format!("{}: {snippet}", template.trim().split_whitespace().next().unwrap_or("")));
+        }
+    }
+    (true, format!("IMAP login + SELECT INBOX OK ({user})"))
+}
+
+/// POP3 functional: USER + PASS then STAT.
+fn check_pop3_login(host: &str, port: u16, user: &str) -> (bool, String) {
+    let pass_owned = mail_check_pass();
+    let pass: &str = &pass_owned;
+    let addr = format!("{host}:{port}");
+    let Ok(mut s) = (match addr.parse::<SocketAddr>() {
+        Ok(sa) => TcpStream::connect_timeout(&sa, CONNECT_TIMEOUT),
+        Err(_) => TcpStream::connect(&addr as &str),
+    }) else {
+        return (false, "TCP connect failed".into());
+    };
+    let _ = s.set_read_timeout(Some(CHECK_TIMEOUT));
+    let mut buf = [0u8; 256];
+
+    // Greeting
+    let n = s.read(&mut buf).unwrap_or(0);
+    let greeting = String::from_utf8_lossy(&buf[..n]);
+    if !greeting.contains("+OK") {
+        return (false, "no POP3 greeting".into());
+    }
+
+    let steps: &[(&str, &str)] = &[
+        ("USER {user}\r\n", "+OK"),
+        ("PASS {pass}\r\n", "+OK"),
+        ("STAT\r\n",         "+OK"),
+        ("QUIT\r\n",         "+OK"),
+    ];
+    for (template, expect) in steps {
+        let cmd = template.replace("{user}", user).replace("{pass}", pass);
+        let _ = s.write_all(cmd.as_bytes());
+        let n = s.read(&mut buf).unwrap_or(0);
+        let resp = String::from_utf8_lossy(&buf[..n]);
+        let first = resp.lines().next().unwrap_or("").trim();
+        if !first.starts_with(expect) {
+            return (false, format!("{}: {}", template.trim(), &first[..first.len().min(50)]));
+        }
+    }
+    (true, format!("POP3 login + STAT OK ({user})"))
+}
+
 /// DNS check via `dig @host query`. Passes if the reply contains `ANSWER SECTION`.
 fn check_dns(host: &str, port: u16, query: &str) -> (bool, String) {
     let server = format!("@{}:{}", host, port);
@@ -645,50 +851,80 @@ pub const WEB_CHECKS: &[ServiceCheck] = &[
     },
 ];
 
+/// Dedicated local account used for functional mail checks (IMAP LOGIN, POP3 USER/PASS).
+/// Call [`ensure_mail_test_account`] on startup to create/maintain the account.
+const MAIL_TEST_USER: &str = "scorecheck";
+
+/// Path where the generated mail-check password is persisted across runs.
+const MAIL_CHECK_CONF: &str = "/etc/linux-defender/mail-check.conf";
+
+/// Cached runtime password for the mail test account.
+static MAIL_CHECK_PASS: OnceLock<String> = OnceLock::new();
+
+/// Return the mail-check account password, loading it from config or generating
+/// a fresh random one (and saving it) on the first call.
+pub fn mail_check_pass() -> &'static str {
+    MAIL_CHECK_PASS.get_or_init(|| {
+        // Try to load from the persisted config file.
+        if let Ok(text) = std::fs::read_to_string(MAIL_CHECK_CONF) {
+            let trimmed = text.trim().to_string();
+            if !trimmed.is_empty() {
+                return trimmed;
+            }
+        }
+        // Generate a random 32-char hex password from /dev/urandom.
+        let pass = gen_random_hex(16);
+        // Persist it so future runs (and the next `ensure_mail_test_account` call)
+        // use the same password.
+        let _ = std::fs::create_dir_all("/etc/linux-defender");
+        let _ = std::fs::write(MAIL_CHECK_CONF, &pass);
+        pass
+    })
+}
+
+/// Read `n` bytes from `/dev/urandom` and return them as a lowercase hex string.
+fn gen_random_hex(n: usize) -> String {
+    use std::fs::File;
+    let mut buf = vec![0u8; n];
+    if let Ok(mut f) = File::open("/dev/urandom") {
+        let _ = std::io::Read::read(&mut f, &mut buf);
+    }
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Scored services for a mail box.
 pub const MAIL_CHECKS: &[ServiceCheck] = &[
     ServiceCheck {
         name: "Postfix SMTP",
         host: "127.0.0.1",
         port: 25,
-        kind: CheckKind::Smtp,
-    },
-    ServiceCheck {
-        name: "Postfix Subm",
-        host: "127.0.0.1",
-        port: 587,
-        kind: CheckKind::Smtp,
+        kind: CheckKind::SmtpSend {
+            from: "scorer@localhost",
+            to: "scorecheck@localhost",
+        },
     },
     ServiceCheck {
         name: "Dovecot IMAP",
         host: "127.0.0.1",
         port: 143,
-        kind: CheckKind::Imap,
-    },
-    ServiceCheck {
-        name: "Dovecot IMAPS",
-        host: "127.0.0.1",
-        port: 993,
-        kind: CheckKind::Imap,
+        kind: CheckKind::ImapLogin {
+            user: MAIL_TEST_USER,
+        },
     },
     ServiceCheck {
         name: "Dovecot POP3",
         host: "127.0.0.1",
         port: 110,
-        kind: CheckKind::Pop3,
-    },
-    ServiceCheck {
-        name: "Dovecot POP3S",
-        host: "127.0.0.1",
-        port: 995,
-        kind: CheckKind::Pop3,
+        kind: CheckKind::Pop3Login {
+            user: MAIL_TEST_USER,
+        },
     },
     ServiceCheck {
         name: "Roundcube",
         host: "127.0.0.1",
         port: 80,
         kind: CheckKind::Http {
-            path: "/",
+            path: "/roundcube/",
             expected_status: 200,
         },
     },

@@ -89,6 +89,7 @@ const BACKUP_STEPS: &[(&str, &str)] = &[
 const RESTORE_SERVICES: &[(&str, &str)] = &[
     ("postfix", "Postfix (SMTP)"),
     ("dovecot", "Dovecot (IMAP/POP3)"),
+    ("roundcube", "Roundcube (Webmail)"),
     ("splunk", "Splunk"),
     ("opencart", "OpenCart"),
     ("prestashop", "PrestaShop"),
@@ -733,6 +734,9 @@ impl App {
         finding_rx: Receiver<Finding>,
         nft_config: Option<String>,
     ) -> Self {
+        if box_type == BoxType::Mail {
+            crate::score_check::ensure_mail_test_account();
+        }
         let services = build_histories(box_type.checks());
         let (scan_progress_tx, scan_progress_rx) = mpsc::channel();
         let (auto_scan_done_tx, auto_scan_done_rx) = mpsc::channel::<&'static str>();
@@ -1180,6 +1184,7 @@ impl App {
                 ssh: false,
                 postfix: false,
                 dovecot: false,
+                roundcube: false,
                 splunk: false,
                 splunk_url: None,
                 opencart: false,
@@ -1193,6 +1198,7 @@ impl App {
                 "ssh" => args.ssh = true,
                 "postfix" => args.postfix = true,
                 "dovecot" => args.dovecot = true,
+                "roundcube" => args.roundcube = true,
                 "splunk" => args.splunk = true,
                 "opencart" => args.opencart = true,
                 "prestashop" => args.prestashop = true,

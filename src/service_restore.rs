@@ -25,6 +25,7 @@ pub mod dovecot;
 pub mod opencart;
 pub mod postfix;
 pub mod prestashop;
+pub mod roundcube;
 pub mod splunk;
 pub mod ssh;
 pub mod webserver;
@@ -78,6 +79,10 @@ pub struct CliArgs {
     #[arg(long)]
     pub opencart_url: Option<String>,
 
+    /// Reinstall Roundcube webmail and restart Apache
+    #[arg(long)]
+    pub roundcube: bool,
+
     /// Download and reinstall PrestaShop, preserving parameters.php if present
     #[arg(long)]
     pub prestashop: bool,
@@ -111,6 +116,10 @@ pub fn run(
     if args.dovecot {
         ctx.progress("[+] Restoring Dovecot");
         dovecot::run(ctx)?;
+    }
+    if args.roundcube {
+        ctx.progress("[+] Restoring Roundcube");
+        roundcube::run(ctx)?;
     }
     if args.splunk {
         ctx.progress("[+] Restoring Splunk");

@@ -11,8 +11,8 @@ use chrono::Local;
 use clap::{Parser, Subcommand};
 use nix::unistd::Uid;
 
-use linux_defender::core::DefenderContext;
-use linux_defender::{anti_persistence, backups, monitoring, service_restore, system_hardening};
+use defender_cli::core::DefenderContext;
+use defender_cli::{anti_persistence, backups, monitoring, router, service_restore, system_hardening};
 
 /// CCDC Helper Program
 #[derive(Parser)]
@@ -41,6 +41,9 @@ enum Mode {
 
     /// Reinstalls or restores scored services from scratch
     ServiceRestore(service_restore::CliArgs),
+
+    /// VyOS router hardening, firewalling, and forensic audit operations
+    Router(router::CliArgs),
 }
 
 impl Mode {
@@ -51,6 +54,7 @@ impl Mode {
             Mode::Monitoring(_) => "monitoring",
             Mode::SystemHardening(_) => "system-hardening",
             Mode::ServiceRestore(_) => "service-restore",
+            Mode::Router(_) => "router",
         }
     }
 }
@@ -102,6 +106,9 @@ fn main() -> anyhow::Result<()> {
         }
         Mode::ServiceRestore(args) => {
             service_restore::run(&ctx, &args, None).context("Couldn't run Service Restore mode")?
+        }
+        Mode::Router(args) => {
+            router::run(&ctx, &args).context("Couldn't run Router mode")?
         }
     }
 

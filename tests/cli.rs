@@ -19,6 +19,7 @@ fn help_lists_every_subcommand() {
         "backups",
         "monitoring",
         "system-hardening",
+        "router",
     ] {
         assert!(
             text.contains(subcommand),
@@ -53,6 +54,12 @@ fn a_subcommand_with_no_flags_shows_help_and_fails() {
     assert!(
         !out.status.success(),
         "arg_required_else_help should make a bare subcommand an error"
+    );
+
+    let out_router = run_in(dir.path(), &["router"]);
+    assert!(
+        !out_router.status.success(),
+        "bare router subcommand should also show help and fail"
     );
 }
 

@@ -167,7 +167,7 @@ fn pane_configs(box_type: BoxType) -> Vec<(&'static str, PaneSource)> {
                 },
             ),
         ],
-        BoxType::General => vec![
+        BoxType::General | BoxType::Router => vec![
             (
                 "auth",
                 PaneSource {

@@ -106,7 +106,7 @@ pub fn allow_list(box_type: BoxType) -> &'static [&'static str] {
         BoxType::Web => WEB_ALLOW,
         BoxType::Mail => MAIL_ALLOW,
         BoxType::Splunk => SPLUNK_ALLOW,
-        BoxType::General => GENERAL_ALLOW,
+        BoxType::General | BoxType::Router => GENERAL_ALLOW,
     }
 }
 

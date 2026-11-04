@@ -62,6 +62,10 @@ path = "tests/system_hardening.rs"
 name = "service_restore"
 path = "tests/service_restore.rs"
 
+[[test]]
+name = "router"
+path = "tests/router.rs"
+
 # Drives the built binary end to end; covers src/main.rs.
 [[test]]
 name = "cli"

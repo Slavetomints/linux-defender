@@ -1572,7 +1572,7 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
 
                 match key.code {
                     KeyCode::Char('q') => break,
-                    KeyCode::Char(d @ '1'..='8') => {
+                    KeyCode::Char(d @ '1'..='9') => {
                         if let Some(tab) = Tab::from_digit(d) {
                             app.tab = tab;
                         }

@@ -183,7 +183,7 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
         script_args.push("--audit".into());
     } else if let Some(ref diff_opt) = args.diff {
         script_args.push("--diff".into());
-        if let Some(ref path) = diff_opt {
+        if let Some(path) = diff_opt {
             script_args.push(path.clone());
         }
     } else if args.harden {

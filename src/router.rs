@@ -131,6 +131,7 @@ pub fn run_script(ctx: &DefenderContext, script_args: &[&str]) -> Result {
 
     let mut cmd = Command::new("bash");
     cmd.arg(&script_path).args(script_args);
+    cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = match cmd.spawn() {

@@ -630,6 +630,136 @@ impl RestoreCredDialog {
     }
 }
 
+/// Which router phase the configuration dialog is prompting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RouterDialogStep {
+    Harden,
+    ConsoleLockdown,
+}
+
+/// Modal configuration dialog for Router Phase 1 & Phase 2 operations.
+pub(crate) struct RouterConfigDialog {
+    step: RouterDialogStep,
+    fields: [String; 4],
+    focused: usize,
+}
+
+/// Auto-detect CCDC team number from WAN interface IP `172.31.{20+T}.2/29`.
+fn detect_vyos_team_number() -> Option<u8> {
+    use std::process::Command;
+    let out = Command::new("ip").args(["-4", "addr", "show"]).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for word in text.split_whitespace() {
+        if let Some(ip) = word.split('/').next() {
+            let parts: Vec<&str> = ip.split('.').collect();
+            if parts.len() == 4 && parts[0] == "172" && parts[1] == "31" {
+                if let Ok(octet) = parts[2].parse::<u8>() {
+                    if (21..=40).contains(&octet) {
+                        return Some(octet - 20);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+impl RouterConfigDialog {
+    fn new(step: RouterDialogStep) -> Self {
+        let fields = match step {
+            RouterDialogStep::Harden => {
+                let team_str = detect_vyos_team_number()
+                    .map(|t| t.to_string())
+                    .unwrap_or_default();
+                [
+                    team_str,
+                    "ChangeMeNowCCDC2026!".into(),
+                    "172.17.0.0/24".into(),
+                    String::new(),
+                ]
+            }
+            RouterDialogStep::ConsoleLockdown => [
+                "ChangeMeNowCCDC2026!".into(),
+                "no".into(),
+                String::new(),
+                String::new(),
+            ],
+        };
+        Self {
+            step,
+            fields,
+            focused: 0,
+        }
+    }
+
+    fn field_count(&self) -> usize {
+        match self.step {
+            RouterDialogStep::Harden => 4,
+            RouterDialogStep::ConsoleLockdown => 2,
+        }
+    }
+
+    fn field_label(&self, idx: usize) -> &'static str {
+        match self.step {
+            RouterDialogStep::Harden => match idx {
+                0 => "CCDC Team Number [1-20]",
+                1 => "New 'vyos' Admin Password",
+                2 => "Management Subnet (wkst)",
+                3 => "SSH Public Key (optional)",
+                _ => "",
+            },
+            RouterDialogStep::ConsoleLockdown => match idx {
+                0 => "New 'vyos' Console Password",
+                1 => "Force Override Active SSH Check? (yes/no)",
+                _ => "",
+            },
+        }
+    }
+
+    fn into_cli_args(self) -> (&'static str, crate::router::CliArgs) {
+        match self.step {
+            RouterDialogStep::Harden => {
+                let team: Option<u8> = self.fields[0].trim().parse().ok();
+                let pass = self.fields[1].clone();
+                let mgmt = if self.fields[2].trim().is_empty() {
+                    "172.17.0.0/24".to_string()
+                } else {
+                    self.fields[2].trim().to_string()
+                };
+                let ssh_key = if self.fields[3].trim().is_empty() {
+                    None
+                } else {
+                    Some(self.fields[3].trim().to_string())
+                };
+                (
+                    "harden",
+                    crate::router::CliArgs {
+                        harden: true,
+                        team,
+                        pass: Some(pass),
+                        mgmt_subnet: Some(mgmt),
+                        ssh_key,
+                        ..Default::default()
+                    },
+                )
+            }
+            RouterDialogStep::ConsoleLockdown => {
+                let pass = self.fields[0].clone();
+                let force = self.fields[1].trim().eq_ignore_ascii_case("yes");
+                (
+                    "console_lockdown",
+                    crate::router::CliArgs {
+                        console_lockdown: true,
+                        pass: Some(pass),
+                        force,
+                        ..Default::default()
+                    },
+                )
+            }
+        }
+    }
+}
+
 pub struct App {
     pub box_type: BoxType,
     pub tab: Tab,
@@ -761,6 +891,8 @@ pub struct App {
     router_progress_tx: Sender<String>,
     /// Receiver end of the router progress channel.
     router_progress_rx: Receiver<String>,
+    /// Modal dialog for collecting Phase 1/2 router credentials.
+    pub(crate) router_config_dialog: Option<RouterConfigDialog>,
 }
 
 impl App {
@@ -861,6 +993,7 @@ impl App {
             router_log_scroll: 0,
             router_progress_tx,
             router_progress_rx,
+            router_config_dialog: None,
         }
     }
 
@@ -1291,7 +1424,11 @@ impl App {
     }
 
     /// Spawn a background thread to run the selected router operation.
-    fn start_router(&mut self, step_id: &'static str) {
+    fn start_router(
+        &mut self,
+        step_id: &'static str,
+        custom_args: Option<crate::router::CliArgs>,
+    ) {
         if self.router_running {
             return;
         }
@@ -1311,7 +1448,7 @@ impl App {
             let report = PathBuf::from("/tmp/defender-router.log");
             let ctx = DefenderContext::new(report, false)
                 .with_progress(progress_tx.clone());
-            let args = crate::router::CliArgs {
+            let args = custom_args.unwrap_or_else(|| crate::router::CliArgs {
                 audit: step_id == "audit",
                 diff: if step_id == "diff" { Some(None) } else { None },
                 harden: step_id == "harden",
@@ -1320,17 +1457,13 @@ impl App {
                 team: None,
                 mgmt_subnet: None,
                 user: None,
-                pass: if step_id == "harden" || step_id == "console_lockdown" {
-                    Some("ChangeMeNowCCDC2026!".to_string())
-                } else {
-                    None
-                },
+                pass: None,
                 ssh_key: None,
                 commit_timeout: None,
                 no_confirm: false,
                 force: false,
                 dry_run: false,
-            };
+            });
             if let Err(e) = crate::router::run(&ctx, &args) {
                 let _ = progress_tx.send(format!("ERROR: {}", e));
             }
@@ -1612,6 +1745,48 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                 continue;
             }
 
+                if let Some(ref mut dlg) = app.router_config_dialog {
+                    match key.code {
+                        KeyCode::Esc => {
+                            app.router_config_dialog = None;
+                        }
+                        KeyCode::Tab | KeyCode::Down => {
+                            dlg.focused = (dlg.focused + 1).min(dlg.field_count() - 1);
+                        }
+                        KeyCode::BackTab | KeyCode::Up => {
+                            dlg.focused = dlg.focused.saturating_sub(1);
+                        }
+                        KeyCode::Enter => {
+                            let max_field = dlg.field_count() - 1;
+                            if dlg.focused == max_field {
+                                let pass_idx = match dlg.step {
+                                    RouterDialogStep::Harden => 1,
+                                    RouterDialogStep::ConsoleLockdown => 0,
+                                };
+                                if dlg.fields[pass_idx].trim().is_empty() {
+                                    // Required password is empty
+                                    return Ok(());
+                                }
+                                let dialog = app.router_config_dialog.take().unwrap();
+                                let (step_id, cli_args) = dialog.into_cli_args();
+                                app.start_router(step_id, Some(cli_args));
+                            } else {
+                                dlg.focused += 1;
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            let idx = dlg.focused;
+                            dlg.fields[idx].pop();
+                        }
+                        KeyCode::Char(c) => {
+                            let idx = dlg.focused;
+                            dlg.fields[idx].push(c);
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
             match key.code {
                 KeyCode::Char('q') => break,
                 KeyCode::Char(d @ '1'..='9') => {
@@ -1771,7 +1946,20 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                         }
                         } else if app.tab == Tab::Router && !app.router_running {
                             let step_id = crate::router::ROUTER_STEPS[app.router_cursor].id;
-                            app.start_router(step_id);
+                            match step_id {
+                                "harden" => {
+                                    app.router_config_dialog =
+                                        Some(RouterConfigDialog::new(RouterDialogStep::Harden));
+                                }
+                                "console_lockdown" => {
+                                    app.router_config_dialog = Some(RouterConfigDialog::new(
+                                        RouterDialogStep::ConsoleLockdown,
+                                    ));
+                                }
+                                _ => {
+                                    app.start_router(step_id, None);
+                                }
+                            }
                     }
                 }
                 KeyCode::Char('x') => {
@@ -2031,6 +2219,11 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
     // Credential dialog renders on top of the service restore tab.
     if let Some(ref dlg) = app.restore_cred_dialog {
         render_restore_cred_dialog(f, size, dlg);
+    }
+
+    // Router configuration dialog renders on top of the router tab.
+    if let Some(ref dlg) = app.router_config_dialog {
+        render_router_config_dialog(f, size, dlg);
     }
 
     // User input modal renders on top of everything.
@@ -3411,6 +3604,67 @@ fn render_restore_cred_dialog(f: &mut ratatui::Frame, area: Rect, dlg: &RestoreC
 
     let hint = if focused_idx == n - 1 {
         "[Tab/↓] prev field   [Enter] start restore   [Esc] cancel"
+    } else {
+        "[Tab/↓] next field   [↑] prev field   [Enter] advance   [Esc] cancel"
+    };
+    f.render_widget(
+        Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
+        rows[n + 1],
+    );
+}
+
+/// Render the configuration input dialog for router Phase 1 / Phase 2 operations.
+fn render_router_config_dialog(f: &mut ratatui::Frame, area: Rect, dlg: &RouterConfigDialog) {
+    use crate::wizards::modal_popup;
+
+    let title = match dlg.step {
+        RouterDialogStep::Harden => " Phase 1: Router Hardening Configuration ",
+        RouterDialogStep::ConsoleLockdown => " Phase 2: Console Lockdown (Nuke SSH) ",
+    };
+    let inner = modal_popup(f, area, 65, 75, title);
+
+    let n = dlg.field_count();
+    let mut constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Length(3)).collect();
+    constraints.push(Constraint::Min(0));
+    constraints.push(Constraint::Length(2));
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    for i in 0..n {
+        let is_focused = i == dlg.focused;
+        let label = dlg.field_label(i);
+        let value = &dlg.fields[i];
+        let display = if label.to_lowercase().contains("password") {
+            "*".repeat(value.len())
+        } else {
+            value.clone()
+        };
+        let border_style = if is_focused {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let text = if is_focused {
+            format!("{}_", display)
+        } else {
+            display
+        };
+        f.render_widget(
+            Paragraph::new(text).block(
+                Block::default()
+                    .title(format!(" {} ", label))
+                    .borders(Borders::ALL)
+                    .border_style(border_style),
+            ),
+            rows[i],
+        );
+    }
+
+    let hint = if dlg.focused == n - 1 {
+        "[Tab/↓] prev field   [Enter] apply & run   [Esc] cancel"
     } else {
         "[Tab/↓] next field   [↑] prev field   [Enter] advance   [Esc] cancel"
     };

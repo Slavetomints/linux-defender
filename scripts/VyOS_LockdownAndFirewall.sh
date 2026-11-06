@@ -11,12 +11,6 @@
 #   ./VyOS_LockdownAndFirewall.sh --interactive
 # ==============================================================================
 
-# Ensure script executes in vbash and vyattacfg group if running on VyOS
-if [ -x /bin/vbash ] && [ "$(id -g -n 2>/dev/null)" != 'vyattacfg' ] ; then
-    ARGS=$(printf "%q " "$@")
-    exec sg vyattacfg -c "/bin/vbash $(readlink -f "$0") $ARGS"
-fi
-
 # Source VyOS script environment
 if [ -f /opt/vyatta/etc/functions/script-template ]; then
     source /opt/vyatta/etc/functions/script-template

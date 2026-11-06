@@ -129,10 +129,22 @@ pub fn run_script(ctx: &DefenderContext, script_args: &[&str]) -> Result {
 
     ctx.progress(&format!("→ Executing VyOS script with args: {:?}", script_args));
 
-    let mut cmd = Command::new("bash");
+    let shell = if std::path::Path::new("/bin/vbash").exists() {
+        "/bin/vbash"
+    } else {
+        "bash"
+    };
+
+    let mut cmd = Command::new(shell);
     cmd.arg(&script_path).args(script_args);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    // On VyOS, ensure the process runs under group 'vyattacfg' so VyOS config APIs succeed
+    if let Ok(Some(group)) = nix::unistd::Group::from_name("vyattacfg") {
+        use std::os::unix::process::CommandExt;
+        cmd.gid(group.gid.as_raw());
+    }
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,

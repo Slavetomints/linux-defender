@@ -56,6 +56,8 @@ pub mod anti_persistence;
 pub mod backups;
 pub mod core;
 pub mod monitoring;
+/// VyOS router defense, hardening, and forensic audit operations.
+pub mod router;
 pub mod score_check;
 pub mod service_restore;
 pub mod system_hardening;

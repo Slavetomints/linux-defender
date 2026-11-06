@@ -341,6 +341,7 @@ pub enum Tab {
     Monitor,
     Tools,
     ServiceRestore,
+    Router,
 }
 
 impl Tab {
@@ -354,6 +355,7 @@ impl Tab {
         Tab::Monitor,
         Tab::Tools,
         Tab::ServiceRestore,
+        Tab::Router,
     ];
 
     /// Human-readable name shown in the tab bar.
@@ -367,10 +369,11 @@ impl Tab {
             Tab::Monitor => "Monitor",
             Tab::Tools => "Tools",
             Tab::ServiceRestore => "Svc Restore",
+            Tab::Router => "Router",
         }
     }
 
-    /// Map a `1`–`8` digit keypress to the corresponding tab, or `None` for anything else.
+    /// Map a `1`–`9` digit keypress to the corresponding tab, or `None` for anything else.
     fn from_digit(d: char) -> Option<Tab> {
         match d {
             '1' => Some(Tab::Dashboard),
@@ -381,6 +384,7 @@ impl Tab {
             '6' => Some(Tab::Monitor),
             '7' => Some(Tab::Tools),
             '8' => Some(Tab::ServiceRestore),
+            '9' => Some(Tab::Router),
             _ => None,
         }
     }
@@ -607,6 +611,136 @@ impl RestoreCredDialog {
     }
 }
 
+/// Which router phase the configuration dialog is prompting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RouterDialogStep {
+    Harden,
+    ConsoleLockdown,
+}
+
+/// Modal configuration dialog for Router Phase 1 & Phase 2 operations.
+pub(crate) struct RouterConfigDialog {
+    step: RouterDialogStep,
+    fields: [String; 4],
+    focused: usize,
+}
+
+/// Auto-detect CCDC team number from WAN interface IP `172.31.{20+T}.2/29`.
+fn detect_vyos_team_number() -> Option<u8> {
+    use std::process::Command;
+    let out = Command::new("ip").args(["-4", "addr", "show"]).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for word in text.split_whitespace() {
+        if let Some(ip) = word.split('/').next() {
+            let parts: Vec<&str> = ip.split('.').collect();
+            if parts.len() == 4 && parts[0] == "172" && parts[1] == "31" {
+                if let Ok(octet) = parts[2].parse::<u8>() {
+                    if (21..=40).contains(&octet) {
+                        return Some(octet - 20);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+impl RouterConfigDialog {
+    fn new(step: RouterDialogStep) -> Self {
+        let fields = match step {
+            RouterDialogStep::Harden => {
+                let team_str = detect_vyos_team_number()
+                    .map(|t| t.to_string())
+                    .unwrap_or_default();
+                [
+                    team_str,
+                    "ChangeMeNowCCDC2026!".into(),
+                    "172.17.0.0/24".into(),
+                    String::new(),
+                ]
+            }
+            RouterDialogStep::ConsoleLockdown => [
+                "ChangeMeNowCCDC2026!".into(),
+                "no".into(),
+                String::new(),
+                String::new(),
+            ],
+        };
+        Self {
+            step,
+            fields,
+            focused: 0,
+        }
+    }
+
+    fn field_count(&self) -> usize {
+        match self.step {
+            RouterDialogStep::Harden => 4,
+            RouterDialogStep::ConsoleLockdown => 2,
+        }
+    }
+
+    fn field_label(&self, idx: usize) -> &'static str {
+        match self.step {
+            RouterDialogStep::Harden => match idx {
+                0 => "CCDC Team Number [1-20]",
+                1 => "New 'vyos' Admin Password",
+                2 => "Management Subnet (wkst)",
+                3 => "SSH Public Key (optional)",
+                _ => "",
+            },
+            RouterDialogStep::ConsoleLockdown => match idx {
+                0 => "New 'vyos' Console Password",
+                1 => "Force Override Active SSH Check? (yes/no)",
+                _ => "",
+            },
+        }
+    }
+
+    fn into_cli_args(self) -> (&'static str, crate::router::CliArgs) {
+        match self.step {
+            RouterDialogStep::Harden => {
+                let team: Option<u8> = self.fields[0].trim().parse().ok();
+                let pass = self.fields[1].clone();
+                let mgmt = if self.fields[2].trim().is_empty() {
+                    "172.17.0.0/24".to_string()
+                } else {
+                    self.fields[2].trim().to_string()
+                };
+                let ssh_key = if self.fields[3].trim().is_empty() {
+                    None
+                } else {
+                    Some(self.fields[3].trim().to_string())
+                };
+                (
+                    "harden",
+                    crate::router::CliArgs {
+                        harden: true,
+                        team,
+                        pass: Some(pass),
+                        mgmt_subnet: Some(mgmt),
+                        ssh_key,
+                        ..Default::default()
+                    },
+                )
+            }
+            RouterDialogStep::ConsoleLockdown => {
+                let pass = self.fields[0].clone();
+                let force = self.fields[1].trim().eq_ignore_ascii_case("yes");
+                (
+                    "console_lockdown",
+                    crate::router::CliArgs {
+                        console_lockdown: true,
+                        pass: Some(pass),
+                        force,
+                        ..Default::default()
+                    },
+                )
+            }
+        }
+    }
+}
+
 pub struct App {
     pub box_type: BoxType,
     pub tab: Tab,
@@ -723,6 +857,21 @@ pub struct App {
     pub baseline_present: bool,
     /// Credential input dialog shown before OpenCart / PrestaShop restore.
     restore_cred_dialog: Option<RestoreCredDialog>,
+    // ── Router tab state ─────────────────────────────────────────────────────
+    /// Cursor position in the router step list.
+    pub router_cursor: usize,
+    /// True while a router operation is running in the background.
+    pub router_running: bool,
+    /// Output lines from the last/current router run.
+    pub router_log: Vec<String>,
+    /// How many lines the router output panel is scrolled up from the bottom.
+    pub router_log_scroll: usize,
+    /// Signal channel: empty string = done, non-empty = log line.
+    router_progress_tx: Sender<String>,
+    /// Receiver end of the router progress channel.
+    router_progress_rx: Receiver<String>,
+    /// Modal dialog for collecting Phase 1/2 router credentials.
+    pub(crate) router_config_dialog: Option<RouterConfigDialog>,
 }
 
 impl App {
@@ -745,6 +894,7 @@ impl App {
         let (monitor_progress_tx, monitor_progress_rx) = mpsc::channel::<String>();
         let (backups_progress_tx, backups_progress_rx) = mpsc::channel::<String>();
         let (restore_progress_tx, restore_progress_rx) = mpsc::channel::<String>();
+        let (router_progress_tx, router_progress_rx) = mpsc::channel::<String>();
         let (_download_result_tx_placeholder, download_result_rx) = mpsc::channel::<String>();
         let scan_selected = vec![true; SCAN_MODULES.len()];
         let authorized_users = vec!["root".to_string()];
@@ -813,6 +963,13 @@ impl App {
             restore_progress_rx,
             baseline_present: Self::detect_baseline(),
             restore_cred_dialog: None,
+            router_cursor: 0,
+            router_running: false,
+            router_log: Vec::new(),
+            router_log_scroll: 0,
+            router_progress_tx,
+            router_progress_rx,
+            router_config_dialog: None,
         }
     }
 
@@ -908,6 +1065,14 @@ impl App {
                 self.restore_running = false;
             } else {
                 self.restore_log.push(p);
+            }
+        }
+        // Drain router progress: empty string = done, non-empty = log line.
+        while let Ok(p) = self.router_progress_rx.try_recv() {
+            if p.is_empty() {
+                self.router_running = false;
+            } else {
+                self.router_log.push(p);
             }
         }
         // Drain completed auto-scan threads.
@@ -1216,6 +1381,54 @@ impl App {
         });
     }
 
+    /// Spawn a background thread to run the selected router operation.
+    fn start_router(
+        &mut self,
+        step_id: &'static str,
+        custom_args: Option<crate::router::CliArgs>,
+    ) {
+        if self.router_running {
+            return;
+        }
+        self.router_running = true;
+        self.router_log.clear();
+        self.router_log_scroll = 0;
+
+        let progress_tx = self.router_progress_tx.clone();
+        let label = crate::router::ROUTER_STEPS
+            .iter()
+            .find(|s| s.id == step_id)
+            .map(|s| s.label)
+            .unwrap_or(step_id);
+
+        std::thread::spawn(move || {
+            let _ = progress_tx.send(format!("Starting: {}…", label));
+            let report = PathBuf::from("/tmp/defender-router.log");
+            let ctx = DefenderContext::new(report, false)
+                .with_progress(progress_tx.clone());
+            let args = custom_args.unwrap_or_else(|| crate::router::CliArgs {
+                audit: step_id == "audit",
+                diff: if step_id == "diff" { Some(None) } else { None },
+                harden: step_id == "harden",
+                console_lockdown: step_id == "console_lockdown",
+                interactive: false,
+                team: None,
+                mgmt_subnet: None,
+                user: None,
+                pass: None,
+                ssh_key: None,
+                commit_timeout: None,
+                no_confirm: false,
+                force: false,
+                dry_run: false,
+            });
+            if let Err(e) = crate::router::run(&ctx, &args) {
+                let _ = progress_tx.send(format!("ERROR: {}", e));
+            }
+            let _ = progress_tx.send(String::new()); // signal done
+        });
+    }
+
     /// Export the current findings as a timestamped IR report.
     /// Returns the path written on success, or an error string.
     fn export_ir_report(&self) -> Result<String, String> {
@@ -1490,9 +1703,51 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                     continue;
                 }
 
+                if let Some(ref mut dlg) = app.router_config_dialog {
+                    match key.code {
+                        KeyCode::Esc => {
+                            app.router_config_dialog = None;
+                        }
+                        KeyCode::Tab | KeyCode::Down => {
+                            dlg.focused = (dlg.focused + 1).min(dlg.field_count() - 1);
+                        }
+                        KeyCode::BackTab | KeyCode::Up => {
+                            dlg.focused = dlg.focused.saturating_sub(1);
+                        }
+                        KeyCode::Enter => {
+                            let max_field = dlg.field_count() - 1;
+                            if dlg.focused == max_field {
+                                let pass_idx = match dlg.step {
+                                    RouterDialogStep::Harden => 1,
+                                    RouterDialogStep::ConsoleLockdown => 0,
+                                };
+                                if dlg.fields[pass_idx].trim().is_empty() {
+                                    // Required password is empty
+                                    return Ok(());
+                                }
+                                let dialog = app.router_config_dialog.take().unwrap();
+                                let (step_id, cli_args) = dialog.into_cli_args();
+                                app.start_router(step_id, Some(cli_args));
+                            } else {
+                                dlg.focused += 1;
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            let idx = dlg.focused;
+                            dlg.fields[idx].pop();
+                        }
+                        KeyCode::Char(c) => {
+                            let idx = dlg.focused;
+                            dlg.fields[idx].push(c);
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 match key.code {
                     KeyCode::Char('q') => break,
-                    KeyCode::Char(d @ '1'..='8') => {
+                    KeyCode::Char(d @ '1'..='9') => {
                         if let Some(tab) = Tab::from_digit(d) {
                             app.tab = tab;
                         }
@@ -1559,6 +1814,12 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                 .checked_sub(1)
                                 .unwrap_or(RESTORE_SERVICES.len() - 1);
                         }
+                        Tab::Router => {
+                            app.router_cursor = app
+                                .router_cursor
+                                .checked_sub(1)
+                                .unwrap_or(crate::router::ROUTER_STEPS.len() - 1);
+                        }
                         _ => {}
                     },
                     KeyCode::Down => match app.tab {
@@ -1601,6 +1862,9 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                         Tab::ServiceRestore => {
                             app.restore_cursor = (app.restore_cursor + 1) % RESTORE_SERVICES.len();
                         }
+                        Tab::Router => {
+                            app.router_cursor = (app.router_cursor + 1) % crate::router::ROUTER_STEPS.len();
+                        }
                         _ => {}
                     },
                     KeyCode::Enter => {
@@ -1636,6 +1900,22 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                     ));
                                 }
                                 _ => app.start_restore(service_id, None),
+                            }
+                        } else if app.tab == Tab::Router && !app.router_running {
+                            let step_id = crate::router::ROUTER_STEPS[app.router_cursor].id;
+                            match step_id {
+                                "harden" => {
+                                    app.router_config_dialog =
+                                        Some(RouterConfigDialog::new(RouterDialogStep::Harden));
+                                }
+                                "console_lockdown" => {
+                                    app.router_config_dialog = Some(RouterConfigDialog::new(
+                                        RouterDialogStep::ConsoleLockdown,
+                                    ));
+                                }
+                                _ => {
+                                    app.start_router(step_id, None);
+                                }
                             }
                         }
                     }
@@ -1869,6 +2149,9 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
         Tab::ServiceRestore => {
             render_service_restore(f, rows[1], app);
         }
+        Tab::Router => {
+            render_router(f, rows[1], app);
+        }
     }
 
     // Wizard overlay renders on top of the full terminal area.
@@ -1879,6 +2162,11 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
     // Credential dialog renders on top of the service restore tab.
     if let Some(ref dlg) = app.restore_cred_dialog {
         render_restore_cred_dialog(f, size, dlg);
+    }
+
+    // Router configuration dialog renders on top of the router tab.
+    if let Some(ref dlg) = app.router_config_dialog {
+        render_router_config_dialog(f, size, dlg);
     }
 
     // User input modal renders on top of everything.
@@ -2048,7 +2336,7 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
 
     // global quit + tab switch always shown
     right.extend(kb("q", "quit", key_color));
-    right.extend(kb("1-8", "tabs", key_color));
+    right.extend(kb("1-9", "tabs", key_color));
 
     // tab-specific binds
     match app.tab {
@@ -2118,6 +2406,14 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
             } else {
                 right.extend(kb("↑↓", "select", key_color));
                 right.extend(kb("Enter", "restore", key_color));
+            }
+        }
+        Tab::Router => {
+            if app.router_running {
+                right.push(Span::styled("running…", Style::default().fg(warn_color)));
+            } else {
+                right.extend(kb("↑↓", "select", key_color));
+                right.extend(kb("Enter", "run operation", key_color));
             }
         }
     }
@@ -3188,4 +3484,173 @@ fn render_restore_cred_dialog(f: &mut ratatui::Frame, area: Rect, dlg: &RestoreC
         Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
         rows[n + 1],
     );
+}
+
+/// Render the configuration input dialog for router Phase 1 / Phase 2 operations.
+fn render_router_config_dialog(f: &mut ratatui::Frame, area: Rect, dlg: &RouterConfigDialog) {
+    use crate::wizards::modal_popup;
+
+    let title = match dlg.step {
+        RouterDialogStep::Harden => " Phase 1: Router Hardening Configuration ",
+        RouterDialogStep::ConsoleLockdown => " Phase 2: Console Lockdown (Nuke SSH) ",
+    };
+    let inner = modal_popup(f, area, 65, 75, title);
+
+    let n = dlg.field_count();
+    let mut constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Length(3)).collect();
+    constraints.push(Constraint::Min(0));
+    constraints.push(Constraint::Length(2));
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    for i in 0..n {
+        let is_focused = i == dlg.focused;
+        let label = dlg.field_label(i);
+        let value = &dlg.fields[i];
+        let display = if label.to_lowercase().contains("password") {
+            "*".repeat(value.len())
+        } else {
+            value.clone()
+        };
+        let border_style = if is_focused {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let text = if is_focused {
+            format!("{}_", display)
+        } else {
+            display
+        };
+        f.render_widget(
+            Paragraph::new(text).block(
+                Block::default()
+                    .title(format!(" {} ", label))
+                    .borders(Borders::ALL)
+                    .border_style(border_style),
+            ),
+            rows[i],
+        );
+    }
+
+    let hint = if dlg.focused == n - 1 {
+        "[Tab/↓] prev field   [Enter] apply & run   [Esc] cancel"
+    } else {
+        "[Tab/↓] next field   [↑] prev field   [Enter] advance   [Esc] cancel"
+    };
+    f.render_widget(
+        Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
+        rows[n + 1],
+    );
+}
+
+/// Render the Router tab: operations list on the left, output log on the right.
+fn render_router(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+        .split(area);
+
+    let (list_title, list_border) = if app.router_running {
+        (
+            " VyOS Operations — running… ",
+            Style::default().fg(Color::Yellow),
+        )
+    } else {
+        (" VyOS Operations ", Style::default().fg(Color::Cyan))
+    };
+
+    let items: Vec<ListItem> = crate::router::ROUTER_STEPS
+        .iter()
+        .enumerate()
+        .map(|(i, step)| {
+            let is_cursor = i == app.router_cursor;
+            let running_tag = if app.router_running && is_cursor {
+                " ↻"
+            } else {
+                ""
+            };
+            let style = if is_cursor {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let prefix = if is_cursor { "▶ " } else { "  " };
+            ListItem::new(vec![
+                Line::from(Span::styled(
+                    format!("{}{}{}", prefix, step.label, running_tag),
+                    style,
+                )),
+                Line::from(Span::styled(
+                    format!("    {}", step.description),
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ])
+        })
+        .collect();
+
+    f.render_widget(
+        List::new(items).block(
+            Block::default()
+                .title(list_title)
+                .borders(Borders::ALL)
+                .border_style(list_border),
+        ),
+        cols[0],
+    );
+
+    // Right: output log
+    let log_block = Block::default()
+        .title(" Output ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    if app.router_log.is_empty() {
+        let msg = if app.router_running {
+            "Running…"
+        } else {
+            "Select a VyOS operation and press [Enter] to run"
+        };
+        f.render_widget(
+            Paragraph::new(msg)
+                .block(log_block)
+                .style(Style::default().fg(Color::DarkGray)),
+            cols[1],
+        );
+    } else {
+        let inner = log_block.inner(cols[1]);
+        f.render_widget(log_block, cols[1]);
+
+        let visible = inner.height as usize;
+        let total = app.router_log.len();
+        let start = total.saturating_sub(visible + app.router_log_scroll);
+
+        let lines: Vec<Line> = app
+            .router_log
+            .iter()
+            .skip(start)
+            .take(visible)
+            .map(|s| {
+                let style = if s.starts_with('✓') || s.contains("[ OK ]") {
+                    Style::default().fg(Color::Green)
+                } else if s.starts_with('✗') || s.contains("[ERR ]") || s.contains("ERROR") {
+                    Style::default().fg(Color::Red)
+                } else if s.starts_with('→') || s.contains("[INFO]") {
+                    Style::default().fg(Color::Cyan)
+                } else if s.contains("[WARN]") || s.contains("[!]") {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                };
+                Line::from(Span::styled(s.clone(), style))
+            })
+            .collect();
+
+        f.render_widget(Paragraph::new(lines), inner);
+    }
 }

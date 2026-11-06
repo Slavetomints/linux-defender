@@ -12,6 +12,7 @@ pub enum BoxType {
     Mail,
     Splunk,
     General,
+    Router,
 }
 
 impl BoxType {
@@ -21,6 +22,7 @@ impl BoxType {
             Self::Mail => "Mail",
             Self::Splunk => "Splunk",
             Self::General => "General",
+            Self::Router => "Router",
         }
     }
 
@@ -32,6 +34,7 @@ impl BoxType {
             }
             Self::Splunk => "Debian Splunk — Web :8000  Mgmt :8089  SSH :22",
             Self::General => "SSH :22 + general system services",
+            Self::Router => "VyOS 1.4 Router — SSH :22, Control Plane & Transit Firewall",
         }
     }
 
@@ -91,14 +94,20 @@ impl BoxType {
                     port: 22,
                 },
             ],
-            Self::General => &[ServiceConfig {
+            Self::General | Self::Router => &[ServiceConfig {
                 name: "SSH",
                 port: 22,
             }],
         }
     }
 
-    pub const ALL: &'static [BoxType] = &[Self::Web, Self::Mail, Self::Splunk, Self::General];
+    pub const ALL: &'static [BoxType] = &[
+        Self::Web,
+        Self::Mail,
+        Self::Splunk,
+        Self::General,
+        Self::Router,
+    ];
 
     /// Rich service check definitions for this box type.
     pub fn checks(self) -> &'static [ServiceCheck] {
@@ -106,7 +115,7 @@ impl BoxType {
             Self::Web => WEB_CHECKS,
             Self::Mail => MAIL_CHECKS,
             Self::Splunk => SPLUNK_CHECKS,
-            Self::General => GENERAL_CHECKS,
+            Self::General | Self::Router => GENERAL_CHECKS,
         }
     }
 }
@@ -126,6 +135,14 @@ impl ServiceConfig {
 
 /// Probe the filesystem to guess what kind of box this is.
 pub fn detect_box_type() -> BoxType {
+    if Path::new("/opt/vyatta").exists()
+        || Path::new("/config/config.boot").exists()
+        || std::fs::read_to_string("/etc/os-release")
+            .map(|s| s.contains("VyOS"))
+            .unwrap_or(false)
+    {
+        return BoxType::Router;
+    }
     if Path::new("/opt/splunk").exists() || Path::new("/opt/splunkforwarder").exists() {
         return BoxType::Splunk;
     }

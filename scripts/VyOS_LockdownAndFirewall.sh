@@ -13,7 +13,8 @@
 
 # Ensure script executes in vbash and vyattacfg group if running on VyOS
 if [ -x /bin/vbash ] && [ "$(id -g -n 2>/dev/null)" != 'vyattacfg' ] ; then
-    exec sg vyattacfg -c "/bin/vbash $(readlink -f "$0") $@"
+    ARGS=$(printf "%q " "$@")
+    exec sg vyattacfg -c "/bin/vbash $(readlink -f "$0") $ARGS"
 fi
 
 # Source VyOS script environment
@@ -173,7 +174,12 @@ done
 
 # Default to interactive if no mode supplied
 if [ -z "$MODE" ]; then
-    MODE="interactive"
+    if [ -t 0 ]; then
+        MODE="interactive"
+    else
+        echo "[-] Error: No operation mode specified and non-interactive input detected."
+        usage
+    fi
 fi
 
 # ─── Interactive Wizard ───────────────────────────────────────────────────────
@@ -252,7 +258,11 @@ if [ "$MODE" == "diff" ]; then
     "$0" --audit --stdout > "$TMP_CURRENT"
     log_info "Comparing current state against: $PREV_LOG"
     echo "======================================================================"
-    diff -u --color=always "$PREV_LOG" "$TMP_CURRENT" | less -R
+    if [ -t 1 ]; then
+        diff -u --color=always "$PREV_LOG" "$TMP_CURRENT" | less -R
+    else
+        diff -u --color=never "$PREV_LOG" "$TMP_CURRENT"
+    fi
     rm -f "$TMP_CURRENT"
     exit 0
 fi
@@ -400,8 +410,12 @@ if [ "$MODE" == "console-lockdown" ]; then
     echo "======================================================================"
 
     if [ -z "$ADMIN_PASS" ]; then
-        read -r -s -p "Enter NEW password for '$ADMIN_USER' console login: " ADMIN_PASS
-        echo ""
+        if [ -t 0 ]; then
+            read -r -s -p "Enter NEW password for '$ADMIN_USER' console login: " ADMIN_PASS
+            echo ""
+        else
+            die "No password supplied for '$ADMIN_USER' (pass --pass <password>)"
+        fi
     fi
 
     if [ -d /config ] && [ -w /config ]; then
@@ -489,8 +503,12 @@ if [ "$MODE" == "harden" ]; then
     echo "======================================================================"
 
     if [ -z "$ADMIN_PASS" ]; then
-        read -r -s -p "Enter NEW password for '$ADMIN_USER': " ADMIN_PASS
-        echo ""
+        if [ -t 0 ]; then
+            read -r -s -p "Enter NEW password for '$ADMIN_USER': " ADMIN_PASS
+            echo ""
+        else
+            die "No password supplied for '$ADMIN_USER' (pass --pass <password>)"
+        fi
         if [ -z "$ADMIN_PASS" ]; then
             die "Password cannot be empty!"
         fi

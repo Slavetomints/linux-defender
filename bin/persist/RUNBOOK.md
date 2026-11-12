@@ -1,7 +1,7 @@
 # Persistence Test Scripts — Runbook
 
 These scripts plant known persistence artifacts so the `linux-defender` detection
-modules have something real to find. Each one has a paired `defender-cli` flag that
+modules have something real to find. Each one has a paired `linux-defender` flag that
 should catch it. Use them to verify your detection coverage before competition.
 
 ---
@@ -43,7 +43,7 @@ ATTACKER_PORT=80
 | 06 | `06_at_job.sh` | Delayed `at` job scheduled far out | `--at-jobs` | Requires `at`/`atd` installed |
 | 07 | `07_startup_script.sh` | Payload in `/etc/profile.d/` | `--startup-scripts` | Sourced on every interactive login |
 | 08 | `08_xdg_autostart.sh` | `.desktop` file in XDG autostart | none listed | Fires on desktop session start |
-| 09 | `09_php_shell.sh` | eval+base64 PHP webshell in web root | `--php-shells` | Drops to `/var/www/html/` |
+| 09 | `09_php_shell.sh` | eval+base64 PHP webshell in web root | `--webshells` | Drops to `/var/www/html/` |
 | 10 | `10_suid_binary.sh` | SUID-root copy of `/usr/bin/id` | `--suid` | Find with `find -perm -4000` |
 | 11 | `11_capabilities.sh` | `cap_net_raw` granted to binary | `--capabilities` | Requires `libcap` (usually installed) |
 | 12 | `12_backdoor_user.sh` | Account `defender-test-backdoor` with `/bin/bash` | `--users` | `useradd --create-home` |
@@ -62,30 +62,30 @@ ATTACKER_PORT=80
 Run this after deploying all scripts to confirm your scanner catches each one:
 
 ```bash
-defender-cli anti-persistence --cron
-defender-cli anti-persistence --ssh-keys
-defender-cli anti-persistence --systemd
-defender-cli anti-persistence --rc-local
-defender-cli anti-persistence --ld-preload
-defender-cli anti-persistence --at-jobs
-defender-cli anti-persistence --startup-scripts
-defender-cli anti-persistence --php-shells
-defender-cli anti-persistence --suid
-defender-cli anti-persistence --capabilities
-defender-cli anti-persistence --users
-defender-cli anti-persistence --systemd-timers
-defender-cli anti-persistence --polkit
-defender-cli anti-persistence --git-hooks
-defender-cli anti-persistence --cron-system
-defender-cli anti-persistence --prompt-command
-defender-cli anti-persistence --shell-aliases
-defender-cli anti-persistence --sudoers
+linux-defender anti-persistence --cron
+linux-defender anti-persistence --ssh-keys
+linux-defender anti-persistence --systemd
+linux-defender anti-persistence --rc-local
+linux-defender anti-persistence --ld-preload
+linux-defender anti-persistence --at-jobs
+linux-defender anti-persistence --startup-scripts
+linux-defender anti-persistence --webshells
+linux-defender anti-persistence --suid
+linux-defender anti-persistence --capabilities
+linux-defender anti-persistence --users
+linux-defender anti-persistence --systemd-timers
+linux-defender anti-persistence --polkit
+linux-defender anti-persistence --git-hooks
+linux-defender anti-persistence --cron-system
+linux-defender anti-persistence --prompt-command
+linux-defender anti-persistence --shell-aliases
+linux-defender anti-persistence --sudoers
 ```
 
 Or run everything at once:
 
 ```bash
-defender-cli anti-persistence --all
+linux-defender anti-persistence --all
 ```
 
 ---

@@ -39,7 +39,7 @@ impl UserAccount {
     ///
     /// ```
     /// use std::path::PathBuf;
-    /// use defender_cli::core::UserAccount;
+    /// use linux_defender::core::UserAccount;
     ///
     /// let alice = UserAccount {
     ///     name: "alice".into(),

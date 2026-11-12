@@ -95,7 +95,7 @@ fn missing_web_root_is_an_error_not_a_panic() {
 /// this just checks the field parser is exported correctly.
 #[test]
 fn os_release_field_parser_is_accessible() {
-    use defender_cli::service_restore::distro::os_release_field;
+    use linux_defender::service_restore::distro::os_release_field;
     let text = "ID=arch\nID_LIKE=\nPRETTY_NAME=\"Arch Linux\"\n";
     assert_eq!(os_release_field(text, "ID"), Some("arch"));
     assert_eq!(os_release_field(text, "MISSING"), None);

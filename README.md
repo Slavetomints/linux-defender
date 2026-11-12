@@ -17,7 +17,7 @@
 # build a static binary (no shared libs — drop it anywhere)
 rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl
-# binary at target/x86_64-unknown-linux-musl/release/defender-cli
+# binary at target/x86_64-unknown-linux-musl/release/linux-defender
 
 # or a normal build
 cargo build --release
@@ -25,13 +25,13 @@ cargo build --release
 
 ```sh
 # interactive TUI (auto-detects box type, runs all scan modules in background)
-sudo ./defender-cli
+sudo ./linux-defender
 
 # one-shot CLI
-sudo ./defender-cli anti-persistence --all
-sudo ./defender-cli monitoring --all
-sudo ./defender-cli system-hardening --user-permissions --services --programs --configs
-sudo ./defender-cli backups --all --save-location /root/baseline
+sudo ./linux-defender anti-persistence --all
+sudo ./linux-defender monitoring --all
+sudo ./linux-defender system-hardening --user-permissions --services --programs --configs
+sudo ./linux-defender backups --all --save-location /root/baseline
 ```
 
 Tagged pushes (`v*`) build and attach both gnu and static musl binaries to a GitHub Release.
@@ -84,7 +84,7 @@ Hunts for Red Team persistence mechanisms. Every destructive action prompts `y/N
 | `--users` | prompts | Reviews every account in `/etc/passwd`, `userdel`s ones you flag |
 | `--ssh-keys` | prompts | Finds `authorized_keys` per account, removes on confirmation |
 | `--at-jobs` | prompts | Reviews `atq` jobs, `atrm`s flagged ones |
-| `--php-shells` | prompts | Scores files under `/var/www/html` against webshell primitives |
+| `--webshells` | prompts | Scores files under `/var/www/html` against webshell primitives |
 | `--ld-preload` | prompts | Checks `/etc/ld.so.preload` and `$LD_PRELOAD` for loader hijacking |
 | `--rc-local` | prompts | Reports boot commands in `rc.local`, offers to blank them |
 | `--xdg-autostart` | prompts | Lists autostart `.desktop` entries, offers to remove flagged ones |
@@ -171,13 +171,13 @@ Applies hardening in one shot. Steps that require root say so and exit cleanly i
 
 ```sh
 # At competition start — snapshot the whole system
-sudo defender-cli backups --all --save-location /root/baseline
+sudo linux-defender backups --all --save-location /root/baseline
 
 # Later — see what Red Team touched
-sudo defender-cli backups --compare-hashes --save-location /root/baseline
+sudo linux-defender backups --compare-hashes --save-location /root/baseline
 
 # Restore from snapshot
-sudo defender-cli backups --restore --save-location /root/baseline
+sudo linux-defender backups --restore --save-location /root/baseline
 ```
 
 ### `service-restore`
@@ -199,7 +199,7 @@ Polls all scored ports for the detected box type and displays uptime % and avera
 Protocol-level checks (SMTP banner, IMAP `* OK`, POP3 `+OK`) go beyond a bare TCP connect.
 
 ```sh
-defender-cli score-check
+linux-defender score-check
 ```
 
 ---

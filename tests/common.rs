@@ -8,11 +8,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use defender_cli::core::DefenderContext;
+use linux_defender::core::DefenderContext;
 use tempfile::TempDir;
 
 /// The binary under test, built by Cargo for this integration test run.
-pub const BIN: &str = env!("CARGO_BIN_EXE_defender-cli");
+pub const BIN: &str = env!("CARGO_BIN_EXE_linux-defender");
 
 /// Run the CLI with `args`, using `dir` as the working directory so the report
 /// file it writes lands somewhere disposable.
@@ -21,7 +21,7 @@ pub fn run_cli(dir: &Path, args: &[&str]) -> Output {
         .args(args)
         .current_dir(dir)
         .output()
-        .expect("failed to execute defender-cli")
+        .expect("failed to execute linux-defender")
 }
 
 pub fn stdout(out: &Output) -> String {

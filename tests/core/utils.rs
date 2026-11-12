@@ -1,6 +1,6 @@
 //! Covers `src/core/utils.rs`.
 
-use defender_cli::core::{DefenderError, collect_users, require_root};
+use linux_defender::core::{DefenderError, collect_users, require_root};
 
 #[test]
 fn collect_users_reads_every_account_from_passwd() {

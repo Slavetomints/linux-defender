@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use defender_cli::anti_persistence::webshells;
+use linux_defender::anti_persistence::webshells;
 use tempfile::TempDir;
 
 use crate::common::write_file;

@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use defender_cli::backups::{all, hash};
+use linux_defender::backups::{all, hash};
 use tempfile::TempDir;
 
 use crate::common::{as_refs, config_tree, ctx};

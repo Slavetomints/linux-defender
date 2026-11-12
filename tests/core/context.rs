@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use defender_cli::core::DefenderContext;
+use linux_defender::core::DefenderContext;
 use tempfile::TempDir;
 
 #[test]

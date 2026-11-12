@@ -8,7 +8,7 @@
 //! # Workflow
 //!
 //! ```text
-//! defender-cli backups --restore --save-location /path/to/backup-dir
+//! linux-defender backups --restore --save-location /path/to/backup-dir
 //! ```
 //!
 //! The backup directory must contain `H@shes.txt` and the `.bak` copies

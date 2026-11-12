@@ -335,25 +335,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "defender-cli"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "crossterm",
- "libc",
- "nix",
- "ratatui",
- "regex",
- "sha2",
- "tempfile",
- "thiserror",
- "walkdir",
- "zip",
-]
-
-[[package]]
 name = "derive_arbitrary"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -572,6 +553,25 @@ name = "libc"
 version = "0.2.180"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bcc35a38544a891a5f7c865aca548a982ccb3b8650a5b06d0fd33a10283c56fc"
+
+[[package]]
+name = "linux-defender"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "crossterm",
+ "libc",
+ "nix",
+ "ratatui",
+ "regex",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "walkdir",
+ "zip",
+]
 
 [[package]]
 name = "linux-raw-sys"

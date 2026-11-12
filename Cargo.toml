@@ -1,5 +1,5 @@
 [package]
-name = "defender-cli"
+name = "linux-defender"
 version = "1.0.0"
 edition = "2024"
 # Verified in CI by .github/workflows/msrv.yml. Edition 2024 sets a hard floor
@@ -13,11 +13,11 @@ license = "MIT"
 autotests = false
 
 [lib]
-name = "defender_cli"
+name = "linux_defender"
 path = "src/lib.rs"
 
 [[bin]]
-name = "defender-cli"
+name = "linux-defender"
 path = "src/main.rs"
 
 [dependencies]

@@ -84,7 +84,7 @@ pub const UNTRUSTED_EXEC_DIRS: &[&str] = &["/tmp/", "/var/tmp/", "/dev/shm/", "/
 /// # Examples
 ///
 /// ```
-/// use defender_cli::core::scan::suspicious_matches;
+/// use linux_defender::core::scan::suspicious_matches;
 ///
 /// // Ordinary configuration raises nothing.
 /// assert!(suspicious_matches("export PATH=$PATH:/usr/local/bin").is_empty());
@@ -113,7 +113,7 @@ pub fn suspicious_matches(text: &str) -> Vec<&'static str> {
 /// # Examples
 ///
 /// ```
-/// use defender_cli::core::scan::references_untrusted_dir;
+/// use linux_defender::core::scan::references_untrusted_dir;
 ///
 /// assert!(references_untrusted_dir(r#"RUN+="/tmp/payload""#));
 /// assert!(!references_untrusted_dir(r#"RUN+="/usr/bin/logger""#));
@@ -128,7 +128,7 @@ pub fn references_untrusted_dir(text: &str) -> bool {
 /// # Examples
 ///
 /// ```
-/// use defender_cli::core::scan::effective_line;
+/// use linux_defender::core::scan::effective_line;
 ///
 /// assert_eq!(effective_line("  exit 0  "), Some("exit 0"));
 /// assert_eq!(effective_line("# installed by the admin"), None);

@@ -11,8 +11,8 @@ use chrono::Local;
 use clap::{Parser, Subcommand};
 use nix::unistd::Uid;
 
-use defender_cli::core::DefenderContext;
-use defender_cli::{anti_persistence, backups, monitoring, service_restore, system_hardening};
+use linux_defender::core::DefenderContext;
+use linux_defender::{anti_persistence, backups, monitoring, service_restore, system_hardening};
 
 /// CCDC Helper Program
 #[derive(Parser)]
@@ -59,10 +59,10 @@ fn main() -> anyhow::Result<()> {
     // No arguments → launch the TUI, which requires root to do anything useful.
     if env::args().len() == 1 {
         if !Uid::effective().is_root() {
-            eprintln!("[!] defender must be run as root (try: sudo defender-cli)");
+            eprintln!("[!] defender must be run as root (try: sudo linux-defender)");
             std::process::exit(1);
         }
-        return defender_cli::tui::run();
+        return linux_defender::tui::run();
     }
 
     // Parse first so clap handles --help/--version (and reports usage errors)

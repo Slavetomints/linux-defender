@@ -3,7 +3,7 @@
 
 use std::fs;
 
-use defender_cli::core::scan;
+use linux_defender::core::scan;
 use tempfile::TempDir;
 
 use crate::common::write_file;

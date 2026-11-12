@@ -99,7 +99,7 @@ pub fn parse_hashes_file(path: &Path) -> Result<BTreeMap<String, String>> {
 ///
 /// ```
 /// use std::collections::BTreeMap;
-/// use defender_cli::backups::compare_hashes::compare;
+/// use linux_defender::backups::compare_hashes::compare;
 ///
 /// let previous: BTreeMap<String, String> = [
 ///     ("/etc/hosts".to_string(), "aaa".to_string()),

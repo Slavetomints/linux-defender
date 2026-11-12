@@ -21,7 +21,7 @@ use std::process::Command;
 
 use crate::core::{
     Action, BoxType, DefenderContext, DefenderError, Finding, Result, Severity, Verdict,
-    detect_box_type, require_root,
+    detect_box_type, is_scored_unit, require_root,
 };
 
 /// Services that must never be disabled regardless of box type.
@@ -86,6 +86,11 @@ pub fn allow_list(box_type: BoxType) -> &'static [&'static str] {
 pub fn is_allowed(service_name: &str, box_type: BoxType) -> bool {
     // Core systemd units are always kept on every box.
     if service_name.starts_with("systemd-") {
+        return true;
+    }
+    // Scored services and their dependencies (Splunkd, mariadb, NetworkManager,
+    // sssd, ...) are never disabled, whatever box type we think this is.
+    if is_scored_unit(service_name) {
         return true;
     }
     // Baseline services that must never be disabled regardless of box type.
@@ -324,12 +329,21 @@ mod tests {
     }
 
     #[test]
-    fn nginx_not_allowed_on_splunk_box() {
-        assert!(!is_allowed("nginx", BoxType::Splunk));
+    fn scored_units_are_never_disabled_on_any_box() {
+        for box_type in BoxType::ALL {
+            for svc in ["Splunkd", "mariadb", "mysql", "NetworkManager", "networking", "sssd", "php8.1-fpm"] {
+                assert!(is_allowed(svc, *box_type), "{} disabled on {:?}", svc, box_type);
+            }
+        }
     }
 
     #[test]
-    fn postfix_not_allowed_on_web_box() {
-        assert!(!is_allowed("postfix", BoxType::Web));
+    fn cups_not_allowed_on_splunk_box() {
+        assert!(!is_allowed("cups", BoxType::Splunk));
+    }
+
+    #[test]
+    fn avahi_not_allowed_on_web_box() {
+        assert!(!is_allowed("avahi-daemon", BoxType::Web));
     }
 }

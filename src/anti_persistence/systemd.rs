@@ -9,7 +9,10 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::core::scan::suspicious_matches;
-use crate::core::{Action, DefenderContext, DefenderError, Finding, Result, Severity, prompt_yes};
+use crate::core::{
+    Action, DefenderContext, DefenderError, Finding, Result, Severity, Verdict, is_scored_unit,
+    prompt_yes,
+};
 
 /// One unit as `systemctl list-units` describes it.
 struct Service {
@@ -57,7 +60,14 @@ pub fn run(ctx: &DefenderContext) -> Result {
             println!("[+] Description: {}", service.description);
             println!("[+] Status: {}", service.status);
 
-            if prompt_yes("[?] Is this service malicious? (y/N)")? {
+            let scored = is_scored_unit(&service.name);
+            if scored {
+                println!("[!] {} backs a SCORED service -- disabling it costs uptime points", service.name);
+            }
+
+            if prompt_yes("[?] Is this service malicious? (y/N)")?
+                && (!scored || prompt_yes("[?] Really stop and disable a scored service? (y/N)")?)
+            {
                 stop_service(&service.name)?;
                 disable_service(&service.name)?;
             }
@@ -195,6 +205,45 @@ fn check_suspicious_units(ctx: &DefenderContext, services: &[Service]) -> Result
         // Log the full unit file as evidence for IR.
         ctx.log_evidence_file(unit_path);
 
+        // Never auto-destroy a scored service's unit. A backdoored Splunkd or
+        // sshd unit needs repairing, not deleting -- deleting it is a self-inflicted
+        // outage. Flag it Critical for a human instead.
+        if is_scored_unit(&service.name) {
+            ctx.log_msg(&format!(
+                "[!] {} is a scored service unit with suspicious ExecStart -- NOT removing, needs manual repair",
+                service.name
+            ));
+            ctx.emit(
+                Finding::new(
+                    Severity::Critical,
+                    "systemd",
+                    format!(
+                        "Scored service unit {} has suspicious ExecStart (left running)",
+                        service.name
+                    ),
+                    format!(
+                        "unit: {}\nexec_start: {}\nunit_path: {}\nremoved: false (scored service)",
+                        service.name, exec_start, unit_path_str
+                    ),
+                )
+                .with_path(unit_path.to_path_buf())
+                .with_context("unit_path", unit_path_str.clone())
+                .with_context("exec_start", exec_start.clone())
+                .with_context("removed", "false (scored service)")
+                .with_verdict(
+                    Verdict::Investigate,
+                    format!(
+                        "{} backs a scored service, so it was not stopped or deleted. \
+                         Check whether this ExecStart is legitimate for this box. If it was \
+                         tampered with, fix the unit (or restore it from backup / reinstall \
+                         the package), then `systemctl daemon-reload && systemctl restart {}`.",
+                        service.name, service.name
+                    ),
+                ),
+            );
+            continue;
+        }
+
         // Stop and disable before removing the file.
         ctx.run_remediation(&["systemctl", "stop", &service.name]);
         ctx.run_remediation(&["systemctl", "disable", &service.name]);
@@ -259,6 +308,18 @@ fn check_unit_content_patterns(ctx: &DefenderContext, services: &[Service]) -> R
 
         ctx.log_evidence_file(unit_path);
 
+        let action = if is_scored_unit(&service.name) {
+            Action::Manual(format!(
+                "SCORED SERVICE: repair {} in place, do not disable/delete it",
+                unit_path_str
+            ))
+        } else {
+            Action::Manual(format!(
+                "systemctl stop {} && systemctl disable {} && rm {}",
+                service.name, service.name, unit_path_str
+            ))
+        };
+
         ctx.emit(
             Finding::new(
                 Severity::High,
@@ -276,10 +337,7 @@ fn check_unit_content_patterns(ctx: &DefenderContext, services: &[Service]) -> R
                 ),
             )
             .with_path(unit_path.to_path_buf())
-            .with_action(Action::Manual(format!(
-                "systemctl stop {} && systemctl disable {} && rm {}",
-                service.name, service.name, unit_path_str
-            ))),
+            .with_action(action),
         );
     }
     Ok(())

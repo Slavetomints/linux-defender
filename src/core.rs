@@ -15,7 +15,7 @@ pub mod scan;
 pub mod utils;
 
 pub use actions::execute as execute_action;
-pub use box_type::{BoxType, ServiceConfig, detect_box_type};
+pub use box_type::{BoxType, ServiceConfig, detect_box_type, is_scored_unit};
 pub use context::DefenderContext;
 pub use error::{DefenderError, Result};
 pub use finding::{Action, Finding, Severity, Verdict};

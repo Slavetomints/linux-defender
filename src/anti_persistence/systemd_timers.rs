@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use crate::core::scan::{references_untrusted_dir, suspicious_matches};
 use crate::core::{
     DefenderContext, DefenderError, Finding, Result, Severity, Verdict, collect_accounts,
-    require_root,
+    is_scored_unit, require_root,
 };
 
 /// System-level directories that may contain `.timer` units.
@@ -237,8 +237,22 @@ fn check_service_exec(
         ctx.run_remediation(&["systemctl", "stop", unit_name]);
         ctx.run_remediation(&["systemctl", "disable", unit_name]);
 
-        // Remove both files
-        let svc_removed = ctx.remove_path_logged(service_path);
+        // Remove both files -- unless the timer points at a scored service's
+        // unit, in which case only the timer goes; the service file is left
+        // for a human to repair.
+        let svc_name = service_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let svc_removed = if is_scored_unit(&svc_name) {
+            ctx.log_msg(&format!(
+                "[!] {} backs a scored service -- removing timer only, NOT the service file",
+                svc_name
+            ));
+            false
+        } else {
+            ctx.remove_path_logged(service_path)
+        };
         let tmr_removed = ctx.remove_path_logged(timer_path);
 
         let flag_summary = if reasons.is_empty() {

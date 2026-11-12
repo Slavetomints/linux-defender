@@ -19,12 +19,16 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use crate::core::{DefenderContext, DefenderError, Result, prompt_string, prompt_string_default, prompt_yes};
+use crate::core::{
+    DefenderContext, DefenderError, Result, prompt_string, prompt_string_default, prompt_yes,
+};
 
 use super::distro::{Distro, restore_config_from_backup};
 use super::webserver::{download_file, verify_site_insecure, verify_tcp_service};
 
+/// Path to the Splunk CLI binary.
 const SPLUNK_BIN: &str = "/opt/splunk/bin/splunk";
+/// Splunk local-override config directory.
 const LOCAL_DIR: &str = "/opt/splunk/etc/system/local";
 
 /// Pinned Splunk 10.0.2 .deb URL (Debian/Ubuntu).
@@ -75,7 +79,9 @@ pub fn run(ctx: &DefenderContext, url: Option<&str>, creds: Option<&SplunkCreden
         ctx.progress(&format!("[!] Splunk web UI check failed: {e}"));
     }
     if let Err(e) = verify_tcp_service(8089, "", ctx) {
-        ctx.progress(&format!("[!] Splunk management port (8089) check failed: {e}"));
+        ctx.progress(&format!(
+            "[!] Splunk management port (8089) check failed: {e}"
+        ));
     }
 
     Ok(())
@@ -95,7 +101,12 @@ fn is_valid_deb(path: &Path) -> bool {
 
 // ── Fresh install ─────────────────────────────────────────────────────────────
 
-fn fresh_install(ctx: &DefenderContext, url: Option<&str>, creds: Option<&SplunkCredentials>) -> Result {
+/// Install Splunk from scratch and bring it up.
+fn fresh_install(
+    ctx: &DefenderContext,
+    url: Option<&str>,
+    creds: Option<&SplunkCredentials>,
+) -> Result {
     let distro = Distro::detect()?;
     ctx.debug(&format!("detected distro: {}", distro.name()));
 
@@ -107,7 +118,7 @@ fn fresh_install(ctx: &DefenderContext, url: Option<&str>, creds: Option<&Splunk
                 "fresh Splunk install not supported on {} — \
                  install manually and re-run to get the wipe path",
                 other.name()
-            )))
+            )));
         }
     };
 
@@ -149,7 +160,13 @@ fn fresh_install(ctx: &DefenderContext, url: Option<&str>, creds: Option<&Splunk
                 "rpm"
             };
             let args: Vec<&str> = if bin == "dnf" {
-                vec!["--wait", bin, "install", "-y", tmp_path.to_str().unwrap_or("")]
+                vec![
+                    "--wait",
+                    bin,
+                    "install",
+                    "-y",
+                    tmp_path.to_str().unwrap_or(""),
+                ]
             } else {
                 vec!["--wait", bin, "-i", tmp_path.to_str().unwrap_or("")]
             };
@@ -184,7 +201,10 @@ fn fresh_install(ctx: &DefenderContext, url: Option<&str>, creds: Option<&Splunk
         None if ctx.interactive() => {
             let user = prompt_string_default("[?] Splunk admin username", "admin")?;
             let pass = prompt_string("[?] Splunk admin password")?;
-            SplunkCredentials { admin_user: user, admin_pass: pass }
+            SplunkCredentials {
+                admin_user: user,
+                admin_pass: pass,
+            }
         }
         None => {
             ctx.progress("[!] No Splunk credentials provided — admin user will NOT be created");
@@ -202,9 +222,14 @@ fn fresh_install(ctx: &DefenderContext, url: Option<&str>, creds: Option<&Splunk
         seed_creds.admin_user, seed_creds.admin_pass
     );
     if let Err(e) = fs::write(&seed_path, &seed_content) {
-        ctx.progress(&format!("[!] Failed to write user-seed.conf: {e} — admin user may not be created"));
+        ctx.progress(&format!(
+            "[!] Failed to write user-seed.conf: {e} — admin user may not be created"
+        ));
     } else {
-        ctx.progress(&format!("[✓] Admin user '{}' configured via user-seed.conf", seed_creds.admin_user));
+        ctx.progress(&format!(
+            "[✓] Admin user '{}' configured via user-seed.conf",
+            seed_creds.admin_user
+        ));
     }
 
     // First start — must accept the license explicitly.
@@ -214,6 +239,7 @@ fn fresh_install(ctx: &DefenderContext, url: Option<&str>, creds: Option<&Splunk
 
 // ── Wipe ──────────────────────────────────────────────────────────────────────
 
+/// Remove the Splunk local-override config layer.
 fn wipe_local(ctx: &DefenderContext) -> Result {
     let local = Path::new(LOCAL_DIR);
 
@@ -264,6 +290,7 @@ fn wipe_local(ctx: &DefenderContext) -> Result {
 
 // ── Daemon lifecycle ──────────────────────────────────────────────────────────
 
+/// Stop the Splunk service.
 fn splunk_stop(ctx: &DefenderContext) -> Result {
     ctx.debug("stopping splunk");
     ctx.progress("[+] Stopping Splunk...");

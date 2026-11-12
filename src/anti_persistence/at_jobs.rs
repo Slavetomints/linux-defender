@@ -7,13 +7,12 @@
 use std::process::{Command, Stdio};
 
 use crate::core::scan::suspicious_matches;
-use crate::core::{Action, DefenderContext, DefenderError, Finding, Result, Severity, require_root};
+use crate::core::{
+    Action, DefenderContext, DefenderError, Finding, Result, Severity, require_root,
+};
 
 /// At spool directories to scan for immutable spool files.
-const AT_SPOOL_DIRS: &[&str] = &[
-    "/var/spool/at",
-    "/var/spool/cron/atjobs",
-];
+const AT_SPOOL_DIRS: &[&str] = &["/var/spool/at", "/var/spool/cron/atjobs"];
 
 /// Clear immutable flags on all files in known at spool directories so atrm can remove them.
 fn clear_spool_immutable(ctx: &DefenderContext) {
@@ -93,9 +92,17 @@ pub fn run(ctx: &DefenderContext) -> Result {
             .into_iter()
             .collect();
 
-        let severity = if !hits.is_empty() { Severity::Critical } else { Severity::High };
+        let severity = if !hits.is_empty() {
+            Severity::Critical
+        } else {
+            Severity::High
+        };
         let summary = if !hits.is_empty() {
-            format!("at job {} REMOVED: suspicious content [{}]", job_id, hits.join(", "))
+            format!(
+                "at job {} REMOVED: suspicious content [{}]",
+                job_id,
+                hits.join(", ")
+            )
         } else {
             format!("at job {} REMOVED: {}", job_id, job)
         };
@@ -143,7 +150,11 @@ pub fn run(ctx: &DefenderContext) -> Result {
                     "Job ID: {}\nremoved: {}\npatterns: {}",
                     job_id,
                     status_str(removed),
-                    if hits.is_empty() { "(none)".to_string() } else { hits.join(", ") },
+                    if hits.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        hits.join(", ")
+                    },
                 ),
             )
             .with_action(Action::Manual(format!("atrm {}", job_id))),
@@ -170,12 +181,21 @@ fn remove_spool_file_for_job(ctx: &DefenderContext, job_id: &str) -> bool {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
             if name.starts_with(&prefix) {
-                let _ = Command::new("chattr").args(["-i", &path.to_string_lossy()])
-                    .stdout(Stdio::null()).stderr(Stdio::null()).status();
+                let _ = Command::new("chattr")
+                    .args(["-i", &path.to_string_lossy()])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
                 if std::fs::remove_file(&path).is_ok() {
-                    ctx.log_msg(&format!("[+] Directly removed spool file: {}", path.display()));
+                    ctx.log_msg(&format!(
+                        "[+] Directly removed spool file: {}",
+                        path.display()
+                    ));
                     return true;
                 }
             }
@@ -184,6 +204,7 @@ fn remove_spool_file_for_job(ctx: &DefenderContext, job_id: &str) -> bool {
     false
 }
 
+/// Render a bool as the string `true`/`false` for finding context.
 fn status_str(ok: bool) -> &'static str {
     if ok { "true" } else { "false" }
 }

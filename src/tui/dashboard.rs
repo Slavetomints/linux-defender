@@ -102,10 +102,7 @@ fn render_services(
                 .avg_latency_ms()
                 .map(|ms| format!(" {:>4}ms", ms))
                 .unwrap_or_else(|| "   ---".into());
-            let detail = h
-                .last()
-                .map(|r| r.detail.clone())
-                .unwrap_or_default();
+            let detail = h.last().map(|r| r.detail.clone()).unwrap_or_default();
             let line = Line::from(vec![
                 Span::styled(symbol, Style::default().fg(color)),
                 Span::raw(format!(" {:<14} :{:<6}", h.check.name, h.check.port)),

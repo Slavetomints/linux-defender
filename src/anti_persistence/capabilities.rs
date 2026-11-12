@@ -91,10 +91,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
                     },
                 )
                 .with_path(file.path.clone())
-                .with_action(Action::Manual(format!(
-                    "setcap -r {}",
-                    file.path.display()
-                ))),
+                .with_action(Action::Manual(format!("setcap -r {}", file.path.display()))),
             );
         }
     } else {

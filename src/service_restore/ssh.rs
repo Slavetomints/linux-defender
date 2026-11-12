@@ -29,7 +29,10 @@ pub fn run(ctx: &DefenderContext) -> Result {
         return Ok(());
     }
 
-    ctx.progress(&format!("[+] Removing existing {package} ({})...", distro.name()));
+    ctx.progress(&format!(
+        "[+] Removing existing {package} ({})...",
+        distro.name()
+    ));
     let _ = distro.remove_cmd(&[package]).output();
     ctx.progress("[✓] Removed (or was not present)");
 
@@ -57,6 +60,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
     Ok(())
 }
 
+/// Return the SSH server package and service names for `distro`.
 fn ssh_package_and_service(distro: Distro) -> (&'static str, &'static str) {
     match distro {
         Distro::Debian => ("openssh-server", "ssh"),

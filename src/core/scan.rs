@@ -44,11 +44,20 @@ pub const SUSPICIOUS_PATTERNS: &[(&str, &str)] = &[
     ("setsid", "detaches from the controlling terminal"),
     ("curl", "fetches remote content"),
     ("wget", "fetches remote content"),
-    ("crontab -", "writes crontab from stdin (persistence bootstrapping)"),
-    ("at now", "schedules a one-shot job immediately (at job persistence)"),
+    (
+        "crontab -",
+        "writes crontab from stdin (persistence bootstrapping)",
+    ),
+    (
+        "at now",
+        "schedules a one-shot job immediately (at job persistence)",
+    ),
     ("| at ", "pipes command into at scheduler"),
     ("|at ", "pipes command into at scheduler"),
-    ("systemctl enable", "enables a service at boot (persistence installation)"),
+    (
+        "systemctl enable",
+        "enables a service at boot (persistence installation)",
+    ),
     // Shell-poison function overrides -- any bash function that shadows a security-critical
     // command blocks defenders from using it during an incident.
     ("passwd ()", "bash function overrides security command"),

@@ -58,7 +58,12 @@ impl LogPane {
         while let Ok(raw) = self.rx.try_recv() {
             if !self.source.filters.is_empty() {
                 let lower = raw.to_lowercase();
-                if !self.source.filters.iter().any(|f| lower.contains(f.as_str())) {
+                if !self
+                    .source
+                    .filters
+                    .iter()
+                    .any(|f| lower.contains(f.as_str()))
+                {
                     continue;
                 }
             }

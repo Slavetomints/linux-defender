@@ -21,7 +21,6 @@ pub mod ld_preload;
 pub mod logrotate;
 pub mod mail_intercept;
 pub mod pam;
-pub mod webshells;
 pub mod polkit;
 pub mod prompt_command;
 pub mod rc_local;
@@ -35,6 +34,7 @@ pub mod systemd;
 pub mod systemd_timers;
 pub mod udev;
 pub mod users;
+pub mod webshells;
 pub mod xdg_autostart;
 
 /// Which persistence checks to run.

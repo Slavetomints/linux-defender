@@ -62,7 +62,10 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
             let scored = is_scored_unit(&service.name);
             if scored {
-                println!("[!] {} backs a SCORED service -- disabling it costs uptime points", service.name);
+                println!(
+                    "[!] {} backs a SCORED service -- disabling it costs uptime points",
+                    service.name
+                );
             }
 
             if prompt_yes("[?] Is this service malicious? (y/N)")?
@@ -151,9 +154,15 @@ fn disable_service(name: &str) -> Result {
 /// Exec paths that indicate a unit was planted by an attacker rather than
 /// installed by a package manager.
 const SUSPICIOUS_EXEC_PATHS: &[&str] = &[
-    "/tmp/", "/dev/shm/", "/var/tmp/", "/run/shm/",
-    "/home/", "/opt/",
-    "/usr/local/lib/.", "/usr/lib/.", "/var/lib/.",
+    "/tmp/",
+    "/dev/shm/",
+    "/var/tmp/",
+    "/run/shm/",
+    "/home/",
+    "/opt/",
+    "/usr/local/lib/.",
+    "/usr/lib/.",
+    "/var/lib/.",
 ];
 
 /// Ask systemd for the on-disk path of a unit file.

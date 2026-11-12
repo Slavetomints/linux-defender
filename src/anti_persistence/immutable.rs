@@ -76,8 +76,12 @@ pub fn run(ctx: &DefenderContext) -> Result {
     // Any dot-file or dot-dir in these locations with chattr +i is suspicious
     // regardless of its name -- we don't match on specific payload names.
     for dir in &[
-        "/usr/local/lib", "/usr/lib", "/usr/lib/systemd", "/etc/cron.d",
-        "/var/lib", "/opt",
+        "/usr/local/lib",
+        "/usr/lib",
+        "/usr/lib/systemd",
+        "/etc/cron.d",
+        "/var/lib",
+        "/opt",
     ] {
         sweep_hidden(ctx, dir);
     }
@@ -112,7 +116,10 @@ fn sweep_hidden(ctx: &DefenderContext, dir: &str) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         if !name.starts_with('.') {
             continue;
         }

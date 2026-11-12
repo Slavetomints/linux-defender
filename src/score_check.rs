@@ -29,8 +29,11 @@ pub const SCORE_LOG: &str = "/tmp/defender-score.log";
 
 /// Which external HTTP client is available on this machine.
 enum ExtHttpClient {
+    /// The `curl` HTTP client.
     Curl,
+    /// The `wget` HTTP client.
     Wget,
+    /// No HTTP client is available.
     None,
 }
 
@@ -236,19 +239,18 @@ pub fn ensure_mail_test_account() {
         // User already exists — ensure the home directory is present.
         // Dovecot needs it to create the Maildir on first login.
         let home = format!("/home/{MAIL_TEST_USER}");
-        if !std::path::Path::new(&home).exists() {
-            if std::process::Command::new("mkhomedir_helper")
+        if !std::path::Path::new(&home).exists()
+            && std::process::Command::new("mkhomedir_helper")
                 .arg(MAIL_TEST_USER)
                 .output()
                 .map(|o| !o.status.success())
                 .unwrap_or(true)
-            {
-                // mkhomedir_helper not available — create manually.
-                let _ = std::fs::create_dir_all(&home);
-                let _ = std::process::Command::new("chown")
-                    .args([&format!("{MAIL_TEST_USER}:{MAIL_TEST_USER}"), &home])
-                    .output();
-            }
+        {
+            // mkhomedir_helper not available — create manually.
+            let _ = std::fs::create_dir_all(&home);
+            let _ = std::process::Command::new("chown")
+                .args([&format!("{MAIL_TEST_USER}:{MAIL_TEST_USER}"), &home])
+                .output();
         }
     }
 
@@ -401,12 +403,25 @@ fn check_http_curl(host: &str, port: u16, path: &str, expected: u16) -> (bool, S
     match ext_http_client() {
         ExtHttpClient::Curl => {
             let out = std::process::Command::new("curl")
-                .args(["-s", "-L", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "3", &url])
+                .args([
+                    "-s",
+                    "-L",
+                    "-o",
+                    "/dev/null",
+                    "-w",
+                    "%{http_code}",
+                    "--max-time",
+                    "3",
+                    &url,
+                ])
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())
                 .output();
             if let Ok(o) = out {
-                let code: u16 = String::from_utf8_lossy(&o.stdout).trim().parse().unwrap_or(0);
+                let code: u16 = String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse()
+                    .unwrap_or(0);
                 return (code == expected, format!("HTTP {} (curl)", code));
             }
         }
@@ -424,9 +439,13 @@ fn check_http_curl(host: &str, port: u16, path: &str, expected: u16) -> (bool, S
                     .lines()
                     .filter_map(|l| {
                         let t = l.trim();
-                        if t.starts_with("HTTP/") { parse_http_status(t) } else { None }
+                        if t.starts_with("HTTP/") {
+                            parse_http_status(t)
+                        } else {
+                            None
+                        }
                     })
-                    .last()
+                    .next_back()
                     .unwrap_or(0);
                 return (code == expected, format!("HTTP {} (wget)", code));
             }
@@ -444,7 +463,10 @@ fn check_http_curl(host: &str, port: u16, path: &str, expected: u16) -> (bool, S
             Ok(sa) => TcpStream::connect_timeout(&sa, CONNECT_TIMEOUT),
             Err(_) => TcpStream::connect(&addr as &str),
         }) else {
-            return (false, format!("TCP connect failed ({}:{})", cur_host, cur_port));
+            return (
+                false,
+                format!("TCP connect failed ({}:{})", cur_host, cur_port),
+            );
         };
         let _ = stream.set_read_timeout(Some(CHECK_TIMEOUT));
         let request = format!(
@@ -463,8 +485,11 @@ fn check_http_curl(host: &str, port: u16, path: &str, expected: u16) -> (bool, S
             None => {
                 return (
                     false,
-                    format!("bad response: {}", resp.chars().take(40).collect::<String>()),
-                )
+                    format!(
+                        "bad response: {}",
+                        resp.chars().take(40).collect::<String>()
+                    ),
+                );
             }
         };
 
@@ -502,7 +527,11 @@ fn parse_location_header(response: &str) -> Option<String> {
 ///
 /// Absolute `https://` URLs are rejected — we only follow plain HTTP redirects.
 /// Relative paths (starting with `/`) reuse the caller's host and port.
-fn parse_http_url(url: &str, default_host: &str, default_port: u16) -> Option<(String, u16, String)> {
+fn parse_http_url(
+    url: &str,
+    default_host: &str,
+    default_port: u16,
+) -> Option<(String, u16, String)> {
     if url.starts_with('/') {
         return Some((default_host.to_string(), default_port, url.to_string()));
     }
@@ -531,8 +560,14 @@ fn check_https(host: &str, port: u16, path: &str, expected: u16) -> (bool, Strin
         ExtHttpClient::Curl => {
             let out = std::process::Command::new("curl")
                 .args([
-                    "-s", "-L", "-o", "/dev/null", "-w", "%{http_code}",
-                    "--max-time", "3",
+                    "-s",
+                    "-L",
+                    "-o",
+                    "/dev/null",
+                    "-w",
+                    "%{http_code}",
+                    "--max-time",
+                    "3",
                     "--insecure", // competition certs are self-signed
                     &url,
                 ])
@@ -540,15 +575,23 @@ fn check_https(host: &str, port: u16, path: &str, expected: u16) -> (bool, Strin
                 .stderr(std::process::Stdio::null())
                 .output();
             if let Ok(o) = out {
-                let code: u16 = String::from_utf8_lossy(&o.stdout).trim().parse().unwrap_or(0);
+                let code: u16 = String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse()
+                    .unwrap_or(0);
                 return (code == expected, format!("HTTPS {} (curl)", code));
             }
         }
         ExtHttpClient::Wget => {
             let out = std::process::Command::new("wget")
                 .args([
-                    "-q", "--no-check-certificate", "--max-redirect=10",
-                    "-O", "/dev/null", "-S", &url,
+                    "-q",
+                    "--no-check-certificate",
+                    "--max-redirect=10",
+                    "-O",
+                    "/dev/null",
+                    "-S",
+                    &url,
                 ])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::piped())
@@ -559,9 +602,13 @@ fn check_https(host: &str, port: u16, path: &str, expected: u16) -> (bool, Strin
                     .lines()
                     .filter_map(|l| {
                         let t = l.trim();
-                        if t.starts_with("HTTP/") { parse_http_status(t) } else { None }
+                        if t.starts_with("HTTP/") {
+                            parse_http_status(t)
+                        } else {
+                            None
+                        }
                     })
-                    .last()
+                    .next_back()
                     .unwrap_or(0);
                 return (code == expected, format!("HTTPS {} (wget)", code));
             }
@@ -655,6 +702,7 @@ fn check_pop3(host: &str, port: u16) -> (bool, String) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/// Open a TCP connection to an SMTP server.
 fn smtp_connect(host: &str, port: u16) -> Option<TcpStream> {
     let addr = format!("{host}:{port}");
     let stream = match addr.parse::<SocketAddr>() {
@@ -666,6 +714,7 @@ fn smtp_connect(host: &str, port: u16) -> Option<TcpStream> {
     Some(stream)
 }
 
+/// Read one CRLF-terminated line from an SMTP stream.
 fn smtp_readline(stream: &mut TcpStream) -> String {
     let mut buf = [0u8; 512];
     let n = stream.read(&mut buf).unwrap_or(0);
@@ -685,10 +734,13 @@ fn check_smtp_send(host: &str, port: u16, from: &str, to: &str) -> (bool, String
     // Drain the greeting
     let banner = smtp_readline(&mut s);
     if !banner.starts_with("220") {
-        return (false, format!("no 220 banner: {}", &banner[..banner.len().min(40)]));
+        return (
+            false,
+            format!("no 220 banner: {}", &banner[..banner.len().min(40)]),
+        );
     }
     let cmds = [
-        (format!("EHLO localhost\r\n"), "250"),
+        ("EHLO localhost\r\n".to_string(), "250"),
         (format!("MAIL FROM:<{from}>\r\n"), "250"),
         (format!("RCPT TO:<{to}>\r\n"), "250"),
         ("QUIT\r\n".into(), "221"),
@@ -697,7 +749,10 @@ fn check_smtp_send(host: &str, port: u16, from: &str, to: &str) -> (bool, String
         let _ = s.write_all(cmd.as_bytes());
         let resp = smtp_readline(&mut s);
         if !resp.starts_with(expect) {
-            return (false, format!("cmd {:?} → {:?}", cmd.trim(), &resp[..resp.len().min(50)]));
+            return (
+                false,
+                format!("cmd {:?} → {:?}", cmd.trim(), &resp[..resp.len().min(50)]),
+            );
         }
     }
     (true, format!("SMTP send path OK ({from} → {to})"))
@@ -706,7 +761,7 @@ fn check_smtp_send(host: &str, port: u16, from: &str, to: &str) -> (bool, String
 /// IMAP functional: LOGIN then SELECT INBOX.
 fn check_imap_login(host: &str, port: u16, user: &str) -> (bool, String) {
     let pass_owned = mail_check_pass();
-    let pass: &str = &pass_owned;
+    let pass: &str = pass_owned;
     let addr = format!("{host}:{port}");
     let Ok(mut s) = (match addr.parse::<SocketAddr>() {
         Ok(sa) => TcpStream::connect_timeout(&sa, CONNECT_TIMEOUT),
@@ -736,13 +791,23 @@ fn check_imap_login(host: &str, port: u16, user: &str) -> (bool, String) {
         let mut resp = String::new();
         for _ in 0..8 {
             let n = s.read(&mut buf).unwrap_or(0);
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             resp.push_str(&String::from_utf8_lossy(&buf[..n]));
-            if resp.contains(expect) || resp.contains("NO ") || resp.contains("BAD ") { break; }
+            if resp.contains(expect) || resp.contains("NO ") || resp.contains("BAD ") {
+                break;
+            }
         }
         if !resp.contains(expect) {
             let snippet: String = resp.lines().last().unwrap_or("").chars().take(60).collect();
-            return (false, format!("{}: {snippet}", template.trim().split_whitespace().next().unwrap_or("")));
+            return (
+                false,
+                format!(
+                    "{}: {snippet}",
+                    template.split_whitespace().next().unwrap_or("")
+                ),
+            );
         }
     }
     (true, format!("IMAP login + SELECT INBOX OK ({user})"))
@@ -751,7 +816,7 @@ fn check_imap_login(host: &str, port: u16, user: &str) -> (bool, String) {
 /// POP3 functional: USER + PASS then STAT.
 fn check_pop3_login(host: &str, port: u16, user: &str) -> (bool, String) {
     let pass_owned = mail_check_pass();
-    let pass: &str = &pass_owned;
+    let pass: &str = pass_owned;
     let addr = format!("{host}:{port}");
     let Ok(mut s) = (match addr.parse::<SocketAddr>() {
         Ok(sa) => TcpStream::connect_timeout(&sa, CONNECT_TIMEOUT),
@@ -772,8 +837,8 @@ fn check_pop3_login(host: &str, port: u16, user: &str) -> (bool, String) {
     let steps: &[(&str, &str)] = &[
         ("USER {user}\r\n", "+OK"),
         ("PASS {pass}\r\n", "+OK"),
-        ("STAT\r\n",         "+OK"),
-        ("QUIT\r\n",         "+OK"),
+        ("STAT\r\n", "+OK"),
+        ("QUIT\r\n", "+OK"),
     ];
     for (template, expect) in steps {
         let cmd = template.replace("{user}", user).replace("{pass}", pass);
@@ -782,7 +847,10 @@ fn check_pop3_login(host: &str, port: u16, user: &str) -> (bool, String) {
         let resp = String::from_utf8_lossy(&buf[..n]);
         let first = resp.lines().next().unwrap_or("").trim();
         if !first.starts_with(expect) {
-            return (false, format!("{}: {}", template.trim(), &first[..first.len().min(50)]));
+            return (
+                false,
+                format!("{}: {}", template.trim(), &first[..first.len().min(50)]),
+            );
         }
     }
     (true, format!("POP3 login + STAT OK ({user})"))

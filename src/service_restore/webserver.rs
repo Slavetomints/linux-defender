@@ -127,7 +127,9 @@ fn fix_debian_apt_sources(ctx: &DefenderContext) {
         Err(_) => return,
     };
 
-    let has_cdrom = content.lines().any(|l| l.trim_start().starts_with("deb cdrom:"));
+    let has_cdrom = content
+        .lines()
+        .any(|l| l.trim_start().starts_with("deb cdrom:"));
     if !has_cdrom {
         return; // already fine
     }
@@ -154,9 +156,16 @@ fn fix_debian_apt_sources(ctx: &DefenderContext) {
         // No network sources — add standard Debian 12 Bookworm mirrors.
         fixed.push(String::new());
         fixed.push("# Added by linux-defender (cdrom source was the only source)".into());
-        fixed.push("deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware".into());
-        fixed.push("deb http://deb.debian.org/debian-security bookworm-security main contrib non-free".into());
-        fixed.push("deb http://deb.debian.org/debian bookworm-updates main contrib non-free".into());
+        fixed.push(
+            "deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware"
+                .into(),
+        );
+        fixed.push(
+            "deb http://deb.debian.org/debian-security bookworm-security main contrib non-free"
+                .into(),
+        );
+        fixed
+            .push("deb http://deb.debian.org/debian bookworm-updates main contrib non-free".into());
         ctx.progress("[+] Added Debian 12 Bookworm network apt sources");
     }
 
@@ -709,12 +718,8 @@ pub fn verify_site_insecure(url: &str, pattern: &str, ctx: &DefenderContext) -> 
     verify_site_impl(url, pattern, true, ctx)
 }
 
-fn verify_site_impl(
-    url: &str,
-    pattern: &str,
-    insecure: bool,
-    ctx: &DefenderContext,
-) -> Result<()> {
+/// Fetch `url` and confirm the response body matches `pattern`.
+fn verify_site_impl(url: &str, pattern: &str, insecure: bool, ctx: &DefenderContext) -> Result<()> {
     ctx.progress(&format!("[+] Verifying site at {url}..."));
 
     let mut args = vec!["-s", "-L", "--max-time", "15"];

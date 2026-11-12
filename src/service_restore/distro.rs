@@ -367,7 +367,9 @@ pub fn restore_ad_integration(ctx: &DefenderContext) -> Result<usize> {
     if restored == 0 {
         ctx.progress("[!] No AD/LDAP join files were present in the backup — nothing to restore");
     } else {
-        ctx.progress(&format!("[✓] Restored {restored} AD/LDAP/Kerberos join path(s)"));
+        ctx.progress(&format!(
+            "[✓] Restored {restored} AD/LDAP/Kerberos join path(s)"
+        ));
     }
     Ok(restored)
 }

@@ -130,21 +130,40 @@ impl ServiceConfig {
 /// unit gets flagged for a human to repair, never nuked.
 const SCORED_UNITS: &[&str] = &[
     // SSH (scored everywhere)
-    "ssh", "sshd",
+    "ssh",
+    "sshd",
     // Web / webmail
-    "nginx", "httpd", "apache2", "php-fpm",
+    "nginx",
+    "httpd",
+    "apache2",
+    "php-fpm",
     // Databases behind the ecom store and Roundcube
-    "mariadb", "mysql", "mysqld", "postgresql",
+    "mariadb",
+    "mysql",
+    "mysqld",
+    "postgresql",
     // FTP (possibly scored on Web)
-    "vsftpd", "proftpd", "pure-ftpd",
+    "vsftpd",
+    "proftpd",
+    "pure-ftpd",
     // Mail
-    "postfix", "dovecot", "roundcubemail",
+    "postfix",
+    "dovecot",
+    "roundcubemail",
     // AD auth behind postfix/dovecot
-    "sssd", "winbind", "nslcd", "krb5kdc",
+    "sssd",
+    "winbind",
+    "nslcd",
+    "krb5kdc",
     // Splunk (unit is Splunkd.service by default)
-    "splunkd", "splunk", "splunkforwarder",
+    "splunkd",
+    "splunk",
+    "splunkforwarder",
     // Networking: losing this loses every scored service at once
-    "networkmanager", "networking", "systemd-networkd", "systemd-resolved",
+    "networkmanager",
+    "networking",
+    "systemd-networkd",
+    "systemd-resolved",
 ];
 
 /// True when `unit` (e.g. `Splunkd.service`, `php8.1-fpm`, `postfix@-.service`)
@@ -187,9 +206,18 @@ mod scored_unit_tests {
     #[test]
     fn scored_units_match_real_unit_names() {
         for u in [
-            "Splunkd.service", "SplunkForwarder.service", "sshd.service", "ssh",
-            "postfix@-.service", "dovecot", "mariadb.service", "php8.1-fpm.service",
-            "php-fpm", "NetworkManager.service", "networking.service", "httpd",
+            "Splunkd.service",
+            "SplunkForwarder.service",
+            "sshd.service",
+            "ssh",
+            "postfix@-.service",
+            "dovecot",
+            "mariadb.service",
+            "php8.1-fpm.service",
+            "php-fpm",
+            "NetworkManager.service",
+            "networking.service",
+            "httpd",
         ] {
             assert!(is_scored_unit(u), "{} should be protected", u);
         }
@@ -197,7 +225,12 @@ mod scored_unit_tests {
 
     #[test]
     fn random_units_are_not_scored() {
-        for u in ["kworkerd.service", "dbus-update.service", "sshd-backdoor.service", "cups"] {
+        for u in [
+            "kworkerd.service",
+            "dbus-update.service",
+            "sshd-backdoor.service",
+            "cups",
+        ] {
             assert!(!is_scored_unit(u), "{} should not be protected", u);
         }
     }

@@ -34,12 +34,15 @@ const WEB_ROOTS: &[&str] = &[
 
 /// A named shell family: every pattern must match (case-insensitive AND).
 struct ShellSignature {
+    /// Short label for this shell family.
     name: &'static str,
+    /// Distinguishing substrings; every one must be present to match.
     patterns: &'static [&'static str],
 }
 
 // ── PHP signatures ────────────────────────────────────────────────────────────
 
+/// Known PHP webshell signatures (all patterns must match).
 const PHP_SHELLS: &[ShellSignature] = &[
     ShellSignature {
         name: "p0wny-shell",
@@ -453,10 +456,14 @@ const PHP_SHELLS: &[ShellSignature] = &[
 
 // ── ASP signatures ────────────────────────────────────────────────────────────
 
+/// Known classic-ASP webshell signatures (all patterns must match).
 const ASP_SHELLS: &[ShellSignature] = &[
     ShellSignature {
         name: "cmd-asp-5.1",
-        patterns: &["brett.moore_at_security-assessment.com", "pchealth\\errorrep\\qheadles"],
+        patterns: &[
+            "brett.moore_at_security-assessment.com",
+            "pchealth\\errorrep\\qheadles",
+        ],
     },
     ShellSignature {
         name: "cmdasp",
@@ -464,16 +471,22 @@ const ASP_SHELLS: &[ShellSignature] = &[
     },
     ShellSignature {
         name: "wscript-oneliner",
-        patterns: &["createobject(\"wscript.shell\").exec(request.querystring(\"cmd\")).stdout.readall()"],
+        patterns: &[
+            "createobject(\"wscript.shell\").exec(request.querystring(\"cmd\")).stdout.readall()",
+        ],
     },
     ShellSignature {
         name: "asp-net-process-shell",
-        patterns: &["system.diagnostics.processstartinfo", "redirectstandardoutput = true"],
+        patterns: &[
+            "system.diagnostics.processstartinfo",
+            "redirectstandardoutput = true",
+        ],
     },
 ];
 
 // ── ASPX signatures ───────────────────────────────────────────────────────────
 
+/// Known ASP.NET (aspx) webshell signatures (all patterns must match).
 const ASPX_SHELLS: &[ShellSignature] = &[
     ShellSignature {
         name: "aspxshell-lt",
@@ -489,12 +502,16 @@ const ASPX_SHELLS: &[ShellSignature] = &[
     },
     ShellSignature {
         name: "soap-asmx-shell",
-        patterns: &["<z1>cmd.exe</z1>", "webservice language=\"c#\" class=\"service\""],
+        patterns: &[
+            "<z1>cmd.exe</z1>",
+            "webservice language=\"c#\" class=\"service\"",
+        ],
     },
 ];
 
 // ── Python signatures ─────────────────────────────────────────────────────────
 
+/// Known Python webshell signatures (all patterns must match).
 const PYTHON_SHELLS: &[ShellSignature] = &[
     ShellSignature {
         name: "pty-spawn-shell",
@@ -508,6 +525,7 @@ const PYTHON_SHELLS: &[ShellSignature] = &[
 
 // ── Ruby signatures ───────────────────────────────────────────────────────────
 
+/// Known Ruby webshell signatures (all patterns must match).
 const RUBY_SHELLS: &[ShellSignature] = &[
     ShellSignature {
         name: "srwsh-ruby",
@@ -521,88 +539,166 @@ const RUBY_SHELLS: &[ShellSignature] = &[
 
 // ── Per-language keyword lists ────────────────────────────────────────────────
 
+/// PHP exec and input keywords scored by the heuristic.
 const PHP_KEYWORDS: &[&str] = &[
-    "exec", "passthru", "shell_exec", "system", "proc_open", "popen", "pcntl_exec", "eval",
+    "exec",
+    "passthru",
+    "shell_exec",
+    "system",
+    "proc_open",
+    "popen",
+    "pcntl_exec",
+    "eval",
     // Input vectors -- any file reading from these is a candidate.
     // $_SERVER is deliberately excluded: nearly every PHP app reads it.
-    "$_get[", "$_post[", "$_request[", "$_cookie[",
+    "$_get[",
+    "$_post[",
+    "$_request[",
+    "$_cookie[",
 ];
 
+/// PHP command-execution primitives.
 const PHP_EXEC_KEYWORDS: &[&str] = &[
-    "exec", "passthru", "shell_exec", "system", "proc_open", "popen", "pcntl_exec", "eval",
+    "exec",
+    "passthru",
+    "shell_exec",
+    "system",
+    "proc_open",
+    "popen",
+    "pcntl_exec",
+    "eval",
 ];
 
-const PHP_INPUT_KEYWORDS: &[&str] = &[
-    "$_get[", "$_post[", "$_request[", "$_cookie[",
-];
+/// PHP request-input accessors (GET/POST/REQUEST/COOKIE).
+const PHP_INPUT_KEYWORDS: &[&str] = &["$_get[", "$_post[", "$_request[", "$_cookie["];
 
+/// Classic-ASP exec and input keywords scored by the heuristic.
 const ASP_KEYWORDS: &[&str] = &[
-    "wscript.shell", "createobject", "server.execute", "response.write",
-    "scriptengine", "cmd.exe",
-    "request.querystring(", "request.form(", "request(",
+    "wscript.shell",
+    "createobject",
+    "server.execute",
+    "response.write",
+    "scriptengine",
+    "cmd.exe",
+    "request.querystring(",
+    "request.form(",
+    "request(",
 ];
 
+/// Classic-ASP command-execution primitives.
 const ASP_EXEC_KEYWORDS: &[&str] = &[
-    "wscript.shell", "createobject", "server.execute", "scriptengine", "cmd.exe",
+    "wscript.shell",
+    "createobject",
+    "server.execute",
+    "scriptengine",
+    "cmd.exe",
 ];
 
-const ASP_INPUT_KEYWORDS: &[&str] = &[
-    "request.querystring(", "request.form(", "request(",
-];
+/// Classic-ASP request-input accessors.
+const ASP_INPUT_KEYWORDS: &[&str] = &["request.querystring(", "request.form(", "request("];
 
+/// ASP.NET exec and input keywords scored by the heuristic.
 const ASPX_KEYWORDS: &[&str] = &[
-    "process.start", "processstartinfo", "cmd.exe", "shell_exec",
-    "redirectstandardoutput", "system.diagnostics",
-    "request.querystring[", "request.form[", "request[",
+    "process.start",
+    "processstartinfo",
+    "cmd.exe",
+    "shell_exec",
+    "redirectstandardoutput",
+    "system.diagnostics",
+    "request.querystring[",
+    "request.form[",
+    "request[",
 ];
 
+/// ASP.NET command-execution primitives.
 const ASPX_EXEC_KEYWORDS: &[&str] = &[
-    "process.start", "processstartinfo", "redirectstandardoutput", "system.diagnostics",
+    "process.start",
+    "processstartinfo",
+    "redirectstandardoutput",
+    "system.diagnostics",
 ];
 
-const ASPX_INPUT_KEYWORDS: &[&str] = &[
-    "request.querystring[", "request.form[", "request[",
-];
+/// ASP.NET request-input accessors.
+const ASPX_INPUT_KEYWORDS: &[&str] = &["request.querystring[", "request.form[", "request["];
 
+/// Python exec and input keywords scored by the heuristic.
 const PYTHON_KEYWORDS: &[&str] = &[
-    "os.system", "subprocess", "pty.spawn", "commands.getoutput",
-    "popen", "exec(", "eval(",
-    "request.args.get(", "request.form.get(", "request.args[", "request.form[",
-    "cgi.fieldstorage", "os.environ.get(",
+    "os.system",
+    "subprocess",
+    "pty.spawn",
+    "commands.getoutput",
+    "popen",
+    "exec(",
+    "eval(",
+    "request.args.get(",
+    "request.form.get(",
+    "request.args[",
+    "request.form[",
+    "cgi.fieldstorage",
+    "os.environ.get(",
 ];
 
+/// Python command-execution primitives.
 const PYTHON_EXEC_KEYWORDS: &[&str] = &[
-    "os.system", "subprocess", "pty.spawn", "commands.getoutput", "popen", "exec(", "eval(",
+    "os.system",
+    "subprocess",
+    "pty.spawn",
+    "commands.getoutput",
+    "popen",
+    "exec(",
+    "eval(",
 ];
 
+/// Python request-input accessors (WSGI/CGI/flask).
 const PYTHON_INPUT_KEYWORDS: &[&str] = &[
-    "request.args.get(", "request.form.get(", "request.args[", "request.form[",
-    "cgi.fieldstorage", "os.environ.get(",
+    "request.args.get(",
+    "request.form.get(",
+    "request.args[",
+    "request.form[",
+    "cgi.fieldstorage",
+    "os.environ.get(",
 ];
 
+/// Ruby exec and input keywords scored by the heuristic.
 const RUBY_KEYWORDS: &[&str] = &[
-    "exec ", "system(", "%x(", "popen(", "spawn(",
-    "params[:", "request.GET[", "params.fetch(",
+    "exec ",
+    "system(",
+    "%x(",
+    "popen(",
+    "spawn(",
+    "params[:",
+    "request.GET[",
+    "params.fetch(",
 ];
 
+/// Ruby command-execution primitives.
 const RUBY_EXEC_KEYWORDS: &[&str] = &["exec ", "system(", "%x(", "popen(", "spawn("];
 
+/// Ruby request-input accessors.
 const RUBY_INPUT_KEYWORDS: &[&str] = &["params[:", "request.get[", "params.fetch("];
 
 // ── Language config ───────────────────────────────────────────────────────────
 
+/// Per-language scoring configuration.
 pub(crate) struct LangConfig {
+    /// File extensions dispatched to this language.
     extensions: &'static [&'static str],
+    /// Known-shell signatures for this language.
     signatures: &'static [ShellSignature],
+    /// All keywords counted toward the suspicion score.
     keywords: &'static [&'static str],
+    /// Command-execution primitives (for the co-occurrence bonus).
     exec_keywords: &'static [&'static str],
+    /// Request-input accessors (for the co-occurrence bonus).
     input_keywords: &'static [&'static str],
     /// Match identifier keywords only as free function calls (`system(`), not
     /// as substrings (`filesystem`) or method calls (`$pdo->exec(`).
     call_match: bool,
+    /// Human-readable language name shown in findings.
     label: &'static str,
 }
 
+/// All languages the webshell scanner understands.
 const LANGUAGES: &[LangConfig] = &[
     LangConfig {
         extensions: &["php", "php3", "php4", "php5", "phtml"],
@@ -769,7 +865,8 @@ pub fn run(ctx: &DefenderContext) -> Result {
                 .with_verdict(
                     Verdict::Remove,
                     if removed {
-                        "File was automatically deleted. Evidence and proof logged above.".to_string()
+                        "File was automatically deleted. Evidence and proof logged above."
+                            .to_string()
                     } else {
                         "Deletion attempted but file may still exist — check the log.".to_string()
                     },
@@ -875,7 +972,11 @@ pub fn find_shells(root: &Path) -> Vec<SuspiciousFile> {
 }
 
 /// Score one file against a language config, or `None` when nothing matched.
-pub(crate) fn score_content(path: &Path, content: &str, lang: &LangConfig) -> Option<SuspiciousFile> {
+pub(crate) fn score_content(
+    path: &Path,
+    content: &str,
+    lang: &LangConfig,
+) -> Option<SuspiciousFile> {
     let lowered = content.to_lowercase();
 
     let matched_name = lang
@@ -936,7 +1037,9 @@ fn keyword_present(hay: &str, kw: &str, call_match: bool) -> bool {
             if is_ident(prev) || prev == b'$' {
                 continue;
             }
-            if start >= 2 && (&bytes[start - 2..start] == b"->" || &bytes[start - 2..start] == b"::") {
+            if start >= 2
+                && (&bytes[start - 2..start] == b"->" || &bytes[start - 2..start] == b"::")
+            {
                 continue;
             }
         }
@@ -999,7 +1102,8 @@ mod tests {
 
     #[test]
     fn detects_asp_wscript_shell() {
-        let content = "createobject(\"wscript.shell\").exec(request.querystring(\"cmd\")).stdout.readall()";
+        let content =
+            "createobject(\"wscript.shell\").exec(request.querystring(\"cmd\")).stdout.readall()";
         let hit = score_content(Path::new("x.asp"), content, asp()).unwrap();
         assert_eq!(hit.matched_shell_name, Some("wscript-oneliner"));
     }
@@ -1035,12 +1139,20 @@ mod tests {
             $res = $stmt->execute(); $ok = curl_exec($ch);
         ?>"#;
         let hit = score_content(Path::new("index.php"), content, php()).unwrap();
-        assert!(hit.score < 3, "score {} keywords {:?}", hit.score, hit.keywords);
+        assert!(
+            hit.score < 3,
+            "score {} keywords {:?}",
+            hit.score,
+            hit.keywords
+        );
     }
 
     #[test]
     fn extension_dispatch_covers_all_languages() {
-        let all_exts: Vec<&str> = LANGUAGES.iter().flat_map(|l| l.extensions.iter().copied()).collect();
+        let all_exts: Vec<&str> = LANGUAGES
+            .iter()
+            .flat_map(|l| l.extensions.iter().copied())
+            .collect();
         for ext in &["php", "asp", "aspx", "py", "rb"] {
             assert!(all_exts.contains(ext), "extension {} not covered", ext);
         }

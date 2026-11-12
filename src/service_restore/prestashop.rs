@@ -239,10 +239,18 @@ pub fn run(
     ));
 
     // Verify both HTTP and HTTPS serve a PrestaShop page.
-    if let Err(e) = verify_site(&format!("http://{domain}/"), r"(?i)prestashop|powered by prestashop", ctx) {
+    if let Err(e) = verify_site(
+        &format!("http://{domain}/"),
+        r"(?i)prestashop|powered by prestashop",
+        ctx,
+    ) {
         ctx.progress(&format!("[!] HTTP site check failed: {e}"));
     }
-    if let Err(e) = verify_site_insecure(&format!("https://{domain}/"), r"(?i)prestashop|powered by prestashop", ctx) {
+    if let Err(e) = verify_site_insecure(
+        &format!("https://{domain}/"),
+        r"(?i)prestashop|powered by prestashop",
+        ctx,
+    ) {
         ctx.progress(&format!("[!] HTTPS site check failed: {e}"));
     }
 

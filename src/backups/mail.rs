@@ -73,7 +73,12 @@ mod tests {
     #[test]
     fn mail_paths_includes_ad_join_state() {
         // AD auth lives outside the postfix/dovecot trees; must be captured too.
-        for p in ["/etc/sssd", "/etc/krb5.conf", "/etc/krb5.keytab", "/etc/nsswitch.conf"] {
+        for p in [
+            "/etc/sssd",
+            "/etc/krb5.conf",
+            "/etc/krb5.keytab",
+            "/etc/nsswitch.conf",
+        ] {
             assert!(MAIL_PATHS.contains(&p), "missing AD path {p}");
         }
     }

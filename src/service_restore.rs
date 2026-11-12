@@ -127,7 +127,10 @@ pub fn run(
         splunk::run(ctx, args.splunk_url.as_deref(), splunk_creds)?;
     }
     if args.opencart {
-        ctx.progress(&format!("[+] Restoring OpenCart at {}", args.opencart_path.display()));
+        ctx.progress(&format!(
+            "[+] Restoring OpenCart at {}",
+            args.opencart_path.display()
+        ));
         let oc_creds = creds.and_then(|c| c.opencart.as_ref());
         opencart::run(
             ctx,

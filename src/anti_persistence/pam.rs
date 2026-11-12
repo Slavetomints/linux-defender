@@ -8,7 +8,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::scan::{effective_line, read_text_files, references_untrusted_dir};
-use crate::core::{Action, DefenderContext, Finding, Result, Severity, Verdict, try_clear_immutable};
+use crate::core::{
+    Action, DefenderContext, Finding, Result, Severity, Verdict, try_clear_immutable,
+};
 
 /// Directory holding one PAM stack per service.
 const PAM_DIR: &str = "/etc/pam.d";
@@ -60,7 +62,12 @@ pub fn run(ctx: &DefenderContext) -> Result {
                         finding.file.display(),
                         finding.reason
                     ),
-                    format!("File: {}\nDirective: {}\nReason: {}", finding.file.display(), finding.line, finding.reason),
+                    format!(
+                        "File: {}\nDirective: {}\nReason: {}",
+                        finding.file.display(),
+                        finding.line,
+                        finding.reason
+                    ),
                 )
                 .with_path(finding.file.clone())
                 .with_action(Action::Manual(format!(
@@ -163,7 +170,10 @@ fn sweep_hidden_pam_binaries(ctx: &DefenderContext) {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
             if !name.starts_with('.') {
                 continue;
             }

@@ -29,6 +29,9 @@ fn every_non_root_hardening_step_exits_cleanly() {
 #[test]
 #[ignore = "requires root"]
 fn every_root_hardening_step_exits_cleanly() {
+    if !common::running_as_root() {
+        return; // these steps return NotRoot without privileges; only meaningful as root
+    }
     let dir = TempDir::new().unwrap();
 
     for &flag in ROOT_STEPS {
@@ -40,6 +43,9 @@ fn every_root_hardening_step_exits_cleanly() {
 #[test]
 #[ignore = "requires root"]
 fn hardening_steps_can_be_combined() {
+    if !common::running_as_root() {
+        return; // combined root steps return NotRoot without privileges
+    }
     let dir = TempDir::new().unwrap();
     let out = run_cli(
         dir.path(),

@@ -19,7 +19,9 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
 use chrono::Local;
 
-use crate::core::{BoxType, DefenderContext, Finding, Severity, detect_box_type, execute_action, strip_ansi};
+use crate::core::{
+    BoxType, DefenderContext, Finding, Severity, detect_box_type, execute_action, strip_ansi,
+};
 use crate::score_check::{ServiceHistory, build_histories, poll_all};
 use crate::tui::logs::dashboard::LogDashboard as LogDash;
 
@@ -107,7 +109,12 @@ const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
     ("cron", "Cron jobs", true, ScanInterval::Continuous),
     ("at_jobs", "AT job queue", true, ScanInterval::OnDemand),
     ("users", "User accounts", true, ScanInterval::OnDemand),
-    ("webshells", "Web shells (PHP/ASP/ASPX/Python/Ruby)", true, ScanInterval::Frequent),
+    (
+        "webshells",
+        "Web shells (PHP/ASP/ASPX/Python/Ruby)",
+        true,
+        ScanInterval::Frequent,
+    ),
     ("suid", "SUID binaries", true, ScanInterval::OnDemand),
     (
         "capabilities",
@@ -493,26 +500,26 @@ impl RestoreCredDialog {
         // Fields are indexed 0..=8 and must match field_label() and into_credentials() exactly.
         let fields = match service {
             RestoreCredService::Splunk => [
-                "admin".into(),  // 0  Admin Username
-                String::new(),   // 1  Admin Password
-                String::new(),   // 2  (unused)
-                String::new(),   // 3  (unused)
-                String::new(),   // 4  (unused)
-                String::new(),   // 5  (unused)
-                String::new(),   // 6  (unused)
-                String::new(),   // 7  (unused)
-                String::new(),   // 8  (unused)
+                "admin".into(), // 0  Admin Username
+                String::new(),  // 1  Admin Password
+                String::new(),  // 2  (unused)
+                String::new(),  // 3  (unused)
+                String::new(),  // 4  (unused)
+                String::new(),  // 5  (unused)
+                String::new(),  // 6  (unused)
+                String::new(),  // 7  (unused)
+                String::new(),  // 8  (unused)
             ],
             RestoreCredService::OpenCart => [
-                "localhost".into(),                     // 0  DB Hostname
-                "root".into(),                          // 1  DB Username
-                String::new(),                          // 2  DB Password
-                "opencart".into(),                      // 3  DB Name
-                "3306".into(),                          // 4  DB Port
-                detect_http_base_url(),                 // 5  HTTP base URL
-                "admin".into(),                         // 6  Admin Username
-                String::new(),                          // 7  Admin Password
-                "admin@example.com".into(),             // 8  Admin Email
+                "localhost".into(),         // 0  DB Hostname
+                "root".into(),              // 1  DB Username
+                String::new(),              // 2  DB Password
+                "opencart".into(),          // 3  DB Name
+                "3306".into(),              // 4  DB Port
+                detect_http_base_url(),     // 5  HTTP base URL
+                "admin".into(),             // 6  Admin Username
+                String::new(),              // 7  Admin Password
+                "admin@example.com".into(), // 8  Admin Email
             ],
             RestoreCredService::PrestaShop => [
                 "localhost".into(),         // 0  Shop Domain
@@ -907,7 +914,8 @@ impl App {
                 self.hardening_running = false;
                 self.hardening_log.push("Done.".to_string());
             } else {
-                self.hardening_log.push(strip_ansi(&format!("Running: {}…", p)));
+                self.hardening_log
+                    .push(strip_ansi(&format!("Running: {}…", p)));
             }
         }
         // Drain monitor progress: empty string = done, non-empty = log line.
@@ -1091,8 +1099,7 @@ impl App {
 
         std::thread::spawn(move || {
             let report = PathBuf::from("/tmp/defender-hardening.log");
-            let mut ctx = DefenderContext::new(report, false)
-                .with_progress(progress_tx.clone());
+            let mut ctx = DefenderContext::new(report, false).with_progress(progress_tx.clone());
             ctx.finding_tx = Some(finding_tx);
 
             let args = crate::system_hardening::CliArgs {
@@ -1126,8 +1133,7 @@ impl App {
         std::thread::spawn(move || {
             let _ = progress_tx.send(format!("Running {}…", module_id));
             let report = PathBuf::from("/tmp/defender-monitor.log");
-            let mut ctx = DefenderContext::new(report, false)
-                .with_progress(progress_tx.clone());
+            let mut ctx = DefenderContext::new(report, false).with_progress(progress_tx.clone());
             ctx.finding_tx = Some(finding_tx);
             match crate::monitoring::run_module(module_id, &ctx) {
                 Ok(()) => {
@@ -1160,8 +1166,7 @@ impl App {
         std::thread::spawn(move || {
             let _ = progress_tx.send(format!("Starting: {}…", label));
             let report = PathBuf::from("/tmp/defender-backup.log");
-            let ctx = DefenderContext::new(report, false)
-                .with_progress(progress_tx.clone());
+            let ctx = DefenderContext::new(report, false).with_progress(progress_tx.clone());
             let mut args = crate::backups::CliArgs {
                 all: false,
                 compare_hashes: false,
@@ -1477,9 +1482,9 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                     // Validate required fields before submitting.
                                     let missing = match svc {
                                         // Splunk: admin pass(1)
-                                        RestoreCredService::Splunk => [1]
-                                            .iter()
-                                            .any(|&i| dlg.fields[i].trim().is_empty()),
+                                        RestoreCredService::Splunk => {
+                                            [1].iter().any(|&i| dlg.fields[i].trim().is_empty())
+                                        }
                                         // OpenCart: DB user(1), DB pass(2), admin pass(7)
                                         RestoreCredService::OpenCart => [1, 2, 7]
                                             .iter()
@@ -1564,10 +1569,8 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                             ScanFocus::Findings => {
                                 let n = app.display_findings().len();
                                 if n > 0 {
-                                    app.findings_cursor = app
-                                        .findings_cursor
-                                        .checked_sub(1)
-                                        .unwrap_or(n - 1);
+                                    app.findings_cursor =
+                                        app.findings_cursor.checked_sub(1).unwrap_or(n - 1);
                                 }
                             }
                         },
@@ -1798,7 +1801,10 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                 app.download_result_rx = dl_rx;
                                 std::thread::spawn(move || {
                                     let msg = match crate::tools::downloader::download(&tool) {
-                                        Ok(result) => format!("nftbuild: downloaded to {}", result.path.display()),
+                                        Ok(result) => format!(
+                                            "nftbuild: downloaded to {}",
+                                            result.path.display()
+                                        ),
                                         Err(e) => format!("nftbuild: download failed — {}", e),
                                     };
                                     let _ = dl_tx.send(msg);
@@ -2329,7 +2335,8 @@ fn render_scan(f: &mut ratatui::Frame, area: Rect, app: &App) {
                 } else {
                     Style::default()
                 };
-                let module_prefix = format!("{:<10}", &finding.module[..finding.module.len().min(10)]);
+                let module_prefix =
+                    format!("{:<10}", &finding.module[..finding.module.len().min(10)]);
                 let line = Line::from(vec![
                     Span::styled(
                         format!("[{}]", finding.severity.label()),
@@ -2338,10 +2345,7 @@ fn render_scan(f: &mut ratatui::Frame, area: Rect, app: &App) {
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(" ", base_style),
-                    Span::styled(
-                        module_prefix,
-                        base_style.fg(Color::DarkGray),
-                    ),
+                    Span::styled(module_prefix, base_style.fg(Color::DarkGray)),
                     Span::styled(" ", base_style),
                     Span::styled(
                         format!("{:<7}", finding.verdict.label()),
@@ -2431,10 +2435,7 @@ fn render_finding_detail(
                 format!("  {:<width$}", "path", width = label_width),
                 Style::default().fg(Color::DarkGray),
             ),
-            Span::styled(
-                path.display().to_string(),
-                Style::default().fg(Color::Cyan),
-            ),
+            Span::styled(path.display().to_string(), Style::default().fg(Color::Cyan)),
         ]));
         lines.push(Line::from(""));
     }
@@ -2888,7 +2889,11 @@ fn render_monitor(f: &mut ratatui::Frame, area: Rect, app: &App) {
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
                 } else if lower.contains("warn") {
                     Style::default().fg(Color::Yellow)
-                } else if l.starts_with("[✓]") || lower.contains("done") || lower.contains("complete") || lower.contains("success") {
+                } else if l.starts_with("[✓]")
+                    || lower.contains("done")
+                    || lower.contains("complete")
+                    || lower.contains("success")
+                {
                     Style::default().fg(Color::Green)
                 } else if l.starts_with("[+]") {
                     Style::default().fg(Color::Cyan)

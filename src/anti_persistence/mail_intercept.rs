@@ -18,7 +18,9 @@ use std::process::Command;
 
 use crate::core::{Action, DefenderContext, Finding, Result, Severity, try_clear_immutable};
 
+/// Path to the Postfix main configuration file.
 const POSTFIX_MAIN: &str = "/etc/postfix/main.cf";
+/// Path to the Postfix master process configuration.
 const POSTFIX_MASTER: &str = "/etc/postfix/master.cf";
 
 /// Directories where attackers drop filter scripts and mail archive stores.
@@ -48,7 +50,10 @@ fn check_hidden_intercept_files(ctx: &DefenderContext) {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
             if !name.starts_with('.') {
                 continue;
             }
@@ -57,14 +62,21 @@ fn check_hidden_intercept_files(ctx: &DefenderContext) {
             try_clear_immutable(&path);
 
             let (removed, msg_count) = if path.is_dir() {
-                let count = fs::read_dir(&path).map(|d| d.filter_map(|e| e.ok()).count()).unwrap_or(0);
+                let count = fs::read_dir(&path)
+                    .map(|d| d.filter_map(|e| e.ok()).count())
+                    .unwrap_or(0);
                 (fs::remove_dir_all(&path).is_ok(), count)
             } else {
                 (ctx.remove_path_logged(&path), 0)
             };
 
             let detail = if path.is_dir() || msg_count > 0 {
-                format!("path: {}\nitems: {}\nremoved: {}", path.display(), msg_count, removed)
+                format!(
+                    "path: {}\nitems: {}\nremoved: {}",
+                    path.display(),
+                    msg_count,
+                    removed
+                )
             } else {
                 format!("path: {}\nremoved: {}", path.display(), removed)
             };
@@ -89,6 +101,7 @@ fn check_hidden_intercept_files(ctx: &DefenderContext) {
     }
 }
 
+/// Flag any non-empty `content_filter` wired into main.cf.
 fn check_postfix_content_filter(ctx: &DefenderContext) {
     // Try postconf first; fall back to grepping main.cf directly.
     let value = Command::new("postconf")
@@ -104,7 +117,13 @@ fn check_postfix_content_filter(ctx: &DefenderContext) {
             .unwrap_or_default()
             .lines()
             .find(|l| l.trim_start().starts_with("content_filter"))
-            .map(|l| l.splitn(2, '=').nth(1).unwrap_or("").trim().to_string())
+            .map(|l| {
+                l.split_once('=')
+                    .map(|x| x.1)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            })
             .unwrap_or_default()
     } else {
         value
@@ -119,7 +138,10 @@ fn check_postfix_content_filter(ctx: &DefenderContext) {
         Finding::new(
             Severity::Critical,
             "mail_intercept",
-            format!("postfix content_filter is set: '{}' — all mail is being intercepted", value),
+            format!(
+                "postfix content_filter is set: '{}' — all mail is being intercepted",
+                value
+            ),
             format!(
                 "content_filter: {}\n\nEvery message postfix receives is passed to this filter. \
                  Clear it with: postconf -e 'content_filter=' && postfix reload",
@@ -135,11 +157,16 @@ fn check_postfix_content_filter(ctx: &DefenderContext) {
 
 /// Suspicious path prefixes in a postfix pipe transport argv.
 const SUSPICIOUS_PIPE_PREFIXES: &[&str] = &[
-    "/tmp/", "/var/tmp/", "/dev/shm/",
-    "/home/", "/opt/",
-    "/usr/local/lib/.", "/usr/lib/.",
+    "/tmp/",
+    "/var/tmp/",
+    "/dev/shm/",
+    "/home/",
+    "/opt/",
+    "/usr/local/lib/.",
+    "/usr/lib/.",
 ];
 
+/// Flag suspicious pipe transports in master.cf.
 fn check_postfix_master(ctx: &DefenderContext) {
     let path = Path::new(POSTFIX_MASTER);
     let Ok(contents) = fs::read_to_string(path) else {
@@ -155,17 +182,34 @@ fn check_postfix_master(ctx: &DefenderContext) {
     for line in contents.lines() {
         let trimmed = line.trim();
         // A service line (not indented) resets context.
-        if !line.starts_with(' ') && !line.starts_with('\t') && !trimmed.is_empty() && !trimmed.starts_with('#') {
-            in_pipe_service = trimmed.split_whitespace().nth(7).map(|t| t == "pipe").unwrap_or(false);
+        if !line.starts_with(' ')
+            && !line.starts_with('\t')
+            && !trimmed.is_empty()
+            && !trimmed.starts_with('#')
+        {
+            in_pipe_service = trimmed
+                .split_whitespace()
+                .nth(7)
+                .map(|t| t == "pipe")
+                .unwrap_or(false);
         }
         if in_pipe_service && trimmed.contains("argv=") {
             let after_argv = trimmed.split("argv=").nth(1).unwrap_or("");
-            let prefix_hit = SUSPICIOUS_PIPE_PREFIXES.iter().any(|p| after_argv.contains(p));
+            let prefix_hit = SUSPICIOUS_PIPE_PREFIXES
+                .iter()
+                .any(|p| after_argv.contains(p));
             // Also flag any pipe argv whose executable basename starts with '.' --
             // that's a hidden file regardless of which directory it's in.
-            let hidden_basename = after_argv.split_whitespace().next().map(|exe| {
-                exe.rsplit('/').next().map(|b| b.starts_with('.') && b.len() > 1).unwrap_or(false)
-            }).unwrap_or(false);
+            let hidden_basename = after_argv
+                .split_whitespace()
+                .next()
+                .map(|exe| {
+                    exe.rsplit('/')
+                        .next()
+                        .map(|b| b.starts_with('.') && b.len() > 1)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
             if prefix_hit || hidden_basename {
                 suspicious_lines.push(line.to_string());
             }
@@ -203,6 +247,7 @@ fn check_postfix_master(ctx: &DefenderContext) {
     );
 }
 
+/// Clear and report immutable flags on Postfix configs.
 fn check_postfix_immutable(ctx: &DefenderContext) {
     for config in [POSTFIX_MAIN, POSTFIX_MASTER] {
         let path = Path::new(config);
@@ -232,7 +277,10 @@ fn check_postfix_immutable(ctx: &DefenderContext) {
             Finding::new(
                 Severity::High,
                 "mail_intercept",
-                format!("postfix config {} is immutable (+i) — blocks mail intercept repair", config),
+                format!(
+                    "postfix config {} is immutable (+i) — blocks mail intercept repair",
+                    config
+                ),
                 format!(
                     "file: {}\n\nThe immutable flag prevents editing the postfix configuration \
                      to remove the content_filter. Cleared with chattr -i.",

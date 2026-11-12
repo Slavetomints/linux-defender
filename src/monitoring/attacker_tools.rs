@@ -22,7 +22,9 @@ const VOLATILE_DIRS: &[&str] = &["/tmp", "/dev/shm", "/var/tmp", "/run/shm", "/r
 /// legitimate compiled executable should ever reside.
 fn is_volatile_path(path: &std::path::Path) -> bool {
     let p = path.to_string_lossy();
-    VOLATILE_DIRS.iter().any(|d| p.starts_with(&format!("{}/", d)))
+    VOLATILE_DIRS
+        .iter()
+        .any(|d| p.starts_with(&format!("{}/", d)))
 }
 
 /// Filenames (or substrings) that indicate attacker tooling.
@@ -66,7 +68,9 @@ const KNOWN_TOOL_NAMES: &[&str] = &[
 ];
 
 /// Directories scanned for known tool names.
-const TOOL_SCAN_DIRS: &[&str] = &["/tmp", "/dev/shm", "/var/tmp", "/run/shm", "/opt", "/var/lib"];
+const TOOL_SCAN_DIRS: &[&str] = &[
+    "/tmp", "/dev/shm", "/var/tmp", "/run/shm", "/opt", "/var/lib",
+];
 
 /// Hidden subdirectories under a home dir that may hide executables.
 const HIDDEN_HOME_DIRS: &[&str] = &[".local/bin", ".config", ".cache", ".local/lib"];
@@ -188,13 +192,16 @@ fn scan_known_tools(ctx: &DefenderContext) {
                     //  - semi-persistent (/opt, /var/lib, ~/.cache): only if unpackaged
                     let path_str = path.to_string_lossy().to_string();
                     let volatile = is_volatile_path(path);
-                    let packaged = !volatile
-                        && pm != PkgManager::Unknown
-                        && is_package_owned(&path_str, pm);
+                    let packaged =
+                        !volatile && pm != PkgManager::Unknown && is_package_owned(&path_str, pm);
                     if packaged {
                         continue; // vendor binary (e.g. Splunk), legitimately installed
                     }
-                    let severity = if volatile { Severity::Critical } else { Severity::High };
+                    let severity = if volatile {
+                        Severity::Critical
+                    } else {
+                        Severity::High
+                    };
                     count += 1;
                     ctx.log_evidence_file(path);
                     ctx.emit(

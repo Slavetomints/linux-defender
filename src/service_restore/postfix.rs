@@ -53,12 +53,19 @@ pub fn run(ctx: &DefenderContext) -> Result {
     }
 
     // Purge the full package set so no stale configs or binaries remain.
-    ctx.progress(&format!("[+] Removing existing packages ({})...", distro.name()));
+    ctx.progress(&format!(
+        "[+] Removing existing packages ({})...",
+        distro.name()
+    ));
     let _ = distro.remove_cmd(pkgs).output();
     ctx.progress("[✓] Removed (or were not present)");
 
     // Install the full set in one pass.
-    ctx.progress(&format!("[+] Installing {} ({})...", pkgs.join(" "), distro.name()));
+    ctx.progress(&format!(
+        "[+] Installing {} ({})...",
+        pkgs.join(" "),
+        distro.name()
+    ));
     let output = distro
         .install_cmd(pkgs)
         .output()

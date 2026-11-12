@@ -21,6 +21,7 @@ use crate::core::{Action, DefenderContext, Finding, Result, Severity, Verdict};
 
 /// Files and directories that hold apt source definitions.
 const SOURCES_FILE: &str = "/etc/apt/sources.list";
+/// Directory holding drop-in apt source files.
 const SOURCES_DIR: &str = "/etc/apt/sources.list.d";
 
 /// Host suffixes that belong to the official Debian/Ubuntu archive network.
@@ -68,7 +69,10 @@ pub fn run(ctx: &DefenderContext) -> Result {
         }
     }
 
-    ctx.log_msg(&format!("[✓] apt source audit: {} suspicious entr(ies)", flagged));
+    ctx.log_msg(&format!(
+        "[✓] apt source audit: {} suspicious entr(ies)",
+        flagged
+    ));
     Ok(())
 }
 
@@ -191,11 +195,18 @@ fn emit_if_suspicious(
         ));
     }
     if verification_off {
-        reasons.push(format!("signature verification disabled ({})", insecure.join(", ")));
+        reasons.push(format!(
+            "signature verification disabled ({})",
+            insecure.join(", ")
+        ));
     }
 
     // Disabled verification is unambiguous; an untrusted host alone warrants review.
-    let severity = if verification_off { Severity::Critical } else { Severity::High };
+    let severity = if verification_off {
+        Severity::Critical
+    } else {
+        Severity::High
+    };
 
     ctx.log_evidence_line(&file.display().to_string(), entry);
     ctx.emit(
@@ -255,8 +266,14 @@ mod tests {
 
     #[test]
     fn host_extraction() {
-        assert_eq!(host_of("http://deb.debian.org/debian").as_deref(), Some("deb.debian.org"));
-        assert_eq!(host_of("https://evil.net:8080/x").as_deref(), Some("evil.net"));
+        assert_eq!(
+            host_of("http://deb.debian.org/debian").as_deref(),
+            Some("deb.debian.org")
+        );
+        assert_eq!(
+            host_of("https://evil.net:8080/x").as_deref(),
+            Some("evil.net")
+        );
         assert_eq!(scheme_of("http://x/y").as_deref(), Some("http"));
         assert_eq!(host_of("notauri"), None);
     }

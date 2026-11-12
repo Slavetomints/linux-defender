@@ -131,7 +131,10 @@ fn check_grub_d(ctx: &DefenderContext) {
                     Severity::Medium,
                     "grub",
                     format!("Non-stock grub.d script: {}", path.display()),
-                    format!("Script {} is not on the known-stock list. Verify it is expected.", path.display()),
+                    format!(
+                        "Script {} is not on the known-stock list. Verify it is expected.",
+                        path.display()
+                    ),
                 )
                 .with_path((*path).clone()),
             );

@@ -194,10 +194,7 @@ fn numeric_proc_dirs() -> Vec<u32> {
 
 /// Run `ss -ulnp` and return the set of bound UDP local ports.
 fn udp_ports_from_ss() -> HashSet<u16> {
-    let Ok(out) = std::process::Command::new("ss")
-        .args(["-ulnp"])
-        .output()
-    else {
+    let Ok(out) = std::process::Command::new("ss").args(["-ulnp"]).output() else {
         return HashSet::new();
     };
     let text = String::from_utf8_lossy(&out.stdout);
@@ -222,15 +219,17 @@ fn udp_ports_from_ss() -> HashSet<u16> {
 
 /// Return the last `n` lines from dmesg, or None if dmesg is unavailable.
 fn get_kernel_version() -> Option<String> {
-    let out = std::process::Command::new("uname").arg("-r").output().ok()?;
+    let out = std::process::Command::new("uname")
+        .arg("-r")
+        .output()
+        .ok()?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if s.is_empty() { None } else { Some(s) }
 }
 
+/// Return the last `n` lines of `dmesg`, or None if unavailable.
 fn read_dmesg_tail(n: usize) -> Option<Vec<String>> {
-    let out = std::process::Command::new("dmesg")
-        .output()
-        .ok()?;
+    let out = std::process::Command::new("dmesg").output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
     let start = lines.len().saturating_sub(n);
@@ -434,8 +433,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
             {
                 continue;
             }
-            let comm = std::fs::read_to_string(format!("/proc/{}/comm", pid))
-                .unwrap_or_default();
+            let comm = std::fs::read_to_string(format!("/proc/{}/comm", pid)).unwrap_or_default();
             let name = comm.trim();
             findings += 1;
             ctx.emit(
@@ -467,7 +465,11 @@ pub fn run(ctx: &DefenderContext) -> Result {
     ctx.log_msg(&format!(
         "[+] LD_PRELOAD check: {} suspicious process{}",
         findings - ld_findings_start,
-        if findings - ld_findings_start == 1 { "" } else { "es" },
+        if findings - ld_findings_start == 1 {
+            ""
+        } else {
+            "es"
+        },
     ));
 
     // ── Check 4: Deleted libraries still mapped ───────────────────────────────
@@ -477,8 +479,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
         let Ok(contents) = std::fs::read_to_string(&maps_path) else {
             continue;
         };
-        let comm = std::fs::read_to_string(format!("/proc/{}/comm", pid))
-            .unwrap_or_default();
+        let comm = std::fs::read_to_string(format!("/proc/{}/comm", pid)).unwrap_or_default();
         let name = comm.trim().to_string();
         let mut reported = std::collections::HashSet::new();
         for line in contents.lines() {
@@ -530,7 +531,11 @@ pub fn run(ctx: &DefenderContext) -> Result {
     ctx.log_msg(&format!(
         "[+] Deleted-lib check: {} deleted-but-mapped librar{}",
         findings - del_findings_start,
-        if findings - del_findings_start == 1 { "y" } else { "ies" },
+        if findings - del_findings_start == 1 {
+            "y"
+        } else {
+            "ies"
+        },
     ));
 
     // ── Check 5: UDP port hiding ──────────────────────────────────────────────
@@ -583,7 +588,11 @@ pub fn run(ctx: &DefenderContext) -> Result {
         udp_proc_ports.len(),
         udp_ss_ports.len(),
         findings - udp_findings_start,
-        if findings - udp_findings_start == 1 { "y" } else { "ies" },
+        if findings - udp_findings_start == 1 {
+            "y"
+        } else {
+            "ies"
+        },
     ));
 
     // ── Check 6: dmesg rootkit signatures ─────────────────────────────────────
@@ -605,7 +614,11 @@ pub fn run(ctx: &DefenderContext) -> Result {
                         Finding::new(
                             Severity::High,
                             "rootkit_cross_check",
-                            format!("dmesg contains rootkit-associated string '{}': {}", sig, line.trim()),
+                            format!(
+                                "dmesg contains rootkit-associated string '{}': {}",
+                                sig,
+                                line.trim()
+                            ),
                             format!("signature: {}\ndmesg line: {}", sig, line.trim()),
                         )
                         .with_context("signature", sig.to_string())
@@ -628,7 +641,11 @@ pub fn run(ctx: &DefenderContext) -> Result {
     ctx.log_msg(&format!(
         "[+] dmesg check: {} rootkit signature match{}",
         findings - dmesg_findings_start,
-        if findings - dmesg_findings_start == 1 { "" } else { "es" },
+        if findings - dmesg_findings_start == 1 {
+            ""
+        } else {
+            "es"
+        },
     ));
 
     // ── Check 7: out-of-tree kernel modules ───────────────────────────────────
@@ -680,7 +697,11 @@ pub fn run(ctx: &DefenderContext) -> Result {
     ctx.log_msg(&format!(
         "[+] out-of-tree module check: {} suspicious module{}",
         findings - oottree_findings_start,
-        if findings - oottree_findings_start == 1 { "" } else { "s" },
+        if findings - oottree_findings_start == 1 {
+            ""
+        } else {
+            "s"
+        },
     ));
 
     ctx.log_msg(&format!(

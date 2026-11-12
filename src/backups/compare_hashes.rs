@@ -54,7 +54,10 @@ pub fn run(ctx: &DefenderContext, save_location: &Option<PathBuf>) -> Result {
 
     let diff = compare(&previous, &current);
 
-    ctx.progress(&format!("Comparison results against {}:", hash_file_path.display()));
+    ctx.progress(&format!(
+        "Comparison results against {}:",
+        hash_file_path.display()
+    ));
     ctx.progress(&format!("  Added: {}", diff.added.len()));
     for k in &diff.added {
         ctx.progress(&format!("    + {}", k));
@@ -65,7 +68,10 @@ pub fn run(ctx: &DefenderContext, save_location: &Option<PathBuf>) -> Result {
     }
     ctx.progress(&format!("  Changed: {}", diff.changed.len()));
     for (k, prev, curr) in &diff.changed {
-        ctx.progress(&format!("    * {}\n      prev: {}\n      curr: {}", k, prev, curr));
+        ctx.progress(&format!(
+            "    * {}\n      prev: {}\n      curr: {}",
+            k, prev, curr
+        ));
     }
     ctx.progress(&format!("  Unchanged: {}", diff.unchanged));
 

@@ -57,7 +57,8 @@ pub fn run(box_type: BoxType, opts: &RunOptions) -> Result<NftbuildResult> {
     cmd.arg("-sys").arg(sys_arg(box_type));
 
     // Always allow inbound SSH; optionally also allow outbound.
-    cmd.arg("-ssh").arg(if opts.allow_outbound_ssh { "ie" } else { "i" });
+    cmd.arg("-ssh")
+        .arg(if opts.allow_outbound_ssh { "ie" } else { "i" });
     if opts.zero_trust {
         cmd.arg("-z");
     }

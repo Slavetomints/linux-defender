@@ -17,20 +17,28 @@ use crate::core::{DefenderContext, DefenderError, Result, prompt_yes};
 
 use super::distro::{Distro, enable_and_restart, restore_config_from_backup};
 
+/// Return the Roundcube package set for `distro`.
 fn roundcube_packages(distro: Distro) -> &'static [&'static str] {
     match distro {
-        Distro::Debian => &["roundcube", "roundcube-core", "roundcube-mysql", "mariadb-server", "apache2"],
-        Distro::Rhel   => &["roundcubemail", "httpd"],
-        Distro::Arch   => &["roundcubemail", "apache"],
-        Distro::Suse   => &["roundcubemail", "apache2"],
+        Distro::Debian => &[
+            "roundcube",
+            "roundcube-core",
+            "roundcube-mysql",
+            "mariadb-server",
+            "apache2",
+        ],
+        Distro::Rhel => &["roundcubemail", "httpd"],
+        Distro::Arch => &["roundcubemail", "apache"],
+        Distro::Suse => &["roundcubemail", "apache2"],
         Distro::Alpine => &["roundcubemail", "apache2"],
     }
 }
 
+/// Return the Apache service unit name for `distro`.
 fn apache_service(distro: Distro) -> &'static str {
     match distro {
         Distro::Rhel => "httpd",
-        _            => "apache2",
+        _ => "apache2",
     }
 }
 
@@ -51,7 +59,11 @@ pub fn run(ctx: &DefenderContext) -> Result {
         return Ok(());
     }
 
-    ctx.progress(&format!("[+] Installing {} ({})...", pkgs.join(" "), distro.name()));
+    ctx.progress(&format!(
+        "[+] Installing {} ({})...",
+        pkgs.join(" "),
+        distro.name()
+    ));
     let output = distro
         .install_cmd(pkgs)
         .output()
@@ -80,7 +92,9 @@ pub fn run(ctx: &DefenderContext) -> Result {
         } else {
             "/usr/share/roundcube"
         };
-        ctx.progress(&format!("[+] Writing Apache alias for roundcube at {webroot}..."));
+        ctx.progress(&format!(
+            "[+] Writing Apache alias for roundcube at {webroot}..."
+        ));
         let conf = format!(
             "Alias /roundcube {webroot}\n\
              <Directory {webroot}>\n\
@@ -117,7 +131,11 @@ pub fn run(ctx: &DefenderContext) -> Result {
                     .and_then(|l| {
                         let s = l.find('\'')?;
                         let e = l.rfind('\'')?;
-                        if s < e { Some(l[s+1..e].to_string()) } else { None }
+                        if s < e {
+                            Some(l[s + 1..e].to_string())
+                        } else {
+                            None
+                        }
                     })
                     .unwrap_or_default()
             };
@@ -147,9 +165,11 @@ pub fn run(ctx: &DefenderContext) -> Result {
         let cfg = "/etc/roundcube/config.inc.php";
         if std::path::Path::new(cfg).exists() {
             let _ = Command::new("sed")
-                .args(["-i",
+                .args([
+                    "-i",
                     r"s/\$config\['default_host'\] = '';/\$config['default_host'] = 'localhost';/",
-                    cfg])
+                    cfg,
+                ])
                 .output();
         }
     }

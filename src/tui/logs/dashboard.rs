@@ -108,7 +108,12 @@ fn pane_configs(box_type: BoxType) -> Vec<(&'static str, PaneSource)> {
                 "auth",
                 PaneSource {
                     paths: vec!["/var/log/auth.log".into(), "/var/log/secure".into()],
-                    filters: vec!["sasl".into(), "imap".into(), "smtp".into(), "dovecot".into()],
+                    filters: vec![
+                        "sasl".into(),
+                        "imap".into(),
+                        "smtp".into(),
+                        "dovecot".into(),
+                    ],
                 },
             ),
             (

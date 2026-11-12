@@ -220,7 +220,10 @@ fn scan_cron_d_file(ctx: &DefenderContext, path: &Path) {
             format!(
                 "file: {}\nsuspicious_lines:\n  {}\npatterns: {}\nremoved: {}",
                 path.display(),
-                hits.iter().map(|(l, _)| *l).collect::<Vec<_>>().join("\n  "),
+                hits.iter()
+                    .map(|(l, _)| *l)
+                    .collect::<Vec<_>>()
+                    .join("\n  "),
                 all_reasons.join(", "),
                 removed,
             ),
@@ -230,7 +233,11 @@ fn scan_cron_d_file(ctx: &DefenderContext, path: &Path) {
         .with_context("patterns", all_reasons.join(", "))
         .with_context("removed", removed.to_string())
         .with_verdict(
-            if removed { Verdict::Remove } else { Verdict::Investigate },
+            if removed {
+                Verdict::Remove
+            } else {
+                Verdict::Investigate
+            },
             format!(
                 "cron.d file matched suspicious pattern(s) [{}]. \
                  Entire file removed -- any entry in /etc/cron.d runs as an arbitrary user.",

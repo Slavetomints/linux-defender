@@ -57,6 +57,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
 // ── Check 1: Package integrity ────────────────────────────────────────────────
 
+/// Verify critical package file checksums via the package manager.
 fn check_package_integrity(ctx: &DefenderContext, pm: PkgManager) {
     match pm {
         PkgManager::Rpm => check_rpm_integrity(ctx),
@@ -154,10 +155,7 @@ fn parse_rpm_verify_line(ctx: &DefenderContext, pkg: &str, line: &str) {
                 Severity::High,
                 "malicious_binaries",
                 format!("Package file size changed: {} (package: {})", path, pkg),
-                format!(
-                    "package: {}\nfile: {}\nrpm -V output: {}",
-                    pkg, path, line
-                ),
+                format!("package: {}\nfile: {}\nrpm -V output: {}", pkg, path, line),
             )
             .with_context("package", pkg.to_string())
             .with_context("file", path.to_string())
@@ -177,10 +175,7 @@ fn parse_rpm_verify_line(ctx: &DefenderContext, pkg: &str, line: &str) {
 fn check_dpkg_integrity(ctx: &DefenderContext) {
     for &pkg in DEB_PACKAGES {
         ctx.debug(&format!("dpkg --verify {}", pkg));
-        let Ok(out) = Command::new("dpkg")
-            .args(["--verify", pkg])
-            .output()
-        else {
+        let Ok(out) = Command::new("dpkg").args(["--verify", pkg]).output() else {
             continue;
         };
 
@@ -236,12 +231,16 @@ fn parse_dpkg_verify_line(ctx: &DefenderContext, pkg: &str, line: &str) {
                 pkg
             ),
         )
-        .with_action(Action::Manual(format!("apt-get install --reinstall {}", pkg))),
+        .with_action(Action::Manual(format!(
+            "apt-get install --reinstall {}",
+            pkg
+        ))),
     );
 }
 
 // ── Check 2: PHP extension package ownership ──────────────────────────────────
 
+/// Flag PHP extension .so files not owned by any package.
 fn check_php_extensions(ctx: &DefenderContext, pm: PkgManager) {
     if pm == PkgManager::Unknown {
         ctx.debug("No package manager — skipping PHP extension ownership check");
@@ -275,9 +274,7 @@ fn check_php_extensions(ctx: &DefenderContext, pm: PkgManager) {
         let owned = is_package_owned(&path_str, pm);
 
         if !owned {
-            let size = std::fs::metadata(&path)
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
             ctx.log_evidence_line("php_extension_unpackaged", &path_str);
             ctx.emit(

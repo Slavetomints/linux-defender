@@ -28,25 +28,42 @@ use crate::core::{
 /// Disabling these would kill logging, the firewall, or audit trails mid-competition.
 const BASELINE_ALLOW: &[&str] = &[
     // remote access
-    "ssh", "sshd",
+    "ssh",
+    "sshd",
     // scheduling
-    "cron", "crond", "atd",
+    "cron",
+    "crond",
+    "atd",
     // firewall — NEVER disable; nftbuild writes rules then exits, the service keeps them loaded
-    "nftables", "iptables", "ip6tables", "firewalld", "ufw",
+    "nftables",
+    "iptables",
+    "ip6tables",
+    "firewalld",
+    "ufw",
     // logging
-    "rsyslog", "syslog", "syslog-ng",
+    "rsyslog",
+    "syslog",
+    "syslog-ng",
     // audit
     "auditd",
     // intrusion detection
     "fail2ban",
     // mandatory access control
-    "apparmor", "selinux",
+    "apparmor",
+    "selinux",
     // dbus (required by many systemd units)
     "dbus",
 ];
 
 /// Services allowed on a Web box.
-const WEB_ALLOW: &[&str] = &["nginx", "apache2", "httpd", "php-fpm", "php8.1-fpm", "php8.2-fpm"];
+const WEB_ALLOW: &[&str] = &[
+    "nginx",
+    "apache2",
+    "httpd",
+    "php-fpm",
+    "php8.1-fpm",
+    "php8.2-fpm",
+];
 
 /// Services allowed on a Mail box.
 const MAIL_ALLOW: &[&str] = &[
@@ -54,12 +71,19 @@ const MAIL_ALLOW: &[&str] = &[
     "dovecot",
     "roundcubemail",
     // roundcube needs a web server
-    "apache2", "nginx", "httpd",
-    "php-fpm", "php8.1-fpm", "php8.2-fpm",
+    "apache2",
+    "nginx",
+    "httpd",
+    "php-fpm",
+    "php8.1-fpm",
+    "php8.2-fpm",
     // spamassassin / amavis common on mail boxes
-    "spamassassin", "amavis", "amavisd",
+    "spamassassin",
+    "amavis",
+    "amavisd",
     // DNS resolver sometimes local on mail boxes for SPF checks
-    "named", "bind9",
+    "named",
+    "bind9",
 ];
 
 /// Services allowed on a Splunk box.
@@ -68,8 +92,12 @@ const SPLUNK_ALLOW: &[&str] = &["splunk", "SplunkForwarder"];
 /// Services allowed on a General-purpose box.
 const GENERAL_ALLOW: &[&str] = &[
     // common scored services that might appear on a general box
-    "mysql", "mariadb", "postgresql", "mongod",
-    "named", "bind9",
+    "mysql",
+    "mariadb",
+    "postgresql",
+    "mongod",
+    "named",
+    "bind9",
 ];
 
 /// Return the allow-list for the given `box_type`.
@@ -195,7 +223,12 @@ pub fn run(ctx: &DefenderContext) -> Result {
 fn check_masked_scored_units(ctx: &DefenderContext) {
     ctx.log_msg("[+] Checking for masked scored services...");
     let output = Command::new("systemctl")
-        .args(["list-unit-files", "--state=masked", "--no-legend", "--plain"])
+        .args([
+            "list-unit-files",
+            "--state=masked",
+            "--no-legend",
+            "--plain",
+        ])
         .output();
 
     let Ok(out) = output else {
@@ -222,7 +255,10 @@ fn check_masked_scored_units(ctx: &DefenderContext) {
             Finding::new(
                 Severity::Critical,
                 "services",
-                format!("Scored service '{}' was MASKED — unmasked and restarted", svc),
+                format!(
+                    "Scored service '{}' was MASKED — unmasked and restarted",
+                    svc
+                ),
                 format!(
                     "service: {}\nwas: masked (unit symlinked to /dev/null)\nunmasked: {}\n\
                      restarted: {}\nactive_now: {}",
@@ -241,7 +277,10 @@ fn check_masked_scored_units(ctx: &DefenderContext) {
                     svc, svc
                 ),
             )
-            .with_action(Action::Manual(format!("systemctl unmask {} && systemctl enable --now {}", svc, svc))),
+            .with_action(Action::Manual(format!(
+                "systemctl unmask {} && systemctl enable --now {}",
+                svc, svc
+            ))),
         );
     }
 }
@@ -330,13 +369,42 @@ mod tests {
 
     #[test]
     fn baseline_services_allowed_on_all_box_types() {
-        for box_type in [BoxType::Web, BoxType::Mail, BoxType::Splunk, BoxType::General] {
-            assert!(is_allowed("nftables", box_type), "nftables must be allowed on {:?}", box_type);
-            assert!(is_allowed("rsyslog", box_type), "rsyslog must be allowed on {:?}", box_type);
-            assert!(is_allowed("auditd", box_type), "auditd must be allowed on {:?}", box_type);
-            assert!(is_allowed("fail2ban", box_type), "fail2ban must be allowed on {:?}", box_type);
-            assert!(is_allowed("apparmor", box_type), "apparmor must be allowed on {:?}", box_type);
-            assert!(is_allowed("atd", box_type), "atd must be allowed on {:?}", box_type);
+        for box_type in [
+            BoxType::Web,
+            BoxType::Mail,
+            BoxType::Splunk,
+            BoxType::General,
+        ] {
+            assert!(
+                is_allowed("nftables", box_type),
+                "nftables must be allowed on {:?}",
+                box_type
+            );
+            assert!(
+                is_allowed("rsyslog", box_type),
+                "rsyslog must be allowed on {:?}",
+                box_type
+            );
+            assert!(
+                is_allowed("auditd", box_type),
+                "auditd must be allowed on {:?}",
+                box_type
+            );
+            assert!(
+                is_allowed("fail2ban", box_type),
+                "fail2ban must be allowed on {:?}",
+                box_type
+            );
+            assert!(
+                is_allowed("apparmor", box_type),
+                "apparmor must be allowed on {:?}",
+                box_type
+            );
+            assert!(
+                is_allowed("atd", box_type),
+                "atd must be allowed on {:?}",
+                box_type
+            );
         }
     }
 
@@ -394,8 +462,21 @@ mod tests {
     #[test]
     fn scored_units_are_never_disabled_on_any_box() {
         for box_type in BoxType::ALL {
-            for svc in ["Splunkd", "mariadb", "mysql", "NetworkManager", "networking", "sssd", "php8.1-fpm"] {
-                assert!(is_allowed(svc, *box_type), "{} disabled on {:?}", svc, box_type);
+            for svc in [
+                "Splunkd",
+                "mariadb",
+                "mysql",
+                "NetworkManager",
+                "networking",
+                "sssd",
+                "php8.1-fpm",
+            ] {
+                assert!(
+                    is_allowed(svc, *box_type),
+                    "{} disabled on {:?}",
+                    svc,
+                    box_type
+                );
             }
         }
     }

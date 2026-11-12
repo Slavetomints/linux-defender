@@ -1,11 +1,29 @@
-//! Attacker tool detection: known tool names, executables in hidden dirs,
-//! double-extension files, and processes running from deleted/anonymous memory.
+//! Attacker tool detection.
+//!
+//! Primary signal is behavioral, not name-based: an unpackaged compiled
+//! executable staged in a volatile/world-writable directory is flagged by its
+//! LOCATION, so renamed tooling (e.g. `chisel` -> `kworkerd`) is still caught.
+//! The known-tool name list is only a fast-path enrichment on top of that, not
+//! the thing coverage depends on. Also covers executables in hidden home dirs
+//! and double-extension files.
 
 use std::os::unix::fs::PermissionsExt;
 use walkdir::WalkDir;
 
+use crate::core::pkg::{PkgManager, detect_package_manager, is_package_owned};
 use crate::core::scan::suspicious_matches;
 use crate::core::{DefenderContext, Finding, Result, Severity, Verdict};
+
+/// Directories where a compiled executable is *always* out of place: world-writable
+/// or volatile tmpfs/spool locations no package ever installs an ELF binary into.
+const VOLATILE_DIRS: &[&str] = &["/tmp", "/dev/shm", "/var/tmp", "/run/shm", "/run"];
+
+/// True if `path` lives under a volatile/world-writable directory where no
+/// legitimate compiled executable should ever reside.
+fn is_volatile_path(path: &std::path::Path) -> bool {
+    let p = path.to_string_lossy();
+    VOLATILE_DIRS.iter().any(|d| p.starts_with(&format!("{}/", d)))
+}
 
 /// Filenames (or substrings) that indicate attacker tooling.
 const KNOWN_TOOL_NAMES: &[&str] = &[
@@ -83,8 +101,10 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
 /// Check temp directories for executables matching known attacker tool names.
 fn scan_known_tools(ctx: &DefenderContext) {
-    ctx.log_msg("[+] Scanning temp dirs for known attacker tools...");
+    ctx.log_msg("[+] Scanning temp dirs for staged attacker tools...");
     let mut count = 0u32;
+    // Used to tell vendor binaries (e.g. Splunk under /opt) from dropped tooling.
+    let pm = detect_package_manager();
 
     // Also include per-user hidden dirs
     let mut dirs: Vec<String> = TOOL_SCAN_DIRS.iter().map(|s| s.to_string()).collect();
@@ -160,7 +180,53 @@ fn scan_known_tools(ctx: &DefenderContext) {
                     Err(_) => continue,
                 };
                 if raw.starts_with(b"\x7fELF") {
-                    continue; // compiled binary, not a script
+                    // A compiled executable in a staging dir is a TTP on its own: no
+                    // legit reason for an ELF to sit in a world-writable/volatile dir,
+                    // and renamed tooling (chisel -> kworkerd) evades the name list.
+                    // Content scanning is useless on a binary, so judge by LOCATION:
+                    //  - volatile dir (/tmp, /dev/shm, ...): always suspicious
+                    //  - semi-persistent (/opt, /var/lib, ~/.cache): only if unpackaged
+                    let path_str = path.to_string_lossy().to_string();
+                    let volatile = is_volatile_path(path);
+                    let packaged = !volatile
+                        && pm != PkgManager::Unknown
+                        && is_package_owned(&path_str, pm);
+                    if packaged {
+                        continue; // vendor binary (e.g. Splunk), legitimately installed
+                    }
+                    let severity = if volatile { Severity::Critical } else { Severity::High };
+                    count += 1;
+                    ctx.log_evidence_file(path);
+                    ctx.emit(
+                        Finding::new(
+                            severity,
+                            "attacker_tools",
+                            format!(
+                                "Unpackaged executable binary staged in {}: {}",
+                                if volatile { "volatile dir" } else { "non-standard dir" },
+                                path.display()
+                            ),
+                            format!(
+                                "path: {}\ntype: ELF executable\nvolatile_dir: {}\npackage_owned: {}\n\
+                                 reason: compiled executables do not belong in staging/volatile \
+                                 directories; renamed red-team tooling is caught here by location, \
+                                 not by filename",
+                                path.display(),
+                                volatile,
+                                !volatile && is_package_owned(&path_str, pm),
+                            ),
+                        )
+                        .with_path(path.to_path_buf())
+                        .with_context("path", path_str)
+                        .with_context("type", "ELF executable")
+                        .with_verdict(
+                            Verdict::Investigate,
+                            "An executable binary is staged outside the package-managed tree. \
+                             Identify the process that dropped it (check parent, mtime, open FDs) \
+                             and remove it if it is not a known-good local build.".to_string(),
+                        ),
+                    );
+                    continue;
                 }
                 let snippet = String::from_utf8_lossy(&raw[..raw.len().min(512)]).into_owned();
                 let hits: Vec<&'static str> = suspicious_matches(&fname)
@@ -394,6 +460,19 @@ mod tests {
         let lower = fname.to_lowercase();
         let matched = KNOWN_TOOL_NAMES.iter().find(|&&t| lower.contains(t));
         assert!(matched.is_some());
+    }
+
+    #[test]
+    fn volatile_path_classification() {
+        use std::path::Path;
+        assert!(is_volatile_path(Path::new("/tmp/kworkerd")));
+        assert!(is_volatile_path(Path::new("/dev/shm/.x")));
+        assert!(is_volatile_path(Path::new("/var/tmp/implant")));
+        // Not volatile: judged by package ownership instead.
+        assert!(!is_volatile_path(Path::new("/opt/splunk/bin/splunk")));
+        assert!(!is_volatile_path(Path::new("/var/lib/foo/bar")));
+        // Must not match a dir that merely shares a prefix.
+        assert!(!is_volatile_path(Path::new("/tmpfoo/bar")));
     }
 
     #[test]

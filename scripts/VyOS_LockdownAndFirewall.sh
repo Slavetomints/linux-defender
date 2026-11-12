@@ -23,7 +23,8 @@ LATEST_LINK="${BASELINE_DIR}/latest.log"
 LOG_DIR="${DEFENDER_DIR}/vyos"
 
 mkdir -p "$LOG_DIR" "$BASELINE_DIR" 2>/dev/null
-echo "[$(date)] vbash PID=$$ GID=$(id -g -n 2>/dev/null) ARGC=$# ARGS: '$*' DIR='$DEFENDER_DIR'" >> "${LOG_DIR}/debug_run.log"
+SAFE_ARGS=$(printf '%s ' "$@" | sed -E 's/--pass +[^ ]+/--pass ******/g')
+echo "[$(date)] vbash PID=$$ GID=$(id -g -n 2>/dev/null) ARGC=$# ARGS: '$SAFE_ARGS' DIR='$DEFENDER_DIR'" >> "${LOG_DIR}/debug_run.log"
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -38,7 +39,7 @@ die()       { log_error "$*"; exit 1; }
 # ─── Defaults & Global State ──────────────────────────────────────────────────
 TEAM=""
 ADMIN_USER="vyos"
-ADMIN_PASS=""
+ADMIN_PASS="${DEFENDER_ADMIN_PASS:-}"
 SSH_PUB_KEY=""
 SSH_KEY_TYPE="ssh-ed25519"
 SSH_KEY_ID="ccdc_admin_key"
@@ -162,8 +163,9 @@ while [[ $# -gt 0 ]]; do
             usage 0
             ;;
         *)
-            echo "[-] Unknown parameter: '$1' (Full ARGV: '$*')" >&2
-            echo "[$(date)] ERROR Unknown parameter: '$1' ARGS: '$*'" >> "${LOG_DIR}/debug_run.log"
+            SAFE_ARGV=$(printf '%s ' "$*" | sed -E 's/--pass +[^ ]+/--pass ******/g')
+            echo "[-] Unknown parameter: '$1' (Full ARGV: '$SAFE_ARGV')" >&2
+            echo "[$(date)] ERROR Unknown parameter: '$1' ARGS: '$SAFE_ARGV'" >> "${LOG_DIR}/debug_run.log"
             usage 1
             ;;
     esac
@@ -174,8 +176,9 @@ if [ -z "$MODE" ]; then
     if [ -t 0 ]; then
         MODE="interactive"
     else
-        echo "[-] Error: No operation mode specified and non-interactive input detected. (ARGC=$#, ARGS='$*')" >&2
-        echo "[$(date)] ERROR No operation mode specified (ARGC=$#, ARGS='$*')" >> "${LOG_DIR}/debug_run.log"
+        SAFE_ARGV=$(printf '%s ' "$*" | sed -E 's/--pass +[^ ]+/--pass ******/g')
+        echo "[-] Error: No operation mode specified and non-interactive input detected. (ARGC=$#, ARGS='$SAFE_ARGV')" >&2
+        echo "[$(date)] ERROR No operation mode specified (ARGC=$#, ARGS='$SAFE_ARGV')" >> "${LOG_DIR}/debug_run.log"
         usage 1
     fi
 fi
@@ -450,16 +453,22 @@ if [ "$MODE" == "console-lockdown" ]; then
     log_info "Disabling remote management services (SSH, Telnet, HTTPS API)..."
     delete service ssh 2>/dev/null || true
     delete service telnet 2>/dev/null || true
+    delete service https 2>/dev/null || true
     delete service https api 2>/dev/null || true
     delete system task-scheduler 2>/dev/null || true
 
     log_info "Applying control-plane firewall to block inbound SSH..."
     if [ "$VYOS_MAJOR" == "1.4" ]; then
         set firewall ipv4 input filter default-action drop
+
+        set firewall ipv4 input filter rule 5 action accept
+        set firewall ipv4 input filter rule 5 description 'Allow loopback'
+        set firewall ipv4 input filter rule 5 inbound-interface name 'lo'
+
         set firewall ipv4 input filter rule 10 action accept
         set firewall ipv4 input filter rule 10 description 'Allow established/related'
-        set firewall ipv4 input filter rule 10 state established enable
-        set firewall ipv4 input filter rule 10 state related enable
+        set firewall ipv4 input filter rule 10 state established
+        set firewall ipv4 input filter rule 10 state related
 
         set firewall ipv4 input filter rule 20 action accept
         set firewall ipv4 input filter rule 20 description 'Allow ICMP'
@@ -553,12 +562,8 @@ if [ "$MODE" == "harden" ]; then
     configure
 
     # Pre-login banner
-    set system login banner pre-login '
-*******************************************************************************
-                     AUTHORIZED CCDC BLUE TEAM ACCESS ONLY
- All activities are monitored and recorded. Unauthorized access is prohibited.
-*******************************************************************************
-'
+    set system login banner pre-login '*** AUTHORIZED CCDC BLUE TEAM ACCESS ONLY - ALL ACTIVITIES MONITORED ***'
+
     # Configuration management
     set system config-management commit-revisions 100
     if [ "$VYOS_MAJOR" == "1.4" ]; then
@@ -567,7 +572,9 @@ if [ "$MODE" == "harden" ]; then
 
     # Rotate vyos password
     log_info "Step 3: Rotating password for '$ADMIN_USER'..."
-    set system login user "$ADMIN_USER" level admin
+    if [ "$VYOS_MAJOR" != "1.4" ]; then
+        set system login user "$ADMIN_USER" level admin
+    fi
     set system login user "$ADMIN_USER" authentication plaintext-password "$ADMIN_PASS"
 
     if [ -n "$SSH_PUB_KEY" ]; then
@@ -587,6 +594,7 @@ if [ "$MODE" == "harden" ]; then
     # Attack surface reduction
     log_info "Step 5: Disabling insecure legacy protocols (Telnet, HTTPS API, task-scheduler)..."
     delete service telnet 2>/dev/null || true
+    delete service https 2>/dev/null || true
     delete service https api 2>/dev/null || true
     delete system task-scheduler 2>/dev/null || true
 
@@ -596,10 +604,14 @@ if [ "$MODE" == "harden" ]; then
         # Control plane filter (Protect router itself)
         set firewall ipv4 input filter default-action drop
 
+        set firewall ipv4 input filter rule 5 action accept
+        set firewall ipv4 input filter rule 5 description 'Allow loopback'
+        set firewall ipv4 input filter rule 5 inbound-interface name 'lo'
+
         set firewall ipv4 input filter rule 10 action accept
         set firewall ipv4 input filter rule 10 description 'Allow established/related'
-        set firewall ipv4 input filter rule 10 state established enable
-        set firewall ipv4 input filter rule 10 state related enable
+        set firewall ipv4 input filter rule 10 state established
+        set firewall ipv4 input filter rule 10 state related
 
         set firewall ipv4 input filter rule 20 action accept
         set firewall ipv4 input filter rule 20 description 'Allow ICMP'
@@ -615,8 +627,8 @@ if [ "$MODE" == "harden" ]; then
         set firewall ipv4 forward filter default-action accept
         set firewall ipv4 forward filter rule 10 action accept
         set firewall ipv4 forward filter rule 10 description 'Allow established/related transit'
-        set firewall ipv4 forward filter rule 10 state established enable
-        set firewall ipv4 forward filter rule 10 state related enable
+        set firewall ipv4 forward filter rule 10 state established
+        set firewall ipv4 forward filter rule 10 state related
     else
         # 1.3 iptables syntax
         set firewall name LOCAL_IN default-action drop
@@ -642,8 +654,8 @@ if [ "$MODE" == "harden" ]; then
         echo -e "${RED}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${RESET}"
         commit
         save
+        exit
         log_ok "Configuration committed and saved permanently."
-        exit 0
     else
         log_info "Step 7: Applying configuration with ${COMMIT_TIMEOUT}-minute failsafe rollback..."
         commit-confirm "$COMMIT_TIMEOUT"
@@ -661,6 +673,7 @@ if [ "$MODE" == "harden" ]; then
         echo "    4. If login fails or you lose access, DO NOTHING!"
         echo "       VyOS will automatically roll back after ${COMMIT_TIMEOUT} minutes."
         echo "----------------------------------------------------------------------"
+        exit
     fi
     exit 0
 fi

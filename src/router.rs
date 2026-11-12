@@ -109,8 +109,12 @@ pub struct CliArgs {
     pub dry_run: bool,
 }
 
-/// Execute the embedded VyOS script with the given command-line arguments.
-pub fn run_script(ctx: &DefenderContext, script_args: &[&str]) -> Result {
+/// Execute the embedded VyOS script with the given command-line arguments and environment variables.
+pub fn run_script(
+    ctx: &DefenderContext,
+    script_args: &[&str],
+    env_vars: &[(&str, &str)],
+) -> Result {
     let target_dir = if nix::unistd::geteuid().is_root() {
         let dir = PathBuf::from("/etc/linux-defender/vyos");
         if fs::create_dir_all(&dir).is_ok() {
@@ -137,7 +141,24 @@ pub fn run_script(ctx: &DefenderContext, script_args: &[&str]) -> Result {
     perms.set_mode(0o700);
     let _ = fs::set_permissions(&script_path, perms);
 
-    ctx.progress(&format!("→ Executing VyOS script with args: {:?}", script_args));
+    let sanitized_args: Vec<String> = {
+        let mut out = Vec::new();
+        let mut skip_next = false;
+        for arg in script_args {
+            if skip_next {
+                out.push("******".to_string());
+                skip_next = false;
+            } else if *arg == "--pass" {
+                out.push(arg.to_string());
+                skip_next = true;
+            } else {
+                out.push(arg.to_string());
+            }
+        }
+        out
+    };
+
+    ctx.progress(&format!("→ Executing VyOS script with args: {:?}", sanitized_args));
 
     let shell = if std::path::Path::new("/bin/vbash").exists() {
         "/bin/vbash"
@@ -159,13 +180,16 @@ pub fn run_script(ctx: &DefenderContext, script_args: &[&str]) -> Result {
                 "\n=== [{}] Shell: {} | Args: {:?} ===",
                 chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
                 shell,
-                script_args
+                sanitized_args
             );
         }
     }
 
     let mut cmd = Command::new(shell);
     cmd.arg(&script_path).args(script_args);
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
@@ -268,9 +292,10 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
         script_args.push("--user".into());
         script_args.push(u.clone());
     }
+    let mut env_vars: Vec<(&str, &str)> = Vec::new();
+
     if let Some(ref p) = args.pass {
-        script_args.push("--pass".into());
-        script_args.push(p.clone());
+        env_vars.push(("DEFENDER_ADMIN_PASS", p.as_str()));
     }
     if let Some(ref k) = args.ssh_key {
         script_args.push("--ssh-key".into());
@@ -291,5 +316,5 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
     }
 
     let str_args: Vec<&str> = script_args.iter().map(|s| s.as_str()).collect();
-    run_script(ctx, &str_args)
+    run_script(ctx, &str_args, &env_vars)
 }

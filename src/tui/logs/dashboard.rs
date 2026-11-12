@@ -68,7 +68,7 @@ fn pane_configs(box_type: BoxType) -> Vec<(&'static str, PaneSource)> {
                         "/var/log/nginx/error.log".into(),
                         "/var/log/apache2/error.log".into(),
                     ],
-                    filter: None,
+                    filters: vec![],
                 },
             ),
             (
@@ -78,21 +78,21 @@ fn pane_configs(box_type: BoxType) -> Vec<(&'static str, PaneSource)> {
                         "/var/log/nginx/access.log".into(),
                         "/var/log/apache2/access.log".into(),
                     ],
-                    filter: None,
+                    filters: vec![],
                 },
             ),
             (
                 "auth",
                 PaneSource {
                     paths: vec!["/var/log/auth.log".into(), "/var/log/secure".into()],
-                    filter: None,
+                    filters: vec![],
                 },
             ),
             (
                 "syslog",
                 PaneSource {
                     paths: vec!["/var/log/syslog".into(), "/var/log/messages".into()],
-                    filter: None,
+                    filters: vec![],
                 },
             ),
         ],
@@ -101,14 +101,14 @@ fn pane_configs(box_type: BoxType) -> Vec<(&'static str, PaneSource)> {
                 "mail",
                 PaneSource {
                     paths: vec!["/var/log/mail.log".into(), "/var/log/maillog".into()],
-                    filter: None,
+                    filters: vec![],
                 },
             ),
             (
                 "auth",
                 PaneSource {
                     paths: vec!["/var/log/auth.log".into(), "/var/log/secure".into()],
-                    filter: Some("sasl|imap|smtp|dovecot".into()),
+                    filters: vec!["sasl".into(), "imap".into(), "smtp".into(), "dovecot".into()],
                 },
             ),
             (
@@ -118,14 +118,14 @@ fn pane_configs(box_type: BoxType) -> Vec<(&'static str, PaneSource)> {
                         "/var/log/roundcube/errors.log".into(),
                         "/var/log/roundcube/errors".into(),
                     ],
-                    filter: None,
+                    filters: vec![],
                 },
             ),
             (
                 "syslog",
                 PaneSource {
                     paths: vec!["/var/log/syslog".into(), "/var/log/messages".into()],
-                    filter: None,
+                    filters: vec![],
                 },
             ),
         ],
@@ -137,28 +137,28 @@ fn pane_configs(box_type: BoxType) -> Vec<(&'static str, PaneSource)> {
                         "/opt/splunk/var/log/splunk/splunkd.log".into(),
                         "/opt/splunkforwarder/var/log/splunk/splunkd.log".into(),
                     ],
-                    filter: None,
+                    filters: vec![],
                 },
             ),
             (
                 "splunk-web",
                 PaneSource {
                     paths: vec!["/opt/splunk/var/log/splunk/web_access.log".into()],
-                    filter: None,
+                    filters: vec![],
                 },
             ),
             (
                 "auth",
                 PaneSource {
                     paths: vec!["/var/log/auth.log".into(), "/var/log/secure".into()],
-                    filter: None,
+                    filters: vec![],
                 },
             ),
             (
                 "metrics",
                 PaneSource {
                     paths: vec!["/opt/splunk/var/log/splunk/metrics.log".into()],
-                    filter: None,
+                    filters: vec![],
                 },
             ),
         ],
@@ -167,28 +167,28 @@ fn pane_configs(box_type: BoxType) -> Vec<(&'static str, PaneSource)> {
                 "auth",
                 PaneSource {
                     paths: vec!["/var/log/auth.log".into(), "/var/log/secure".into()],
-                    filter: None,
+                    filters: vec![],
                 },
             ),
             (
                 "syslog",
                 PaneSource {
                     paths: vec!["/var/log/syslog".into(), "/var/log/messages".into()],
-                    filter: None,
+                    filters: vec![],
                 },
             ),
             (
                 "kern",
                 PaneSource {
                     paths: vec!["/var/log/kern.log".into()],
-                    filter: None,
+                    filters: vec![],
                 },
             ),
             (
                 "journal",
                 PaneSource {
                     paths: vec!["/var/log/syslog".into(), "/var/log/messages".into()],
-                    filter: None,
+                    filters: vec![],
                 },
             ),
         ],

@@ -22,6 +22,7 @@ pub mod error_log;
 pub mod fail2ban;
 pub mod git_hooks;
 pub mod hidden_elf;
+pub mod malicious_binaries;
 pub mod network_watch;
 pub mod outbound_connections;
 pub mod perm_anomalies;
@@ -105,6 +106,10 @@ pub struct CliArgs {
     #[arg(long)]
     pub rootkit_cross_check: bool,
 
+    /// Verify critical package file checksums and audit PHP extensions for unpackaged .so files
+    #[arg(long)]
+    pub malicious_binaries: bool,
+
     /// Scan /proc/*/maps for anonymous rwxp mappings (shellcode injection)
     #[arg(long)]
     pub proc_maps: bool,
@@ -155,7 +160,7 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
     if args.all || args.auth_log_analysis {
         run_module("auth_log", ctx)?;
     }
-    if args.all || args.port_map {
+    if args.port_map {
         run_module("port_map", ctx)?;
     }
     if args.all || args.hidden_elf {
@@ -199,6 +204,9 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
     }
     if args.all || args.rootkit_cross_check {
         run_module("rootkit_cross_check", ctx)?;
+    }
+    if args.all || args.malicious_binaries {
+        run_module("malicious_binaries", ctx)?;
     }
     if args.all || args.proc_maps {
         run_module("proc_maps", ctx)?;
@@ -254,6 +262,7 @@ pub fn run_module(name: &str, ctx: &DefenderContext) -> Result {
         "attacker_tools" => attacker_tools::run(ctx),
         "c2_detection" => c2_detection::run(ctx),
         "rootkit_cross_check" => rootkit_cross_check::run(ctx),
+        "malicious_binaries" => malicious_binaries::run(ctx),
         "proc_maps" => proc_maps::run(ctx),
         "binary_integrity" => binary_integrity::run(ctx),
         "git_hooks" => git_hooks::run(ctx),

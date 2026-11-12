@@ -36,10 +36,19 @@ const SENSITIVE_FILES: &[&str] = &[
     "/etc/sysctl.conf",
     "/etc/ssh/sshd_config",
     "/etc/pam.d/common-auth",
+    // Attack artifact paths
+    "/root/.ssh/authorized_keys",
+    "/etc/pam.d/sshd",
+    "/etc/bash.bashrc",
 ];
 
 /// High-value files where immutable = Critical vs High for others.
-const CRITICAL_FILES: &[&str] = &["/etc/passwd", "/etc/shadow", "/etc/sudoers"];
+const CRITICAL_FILES: &[&str] = &[
+    "/etc/passwd",
+    "/etc/shadow",
+    "/etc/sudoers",
+    "/etc/bash.bashrc",
+];
 
 /// Check sensitive files for immutable/append-only flags.
 pub fn run(ctx: &DefenderContext) -> Result {
@@ -57,8 +66,78 @@ pub fn run(ctx: &DefenderContext) -> Result {
         }
     }
 
+    // Sweep sudoers drop-ins — names are not predictable so we walk the dir.
+    sweep_dir(ctx, "/etc/sudoers.d");
+
+    // Sweep profile.d drop-ins — attacker may add hidden scripts.
+    sweep_dir(ctx, "/etc/profile.d");
+
+    // Sweep hidden files in directories where attackers drop persistent scripts.
+    // Any dot-file or dot-dir in these locations with chattr +i is suspicious
+    // regardless of its name -- we don't match on specific payload names.
+    for dir in &[
+        "/usr/local/lib", "/usr/lib", "/usr/lib/systemd", "/etc/cron.d",
+        "/var/lib", "/opt",
+    ] {
+        sweep_hidden(ctx, dir);
+    }
+
+    // Sweep home directories for hidden immutable files (attacker-planted backdoors).
+    if let Ok(contents) = std::fs::read_to_string("/etc/passwd") {
+        for line in contents.lines() {
+            let fields: Vec<&str> = line.split(':').collect();
+            if fields.len() < 6 {
+                continue;
+            }
+            let home = fields[5];
+            if home.is_empty() || home == "/" {
+                continue;
+            }
+            sweep_hidden(ctx, home);
+        }
+    }
+
     ctx.log_msg("[✓] Immutability check complete");
     Ok(())
+}
+
+/// Walk `dir` and check only hidden entries (names starting with `.`) for flags.
+///
+/// Regular files in these dirs may legitimately be immutable (distro-installed libs
+/// with security hardening). We only care about dot-files -- those have no business
+/// being there at all, let alone being locked down.
+fn sweep_hidden(ctx: &DefenderContext, dir: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        if !name.starts_with('.') {
+            continue;
+        }
+        match get_flags(&path) {
+            Ok(flags) => report_flags(ctx, &path, flags),
+            Err(e) => ctx.debug(&format!("ioctl on {}: {}", path.display(), e)),
+        }
+    }
+}
+
+/// Walk `dir` and check each file for immutable/append-only flags.
+fn sweep_dir(ctx: &DefenderContext, dir: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        match get_flags(&path) {
+            Ok(flags) => report_flags(ctx, &path, flags),
+            Err(e) => ctx.debug(&format!("ioctl on {}: {}", path.display(), e)),
+        }
+    }
 }
 
 /// Read the ext2 filesystem flags for `path` via ioctl.

@@ -149,8 +149,8 @@ fn the_php_shell_scan_completes() {
     }
 
     let dir = TempDir::new().unwrap();
-    let out = run_cli(dir.path(), &["anti-persistence", "--php-shells"]);
+    let out = run_cli(dir.path(), &["anti-persistence", "--webshells"]);
 
     assert!(out.status.success());
-    assert!(stdout(&out).contains("php_shells module complete"));
+    assert!(stdout(&out).contains("webshells module complete"));
 }

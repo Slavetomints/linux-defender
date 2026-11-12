@@ -15,7 +15,9 @@ pub struct LogLine {
 #[derive(Debug, Clone)]
 pub struct PaneSource {
     pub paths: Vec<String>,
-    pub filter: Option<String>,
+    /// OR-filter: a line is included if it matches ANY of these substrings (case-insensitive).
+    /// Empty vec means no filtering (include everything).
+    pub filters: Vec<String>,
 }
 
 pub struct LogPane {
@@ -54,8 +56,9 @@ impl LogPane {
             return;
         }
         while let Ok(raw) = self.rx.try_recv() {
-            if let Some(f) = &self.source.filter {
-                if !raw.to_lowercase().contains(f.as_str()) {
+            if !self.source.filters.is_empty() {
+                let lower = raw.to_lowercase();
+                if !self.source.filters.iter().any(|f| lower.contains(f.as_str())) {
                     continue;
                 }
             }

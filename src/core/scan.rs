@@ -40,9 +40,37 @@ pub const SUSPICIOUS_PATTERNS: &[(&str, &str)] = &[
     ("chmod u+s", "sets the setuid bit"),
     ("chmod 4755", "sets the setuid bit"),
     ("chattr +i", "makes a file immutable"),
+    ("chmod 777", "world-writable permission (dropper staging)"),
     ("setsid", "detaches from the controlling terminal"),
     ("curl", "fetches remote content"),
     ("wget", "fetches remote content"),
+    ("crontab -", "writes crontab from stdin (persistence bootstrapping)"),
+    ("at now", "schedules a one-shot job immediately (at job persistence)"),
+    ("| at ", "pipes command into at scheduler"),
+    ("|at ", "pipes command into at scheduler"),
+    ("systemctl enable", "enables a service at boot (persistence installation)"),
+    // Shell-poison function overrides -- any bash function that shadows a security-critical
+    // command blocks defenders from using it during an incident.
+    ("passwd ()", "bash function overrides security command"),
+    ("passwd()", "bash function overrides security command"),
+    ("chpasswd ()", "bash function overrides security command"),
+    ("chpasswd()", "bash function overrides security command"),
+    ("chattr ()", "bash function overrides security command"),
+    ("chattr()", "bash function overrides security command"),
+    ("userdel ()", "bash function overrides security command"),
+    ("userdel()", "bash function overrides security command"),
+    ("systemctl ()", "bash function overrides security command"),
+    ("systemctl()", "bash function overrides security command"),
+    ("rm ()", "bash function overrides security command"),
+    ("rm()", "bash function overrides security command"),
+    ("chmod ()", "bash function overrides security command"),
+    ("chmod()", "bash function overrides security command"),
+    ("kill ()", "bash function overrides security command"),
+    ("kill()", "bash function overrides security command"),
+    ("iptables ()", "bash function overrides security command"),
+    ("iptables()", "bash function overrides security command"),
+    ("adduser ()", "bash function overrides security command"),
+    ("adduser()", "bash function overrides security command"),
 ];
 
 /// Directories that no legitimate system config should execute out of.
@@ -175,6 +203,36 @@ mod tests {
             reasons
                 .iter()
                 .filter(|r| **r == "sets the setuid bit")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn detects_shell_poison_function_override_spaced() {
+        let reasons = suspicious_matches("passwd () {");
+        assert!(reasons.contains(&"bash function overrides security command"));
+    }
+
+    #[test]
+    fn detects_shell_poison_function_override_compact() {
+        let reasons = suspicious_matches("chattr() {");
+        assert!(reasons.contains(&"bash function overrides security command"));
+    }
+
+    #[test]
+    fn detects_shell_poison_systemctl_override() {
+        let reasons = suspicious_matches("systemctl () { echo 'blocked' ; }");
+        assert!(reasons.contains(&"bash function overrides security command"));
+    }
+
+    #[test]
+    fn multiple_overrides_deduplicated_to_one_reason() {
+        let reasons = suspicious_matches("passwd () { true; }; userdel () { true; }");
+        assert_eq!(
+            reasons
+                .iter()
+                .filter(|r| **r == "bash function overrides security command")
                 .count(),
             1
         );

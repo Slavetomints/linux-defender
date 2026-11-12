@@ -19,7 +19,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
 use chrono::Local;
 
-use crate::core::{BoxType, DefenderContext, Finding, Severity, detect_box_type, execute_action};
+use crate::core::{BoxType, DefenderContext, Finding, Severity, detect_box_type, execute_action, strip_ansi};
 use crate::score_check::{ServiceHistory, build_histories, poll_all};
 use crate::tui::logs::dashboard::LogDashboard as LogDash;
 
@@ -54,7 +54,6 @@ const MONITOR_MODULES: &[(&str, &str)] = &[
     ("pspy", "Process spy"),
     ("network_watch", "Network snapshot"),
     ("auth_log", "Auth log brute-force analysis"),
-    ("port_map", "Listening port map"),
     ("hidden_elf", "Hidden ELF binaries"),
     ("deleted_binaries", "Deleted running binaries"),
     ("process_tree", "Process tree anomalies"),
@@ -107,7 +106,7 @@ const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
     ("cron", "Cron jobs", true, ScanInterval::Continuous),
     ("at_jobs", "AT job queue", true, ScanInterval::OnDemand),
     ("users", "User accounts", true, ScanInterval::OnDemand),
-    ("php_shells", "PHP web shells", true, ScanInterval::Frequent),
+    ("webshells", "Web shells (PHP/ASP/ASPX/Python/Ruby)", true, ScanInterval::Frequent),
     ("suid", "SUID binaries", true, ScanInterval::OnDemand),
     (
         "capabilities",
@@ -199,6 +198,12 @@ const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
         ScanInterval::Frequent,
     ),
     ("polkit", "polkit rules audit", true, ScanInterval::OnDemand),
+    (
+        "mail_intercept",
+        "Mail intercept (postfix)",
+        true,
+        ScanInterval::OnDemand,
+    ),
     // ── Monitoring ─────────────────────────────────────────────────────────
     (
         "hidden_elf",
@@ -209,12 +214,6 @@ const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
     (
         "deleted_binaries",
         "Deleted running binaries",
-        false,
-        ScanInterval::Continuous,
-    ),
-    (
-        "port_map",
-        "Listening port map",
         false,
         ScanInterval::Continuous,
     ),
@@ -320,6 +319,12 @@ const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
         "Bind/overlay mount detection",
         false,
         ScanInterval::Continuous,
+    ),
+    (
+        "malicious_binaries",
+        "Malicious/modified binaries",
+        false,
+        ScanInterval::OnDemand,
     ),
 ];
 
@@ -635,6 +640,8 @@ pub struct App {
     pub download_status: Option<String>,
     /// Receives the result string from a background download thread.
     download_result_rx: Receiver<String>,
+    /// Receives the result from a background nftbuild thread (Ok=config, Err=message).
+    nftbuild_result_rx: Receiver<Result<String, String>>,
     /// Flat cursor in the Tools tab (binaries first, then wizards).
     pub tools_cursor: usize,
     /// Currently open TUI wizard overlay, if any.
@@ -746,6 +753,8 @@ impl App {
         let (backups_progress_tx, backups_progress_rx) = mpsc::channel::<String>();
         let (restore_progress_tx, restore_progress_rx) = mpsc::channel::<String>();
         let (_download_result_tx_placeholder, download_result_rx) = mpsc::channel::<String>();
+        let (_nftbuild_result_tx_placeholder, nftbuild_result_rx) =
+            mpsc::channel::<Result<String, String>>();
         let scan_selected = vec![true; SCAN_MODULES.len()];
         let authorized_users = vec!["root".to_string()];
         let sessions = poll_sessions(&authorized_users);
@@ -771,6 +780,7 @@ impl App {
             nft_config,
             download_status: None,
             download_result_rx,
+            nftbuild_result_rx,
             tools_cursor: 0,
             active_wizard: None,
             sessions,
@@ -836,6 +846,11 @@ impl App {
         false
     }
 
+    /// Findings visible in the Scan tab -- excludes diagnostic "log" module entries from ctx.log_msg().
+    fn display_findings(&self) -> Vec<&Finding> {
+        self.findings.iter().filter(|f| f.module != "log").collect()
+    }
+
     /// Process all pending channel messages and trigger periodic service/session polling.
     fn tick(&mut self) {
         while let Ok(f) = self.finding_rx.try_recv() {
@@ -853,8 +868,11 @@ impl App {
                 self.findings.push(f);
             }
         }
-        if !self.findings.is_empty() && self.findings_cursor >= self.findings.len() {
-            self.findings_cursor = self.findings.len() - 1;
+        let display_len = self.display_findings().len();
+        if display_len > 0 && self.findings_cursor >= display_len {
+            self.findings_cursor = display_len - 1;
+        } else if display_len == 0 {
+            self.findings_cursor = 0;
         }
         for pane in &mut self.log_dashboard.panes {
             pane.drain();
@@ -869,12 +887,12 @@ impl App {
         }
         // Drain hardening findings into the hardening log.
         while let Ok(f) = self.hardening_finding_rx.try_recv() {
-            self.hardening_log.push(format!(
+            self.hardening_log.push(strip_ansi(&format!(
                 "[{}] {} — {}",
                 f.severity.label().trim(),
                 f.module,
                 f.summary
-            ));
+            )));
         }
         // Drain hardening progress: empty string = done, non-empty = step label.
         while let Ok(p) = self.hardening_progress_rx.try_recv() {
@@ -882,7 +900,7 @@ impl App {
                 self.hardening_running = false;
                 self.hardening_log.push("Done.".to_string());
             } else {
-                self.hardening_log.push(format!("Running: {}…", p));
+                self.hardening_log.push(strip_ansi(&format!("Running: {}…", p)));
             }
         }
         // Drain monitor progress: empty string = done, non-empty = log line.
@@ -890,7 +908,7 @@ impl App {
             if p.is_empty() {
                 self.monitor_running = false;
             } else {
-                self.monitor_log.push(p);
+                self.monitor_log.push(strip_ansi(&p));
             }
         }
         // Drain backups progress: empty string = done, non-empty = log line.
@@ -899,7 +917,7 @@ impl App {
                 self.backups_running = false;
                 self.baseline_present = true;
             } else {
-                self.backups_log.push(p);
+                self.backups_log.push(strip_ansi(&p));
             }
         }
         // Drain service restore progress: empty string = done, non-empty = log line.
@@ -907,7 +925,7 @@ impl App {
             if p.is_empty() {
                 self.restore_running = false;
             } else {
-                self.restore_log.push(p);
+                self.restore_log.push(strip_ansi(&p));
             }
         }
         // Drain completed auto-scan threads.
@@ -917,6 +935,18 @@ impl App {
         // Pick up download result when the background thread finishes.
         if let Ok(msg) = self.download_result_rx.try_recv() {
             self.download_status = Some(msg);
+        }
+        // Pick up nftbuild result when the background thread finishes.
+        if let Ok(result) = self.nftbuild_result_rx.try_recv() {
+            match result {
+                Ok(config) => {
+                    self.nft_config = Some(config);
+                    self.action_feedback = Some("nftbuild applied — ruleset is now active".into());
+                }
+                Err(e) => {
+                    self.action_feedback = Some(format!("nftbuild failed: {}", e));
+                }
+            }
         }
         if self.auto_scan_enabled {
             self.tick_auto_scan();
@@ -1525,11 +1555,12 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                     .unwrap_or(SCAN_MODULES.len() - 1);
                             }
                             ScanFocus::Findings => {
-                                if !app.findings.is_empty() {
+                                let n = app.display_findings().len();
+                                if n > 0 {
                                     app.findings_cursor = app
                                         .findings_cursor
                                         .checked_sub(1)
-                                        .unwrap_or(app.findings.len() - 1);
+                                        .unwrap_or(n - 1);
                                 }
                             }
                         },
@@ -1540,7 +1571,10 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                 .unwrap_or(HARDENING_STEPS.len() - 1);
                         }
                         Tab::Monitor => {
-                            if !MONITOR_MODULES.is_empty() {
+                            if app.monitor_running {
+                                // Scroll output log up (toward older lines)
+                                app.monitor_log_scroll = app.monitor_log_scroll.saturating_add(1);
+                            } else if !MONITOR_MODULES.is_empty() {
                                 app.monitor_cursor = app
                                     .monitor_cursor
                                     .checked_sub(1)
@@ -1579,9 +1613,9 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                 app.scan_cursor = (app.scan_cursor + 1) % SCAN_MODULES.len();
                             }
                             ScanFocus::Findings => {
-                                if !app.findings.is_empty() {
-                                    app.findings_cursor =
-                                        (app.findings_cursor + 1) % app.findings.len();
+                                let n = app.display_findings().len();
+                                if n > 0 {
+                                    app.findings_cursor = (app.findings_cursor + 1) % n;
                                 }
                             }
                         },
@@ -1590,7 +1624,10 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                 (app.hardening_cursor + 1) % HARDENING_STEPS.len();
                         }
                         Tab::Monitor => {
-                            if !MONITOR_MODULES.is_empty() {
+                            if app.monitor_running {
+                                // Scroll output log down (toward newer lines); 0 = bottom
+                                app.monitor_log_scroll = app.monitor_log_scroll.saturating_sub(1);
+                            } else if !MONITOR_MODULES.is_empty() {
                                 app.monitor_cursor =
                                     (app.monitor_cursor + 1) % MONITOR_MODULES.len();
                             }
@@ -1642,18 +1679,28 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                     KeyCode::Char('x') => {
                         if app.tab == Tab::Scan && app.show_finding_detail {
                             let cursor = app.findings_cursor;
-                            if let Some(finding) = app.findings.get(cursor) {
-                                if let Some(action) = finding.actions.first().cloned() {
-                                    match execute_action(&action) {
-                                        Ok(msg) => {
-                                            app.action_feedback = Some(format!("Done: {}", msg));
-                                            if let Some(f) = app.findings.get_mut(cursor) {
-                                                f.resolved = true;
-                                            }
+                            // Resolve cursor against display_findings (log findings excluded)
+                            if let Some(action) = app
+                                .display_findings()
+                                .get(cursor)
+                                .and_then(|f| f.actions.first())
+                                .cloned()
+                            {
+                                match execute_action(&action) {
+                                    Ok(msg) => {
+                                        app.action_feedback = Some(format!("Done: {}", msg));
+                                        // Find and mark the same finding resolved in the full list
+                                        if let Some(f) = app
+                                            .findings
+                                            .iter_mut()
+                                            .filter(|f| f.module != "log")
+                                            .nth(cursor)
+                                        {
+                                            f.resolved = true;
                                         }
-                                        Err(e) => {
-                                            app.action_feedback = Some(format!("Failed: {}", e));
-                                        }
+                                    }
+                                    Err(e) => {
+                                        app.action_feedback = Some(format!("Failed: {}", e));
                                     }
                                 }
                             }
@@ -1670,6 +1717,15 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                     }
                     KeyCode::Char('s') => {
                         if app.tab == Tab::Scan && app.scan_focus == ScanFocus::Modules {
+                            app.start_scan();
+                        }
+                    }
+                    KeyCode::Char('S') => {
+                        if app.tab == Tab::Scan
+                            && !app.scan_running
+                            && app.scan_focus == ScanFocus::Modules
+                        {
+                            app.scan_selected.fill(true);
                             app.start_scan();
                         }
                     }
@@ -1748,21 +1804,21 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                             use crate::tui::tools_view::SelectedTool;
                             match SelectedTool::from_cursor(app.tools_cursor) {
                                 SelectedTool::Binary(_) => {
-                                    // Run nftbuild — applies firewall rules immediately
+                                    // Run nftbuild in background — avoids blocking the TUI event loop
                                     let box_type = app.box_type;
                                     let opts = crate::tools::nftbuild::RunOptions::default();
-                                    match crate::tools::nftbuild::run(box_type, &opts) {
-                                        Ok(result) => {
-                                            app.nft_config = Some(result.config);
-                                            app.action_feedback = Some(
-                                                "nftbuild applied — ruleset is now active".into(),
-                                            );
-                                        }
-                                        Err(e) => {
-                                            app.action_feedback =
-                                                Some(format!("nftbuild failed: {}", e));
-                                        }
-                                    }
+                                    let (nft_tx, nft_rx) =
+                                        mpsc::channel::<Result<String, String>>();
+                                    app.nftbuild_result_rx = nft_rx;
+                                    app.action_feedback = Some("nftbuild: running…".into());
+                                    std::thread::spawn(move || {
+                                        let result =
+                                            match crate::tools::nftbuild::run(box_type, &opts) {
+                                                Ok(r) => Ok(r.config),
+                                                Err(e) => Err(e.to_string()),
+                                            };
+                                        let _ = nft_tx.send(result);
+                                    });
                                 }
                                 SelectedTool::Wizard(idx) => {
                                     if let Some(w) =
@@ -2074,6 +2130,7 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
                 right.extend(kb("↑↓", "move", key_color));
                 right.extend(kb("Space", "toggle", key_color));
                 right.extend(kb("s", "scan", key_color));
+                right.extend(kb("S", "scan all", key_color));
                 right.extend(kb("w", "auto", key_color));
             }
             ScanFocus::Findings => {
@@ -2212,9 +2269,10 @@ fn render_scan(f: &mut ratatui::Frame, area: Rect, app: &App) {
         cols[0],
     );
 
-    // Right: findings list
+    // Right: findings list (log-module diagnostic findings are suppressed)
     let findings_focused = app.scan_focus == ScanFocus::Findings && !app.show_finding_detail;
-    let findings_title = format!(" Findings ({}) ", app.findings.len());
+    let display_findings = app.display_findings();
+    let findings_title = format!(" Findings ({}) ", display_findings.len());
     let findings_border = if findings_focused {
         Style::default().fg(Color::Yellow)
     } else {
@@ -2225,7 +2283,7 @@ fn render_scan(f: &mut ratatui::Frame, area: Rect, app: &App) {
         .borders(Borders::ALL)
         .border_style(findings_border);
 
-    if app.findings.is_empty() {
+    if display_findings.is_empty() {
         let msg = if app.scan_running {
             "Scanning…"
         } else {
@@ -2242,7 +2300,6 @@ fn render_scan(f: &mut ratatui::Frame, area: Rect, app: &App) {
         f.render_widget(findings_block, cols[1]);
 
         let visible = inner.height as usize;
-        let _total = app.findings.len();
         // scroll so the cursor stays in view
         let start = if app.findings_cursor >= visible {
             app.findings_cursor + 1 - visible
@@ -2250,9 +2307,8 @@ fn render_scan(f: &mut ratatui::Frame, area: Rect, app: &App) {
             0
         };
 
-        let finding_items: Vec<ListItem> = app
-            .findings
-            .iter()
+        let finding_items: Vec<ListItem> = display_findings
+            .into_iter()
             .enumerate()
             .skip(start)
             .take(visible)
@@ -2266,12 +2322,18 @@ fn render_scan(f: &mut ratatui::Frame, area: Rect, app: &App) {
                 } else {
                     Style::default()
                 };
+                let module_prefix = format!("{:<10}", &finding.module[..finding.module.len().min(10)]);
                 let line = Line::from(vec![
                     Span::styled(
                         format!("[{}]", finding.severity.label()),
                         base_style
                             .fg(finding.severity.color())
                             .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" ", base_style),
+                    Span::styled(
+                        module_prefix,
+                        base_style.fg(Color::DarkGray),
                     ),
                     Span::styled(" ", base_style),
                     Span::styled(
@@ -2289,7 +2351,7 @@ fn render_scan(f: &mut ratatui::Frame, area: Rect, app: &App) {
 
     // Detail overlay — drawn on top of the full scan area
     if app.show_finding_detail {
-        if let Some(finding) = app.findings.get(app.findings_cursor) {
+        if let Some(finding) = app.display_findings().get(app.findings_cursor).copied() {
             render_finding_detail(f, area, finding, app.action_feedback.as_deref());
         }
     }
@@ -2337,6 +2399,51 @@ fn render_finding_detail(
         Style::default().add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(""));
+
+    // Timestamp
+    {
+        let label_width = 16usize;
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {:<width$}", "found", width = label_width),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                finding.timestamp.format("%H:%M:%S").to_string(),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+    lines.push(Line::from(""));
+
+    // Path (if present) -- shown before detail so operators can copy it quickly
+    if let Some(path) = &finding.path {
+        let label_width = 16usize;
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {:<width$}", "path", width = label_width),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                path.display().to_string(),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]));
+        lines.push(Line::from(""));
+    }
+
+    // Detail (extended narrative written by the detecting module)
+    if !finding.detail.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "── Detail ───────────────────────────────────────────────",
+            Style::default().fg(Color::DarkGray),
+        )));
+        let wrap_width = inner.width.saturating_sub(4) as usize;
+        for chunk in wrap_text(&finding.detail, wrap_width) {
+            lines.push(Line::from(format!("  {}", chunk)));
+        }
+        lines.push(Line::from(""));
+    }
 
     // Context rows
     if !finding.context.is_empty() {
@@ -2764,7 +2871,27 @@ fn render_monitor(f: &mut ratatui::Frame, area: Rect, app: &App) {
             .iter()
             .skip(start)
             .take(visible)
-            .map(|l| Line::from(Span::raw(l.clone())))
+            .map(|l| {
+                let lower = l.to_lowercase();
+                let style = if l.starts_with("[CRIT") || l.starts_with("[HIGH") {
+                    Style::default().fg(Color::Red)
+                } else if l.starts_with("[MED") {
+                    Style::default().fg(Color::Yellow)
+                } else if lower.contains("error") || lower.contains("fail") {
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                } else if lower.contains("warn") {
+                    Style::default().fg(Color::Yellow)
+                } else if l.starts_with("[✓]") || lower.contains("done") || lower.contains("complete") || lower.contains("success") {
+                    Style::default().fg(Color::Green)
+                } else if l.starts_with("[+]") {
+                    Style::default().fg(Color::Cyan)
+                } else if l.starts_with("[!]") {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                };
+                Line::from(Span::styled(l.clone(), style))
+            })
             .collect();
 
         f.render_widget(Paragraph::new(lines), inner);

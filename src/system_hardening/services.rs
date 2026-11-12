@@ -6,12 +6,16 @@
 //!
 //! # Allow-lists
 //!
-//! | Box type | Allowed services |
-//! |----------|-----------------|
-//! | Web      | ssh/sshd, nginx, apache2, httpd, cron/crond |
-//! | Mail     | ssh/sshd, postfix, dovecot, roundcubemail, cron/crond |
-//! | Splunk   | ssh/sshd, splunk, cron/crond |
-//! | General  | ssh/sshd, cron/crond, systemd-\* |
+//! All box types share a baseline: ssh/sshd, cron/crond, atd, nftables/ufw/iptables/firewalld,
+//! rsyslog/syslog, auditd, fail2ban, apparmor, dbus, and all systemd-* units.
+//!
+//! Box-specific additions:
+//! | Box type | Additional allowed services |
+//! |----------|-----------------------------|
+//! | Web      | nginx, apache2, httpd, php-fpm |
+//! | Mail     | postfix, dovecot, roundcubemail, apache2/nginx, php-fpm, spamassassin, amavis |
+//! | Splunk   | splunk, SplunkForwarder |
+//! | General  | mysql/mariadb/postgresql, named/bind9 |
 
 use std::process::Command;
 
@@ -20,28 +24,53 @@ use crate::core::{
     detect_box_type, require_root,
 };
 
+/// Services that must never be disabled regardless of box type.
+/// Disabling these would kill logging, the firewall, or audit trails mid-competition.
+const BASELINE_ALLOW: &[&str] = &[
+    // remote access
+    "ssh", "sshd",
+    // scheduling
+    "cron", "crond", "atd",
+    // firewall — NEVER disable; nftbuild writes rules then exits, the service keeps them loaded
+    "nftables", "iptables", "ip6tables", "firewalld", "ufw",
+    // logging
+    "rsyslog", "syslog", "syslog-ng",
+    // audit
+    "auditd",
+    // intrusion detection
+    "fail2ban",
+    // mandatory access control
+    "apparmor", "selinux",
+    // dbus (required by many systemd units)
+    "dbus",
+];
+
 /// Services allowed on a Web box.
-const WEB_ALLOW: &[&str] = &["ssh", "sshd", "nginx", "apache2", "httpd", "cron", "crond"];
+const WEB_ALLOW: &[&str] = &["nginx", "apache2", "httpd", "php-fpm", "php8.1-fpm", "php8.2-fpm"];
 
 /// Services allowed on a Mail box.
 const MAIL_ALLOW: &[&str] = &[
-    "ssh",
-    "sshd",
     "postfix",
     "dovecot",
     "roundcubemail",
-    "cron",
-    "crond",
+    // roundcube needs a web server
+    "apache2", "nginx", "httpd",
+    "php-fpm", "php8.1-fpm", "php8.2-fpm",
+    // spamassassin / amavis common on mail boxes
+    "spamassassin", "amavis", "amavisd",
+    // DNS resolver sometimes local on mail boxes for SPF checks
+    "named", "bind9",
 ];
 
 /// Services allowed on a Splunk box.
-const SPLUNK_ALLOW: &[&str] = &["ssh", "sshd", "splunk", "cron", "crond"];
+const SPLUNK_ALLOW: &[&str] = &["splunk", "SplunkForwarder"];
 
 /// Services allowed on a General-purpose box.
-///
-/// The empty `""` entry acts as a sentinel; the real handling for `systemd-*`
-/// names is done inside [`is_allowed`].
-const GENERAL_ALLOW: &[&str] = &["ssh", "sshd", "cron", "crond"];
+const GENERAL_ALLOW: &[&str] = &[
+    // common scored services that might appear on a general box
+    "mysql", "mariadb", "postgresql", "mongod",
+    "named", "bind9",
+];
 
 /// Return the allow-list for the given `box_type`.
 pub fn allow_list(box_type: BoxType) -> &'static [&'static str] {
@@ -54,19 +83,17 @@ pub fn allow_list(box_type: BoxType) -> &'static [&'static str] {
 }
 
 /// Return `true` when `service_name` is allowed on `box_type`.
-///
-/// On [`BoxType::General`] boxes all `systemd-*` units are additionally
-/// allowed, because they are part of the base OS and should never be disabled.
 pub fn is_allowed(service_name: &str, box_type: BoxType) -> bool {
-    let list = allow_list(box_type);
-    if list.contains(&service_name) {
-        return true;
-    }
-    // Always permit core systemd units on every box type.
+    // Core systemd units are always kept on every box.
     if service_name.starts_with("systemd-") {
         return true;
     }
-    false
+    // Baseline services that must never be disabled regardless of box type.
+    if BASELINE_ALLOW.contains(&service_name) {
+        return true;
+    }
+    // Box-specific services.
+    allow_list(box_type).contains(&service_name)
 }
 
 /// Disable services that are not on the allow-list for this box's type.
@@ -203,37 +230,46 @@ mod tests {
 
     #[test]
     fn web_allow_list_contains_expected_services() {
-        let list = allow_list(BoxType::Web);
-        assert!(list.contains(&"nginx"));
-        assert!(list.contains(&"ssh"));
-        assert!(list.contains(&"sshd"));
-        assert!(list.contains(&"cron"));
+        assert!(is_allowed("nginx", BoxType::Web));
+        assert!(is_allowed("apache2", BoxType::Web));
+        assert!(is_allowed("ssh", BoxType::Web));
+        assert!(is_allowed("sshd", BoxType::Web));
+        assert!(is_allowed("cron", BoxType::Web));
     }
 
     #[test]
     fn mail_allow_list_contains_expected_services() {
-        let list = allow_list(BoxType::Mail);
-        assert!(list.contains(&"postfix"));
-        assert!(list.contains(&"dovecot"));
-        assert!(list.contains(&"roundcubemail"));
-        assert!(list.contains(&"sshd"));
+        assert!(is_allowed("postfix", BoxType::Mail));
+        assert!(is_allowed("dovecot", BoxType::Mail));
+        assert!(is_allowed("roundcubemail", BoxType::Mail));
+        assert!(is_allowed("sshd", BoxType::Mail));
     }
 
     #[test]
     fn splunk_allow_list_contains_expected_services() {
-        let list = allow_list(BoxType::Splunk);
-        assert!(list.contains(&"splunk"));
-        assert!(list.contains(&"ssh"));
-        assert!(list.contains(&"cron"));
+        assert!(is_allowed("splunk", BoxType::Splunk));
+        assert!(is_allowed("ssh", BoxType::Splunk));
+        assert!(is_allowed("cron", BoxType::Splunk));
     }
 
     #[test]
     fn general_allow_list_contains_base_services() {
-        let list = allow_list(BoxType::General);
-        assert!(list.contains(&"ssh"));
-        assert!(list.contains(&"sshd"));
-        assert!(list.contains(&"cron"));
-        assert!(list.contains(&"crond"));
+        assert!(is_allowed("ssh", BoxType::General));
+        assert!(is_allowed("sshd", BoxType::General));
+        assert!(is_allowed("cron", BoxType::General));
+        assert!(is_allowed("crond", BoxType::General));
+    }
+
+    #[test]
+    fn baseline_services_allowed_on_all_box_types() {
+        for box_type in [BoxType::Web, BoxType::Mail, BoxType::Splunk, BoxType::General] {
+            assert!(is_allowed("nftables", box_type), "nftables must be allowed on {:?}", box_type);
+            assert!(is_allowed("rsyslog", box_type), "rsyslog must be allowed on {:?}", box_type);
+            assert!(is_allowed("auditd", box_type), "auditd must be allowed on {:?}", box_type);
+            assert!(is_allowed("fail2ban", box_type), "fail2ban must be allowed on {:?}", box_type);
+            assert!(is_allowed("apparmor", box_type), "apparmor must be allowed on {:?}", box_type);
+            assert!(is_allowed("atd", box_type), "atd must be allowed on {:?}", box_type);
+        }
     }
 
     #[test]

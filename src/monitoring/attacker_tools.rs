@@ -4,6 +4,7 @@
 use std::os::unix::fs::PermissionsExt;
 use walkdir::WalkDir;
 
+use crate::core::scan::suspicious_matches;
 use crate::core::{DefenderContext, Finding, Result, Severity, Verdict};
 
 /// Filenames (or substrings) that indicate attacker tooling.
@@ -47,7 +48,7 @@ const KNOWN_TOOL_NAMES: &[&str] = &[
 ];
 
 /// Directories scanned for known tool names.
-const TOOL_SCAN_DIRS: &[&str] = &["/tmp", "/dev/shm", "/var/tmp", "/run/shm"];
+const TOOL_SCAN_DIRS: &[&str] = &["/tmp", "/dev/shm", "/var/tmp", "/run/shm", "/opt", "/var/lib"];
 
 /// Hidden subdirectories under a home dir that may hide executables.
 const HIDDEN_HOME_DIRS: &[&str] = &[".local/bin", ".config", ".cache", ".local/lib"];
@@ -75,7 +76,6 @@ pub fn run(ctx: &DefenderContext) -> Result {
     scan_known_tools(ctx);
     scan_hidden_home_executables(ctx);
     scan_double_extensions(ctx);
-    scan_deleted_proc_exe(ctx);
     Ok(())
 }
 
@@ -146,6 +146,56 @@ fn scan_known_tools(ctx: &DefenderContext) {
                         ),
                     ),
                 );
+            } else {
+                // Behavioral pass: for executable scripts that don't match a known name,
+                // check the filename and content for suspicious patterns.
+                // Skip compiled binaries (ELF magic 0x7f 'E' 'L' 'F') -- their string
+                // tables would produce false positives from embedded library names.
+                let Ok(meta) = path.metadata() else { continue };
+                if meta.permissions().mode() & 0o111 == 0 {
+                    continue;
+                }
+                let raw = match std::fs::read(path) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                if raw.starts_with(b"\x7fELF") {
+                    continue; // compiled binary, not a script
+                }
+                let snippet = String::from_utf8_lossy(&raw[..raw.len().min(512)]).into_owned();
+                let hits: Vec<&'static str> = suspicious_matches(&fname)
+                    .into_iter()
+                    .chain(suspicious_matches(&snippet))
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                if !hits.is_empty() {
+                    count += 1;
+                    ctx.log_evidence_file(path);
+                    ctx.emit(
+                        Finding::new(
+                            Severity::High,
+                            "attacker_tools",
+                            format!("Suspicious executable in staging dir: {}", path.display()),
+                            format!(
+                                "path: {}\npatterns: {}\nfilename: {}",
+                                path.display(),
+                                hits.join(", "),
+                                fname,
+                            ),
+                        )
+                        .with_path(path.to_path_buf())
+                        .with_context("patterns", hits.join(", "))
+                        .with_verdict(
+                            Verdict::Investigate,
+                            format!(
+                                "Executable in staging directory matches behavioral patterns [{}]. \
+                                 Inspect and remove if malicious.",
+                                hits.join(", ")
+                            ),
+                        ),
+                    );
+                }
             }
         }
     }
@@ -325,131 +375,6 @@ fn classify_double_ext(fname: &str) -> Option<&'static str> {
 // ─── Check 4: processes running from deleted/anonymous exe ───────────────────
 
 /// Check `/proc/*/exe` for processes running from deleted on-disk files or memfd.
-fn scan_deleted_proc_exe(ctx: &DefenderContext) {
-    ctx.log_msg("[+] Scanning /proc for deleted or memfd executables...");
-    let mut count = 0u32;
-
-    let Ok(procs) = std::fs::read_dir("/proc") else {
-        return;
-    };
-
-    for entry in procs.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
-            continue;
-        };
-        let exe_link = format!("/proc/{}/exe", pid);
-        let Ok(target) = std::fs::read_link(&exe_link) else {
-            continue;
-        };
-        let path_str = target.to_string_lossy();
-
-        let is_deleted_temp = path_str.ends_with(" (deleted)")
-            && (path_str.contains("/tmp/")
-                || path_str.contains("/dev/shm/")
-                || path_str.contains("/var/tmp/")
-                || path_str.contains("/run/shm/"));
-
-        let is_memfd = path_str.starts_with("/memfd:");
-
-        if !is_deleted_temp && !is_memfd {
-            continue;
-        }
-
-        let cmdline = read_proc_cmdline(pid);
-        let (uid, proc_name) = read_proc_status(pid);
-
-        count += 1;
-
-        let (summary, reason) = if is_memfd {
-            (
-                format!(
-                    "Process {} ({}) running from anonymous memory (memfd)",
-                    proc_name, pid
-                ),
-                "memfd: executable never existed on disk — classic in-memory dropper technique",
-            )
-        } else {
-            (
-                format!(
-                    "Process {} ({}) running from deleted temp executable: {}",
-                    proc_name, pid, path_str
-                ),
-                "deleted temp exe: binary was removed after execution — staging cleanup technique",
-            )
-        };
-
-        ctx.emit(
-            Finding::new(
-                Severity::Critical,
-                "attacker_tools",
-                summary,
-                format!(
-                    "pid: {}\nprocess: {}\nuid: {}\nexe: {}\ncmdline: {}\nreason: {}",
-                    pid, proc_name, uid, path_str, cmdline, reason
-                ),
-            )
-            .with_context("pid", pid.to_string())
-            .with_context("process", proc_name.clone())
-            .with_context("uid", uid.to_string())
-            .with_context("exe", path_str.to_string())
-            .with_context("cmdline", cmdline.clone())
-            .with_context("reason", reason.to_string())
-            .with_verdict(
-                Verdict::Remove,
-                format!(
-                    "Process {} (PID {}) is running from {}. \
-                     This is a strong indicator of a fileless malware dropper or \
-                     in-memory implant. Kill the process immediately: kill -9 {}",
-                    proc_name,
-                    pid,
-                    if is_memfd {
-                        "anonymous memory (memfd)"
-                    } else {
-                        "a deleted temp file"
-                    },
-                    pid,
-                ),
-            ),
-        );
-    }
-
-    ctx.log_msg(&format!("[✓] Deleted/memfd exe scan: {} hit(s)", count));
-}
-
-/// Read the command line for `pid` from `/proc/<pid>/cmdline`, NUL-delimited.
-fn read_proc_cmdline(pid: u32) -> String {
-    let Ok(raw) = std::fs::read(format!("/proc/{}/cmdline", pid)) else {
-        return String::new();
-    };
-    // cmdline separates args with NUL bytes
-    raw.split(|&b| b == 0)
-        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Read UID and process name for `pid` from `/proc/<pid>/status`.
-fn read_proc_status(pid: u32) -> (u32, String) {
-    let Ok(contents) = std::fs::read_to_string(format!("/proc/{}/status", pid)) else {
-        return (u32::MAX, "unknown".into());
-    };
-    let mut uid = u32::MAX;
-    let mut name = String::from("unknown");
-    for line in contents.lines() {
-        if let Some(v) = line.strip_prefix("Uid:\t") {
-            uid = v
-                .split_whitespace()
-                .next()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(u32::MAX);
-        } else if let Some(v) = line.strip_prefix("Name:\t") {
-            name = v.trim().to_string();
-        }
-    }
-    (uid, name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

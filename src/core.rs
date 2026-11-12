@@ -9,6 +9,8 @@ pub mod context;
 pub mod error;
 /// Structured finding emitted by every check module.
 pub mod finding;
+/// Package-manager ownership and checksum helpers.
+pub mod pkg;
 pub mod scan;
 pub mod utils;
 
@@ -19,5 +21,5 @@ pub use error::{DefenderError, Result};
 pub use finding::{Action, Finding, Severity, Verdict};
 pub use utils::{
     UserAccount, collect_accounts, collect_users, prompt_string, prompt_string_default, prompt_yes,
-    require_root, try_clear_immutable,
+    require_root, strip_ansi, try_clear_immutable,
 };

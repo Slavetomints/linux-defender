@@ -208,3 +208,35 @@ weird:x:1001:1001:Weird:/var/lib/weird:/bin/sh
         assert_eq!(accounts[0].name, "root");
     }
 }
+
+/// Strip ANSI/VT100 escape sequences so raw output renders cleanly in ratatui.
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.peek() {
+                Some(&'[') => {
+                    chars.next();
+                    for c2 in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&c2) {
+                            break;
+                        }
+                    }
+                }
+                Some(&']') => {
+                    chars.next();
+                    for c2 in chars.by_ref() {
+                        if c2 == '\x07' || c2 == '\x1b' {
+                            break;
+                        }
+                    }
+                }
+                _ => { chars.next(); }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}

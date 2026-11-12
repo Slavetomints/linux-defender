@@ -180,6 +180,63 @@ fn parse_ss_ports(output: &str) -> HashSet<u16> {
     ports
 }
 
+// ── Helpers for checks 3-6 ───────────────────────────────────────────────────
+
+/// Return all numeric PID directories currently present under `/proc`.
+fn numeric_proc_dirs() -> Vec<u32> {
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    dir.flatten()
+        .filter_map(|e| e.file_name().to_string_lossy().parse::<u32>().ok())
+        .collect()
+}
+
+/// Run `ss -ulnp` and return the set of bound UDP local ports.
+fn udp_ports_from_ss() -> HashSet<u16> {
+    let Ok(out) = std::process::Command::new("ss")
+        .args(["-ulnp"])
+        .output()
+    else {
+        return HashSet::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut ports = HashSet::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        // ss UDP lines start with "UNCONN"
+        if !trimmed.starts_with("UNCONN") {
+            continue;
+        }
+        let fields: Vec<&str> = trimmed.split_whitespace().collect();
+        if let Some(local) = fields.get(4) {
+            if let Some(port_str) = local.rsplit(':').next() {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    ports.insert(port);
+                }
+            }
+        }
+    }
+    ports
+}
+
+/// Return the last `n` lines from dmesg, or None if dmesg is unavailable.
+fn get_kernel_version() -> Option<String> {
+    let out = std::process::Command::new("uname").arg("-r").output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+fn read_dmesg_tail(n: usize) -> Option<Vec<String>> {
+    let out = std::process::Command::new("dmesg")
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+    let start = lines.len().saturating_sub(n);
+    Some(lines[start..].to_vec())
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 /// Run rootkit cross-check: hidden processes and hidden listening ports.
@@ -194,8 +251,12 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
     // PIDs in /proc but hidden from ps
     for &pid in proc_pids.difference(&ps_pids) {
-        // PID 1 and kernel threads frequently lack a clean ps entry; skip PID 1.
-        if pid == 1 {
+        // PID 1 (init) and PID 2 (kthreadd) are kernel-managed and absent from ps.
+        // Also skip any PID where /proc/<pid>/status is unreadable (kernel threads).
+        if pid <= 2 {
+            continue;
+        }
+        if std::fs::read_to_string(format!("/proc/{}/status", pid)).is_err() {
             continue;
         }
 
@@ -235,7 +296,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
     // PIDs in ps but absent from /proc (less common, but possible with userspace hooks)
     for &pid in ps_pids.difference(&proc_pids) {
-        if pid == 1 {
+        if pid <= 2 {
             continue;
         }
         findings += 1;
@@ -348,10 +409,284 @@ pub fn run(ctx: &DefenderContext) -> Result {
         if port_findings == 1 { "y" } else { "ies" },
     ));
 
+    // ── Check 3: LD_PRELOAD in live process environments ─────────────────────
+    let ld_findings_start = findings;
+    for pid in numeric_proc_dirs() {
+        let environ_path = format!("/proc/{}/environ", pid);
+        let Ok(raw) = std::fs::read(&environ_path) else {
+            continue;
+        };
+        for entry in raw.split(|&b| b == 0) {
+            let Ok(s) = std::str::from_utf8(entry) else {
+                continue;
+            };
+            let Some(val) = s.strip_prefix("LD_PRELOAD=") else {
+                continue;
+            };
+            if val.is_empty() {
+                continue;
+            }
+            // Skip obviously legitimate paths
+            if val.contains("/usr/lib/valgrind")
+                || val.contains("libasan.so")
+                || val.contains("libtsan.so")
+                || val.contains("libubsan.so")
+            {
+                continue;
+            }
+            let comm = std::fs::read_to_string(format!("/proc/{}/comm", pid))
+                .unwrap_or_default();
+            let name = comm.trim();
+            findings += 1;
+            ctx.emit(
+                Finding::new(
+                    Severity::Critical,
+                    "rootkit_cross_check",
+                    format!(
+                        "Process {} (pid {}) has LD_PRELOAD={} set — possible userspace rootkit",
+                        name, pid, val
+                    ),
+                    format!("pid: {}\nname: {}\nLD_PRELOAD: {}", pid, name, val),
+                )
+                .with_context("pid", pid.to_string())
+                .with_context("name", name.to_string())
+                .with_context("LD_PRELOAD", val.to_string())
+                .with_verdict(
+                    Verdict::Investigate,
+                    format!(
+                        "Process {} has LD_PRELOAD set to '{}'. This injects a library into \
+                         the process before any other code runs. Verify the library is legitimate; \
+                         if not, it is a userspace rootkit or implant.",
+                        name, val
+                    ),
+                ),
+            );
+            break; // one finding per process is enough
+        }
+    }
     ctx.log_msg(&format!(
-        "[✓] Rootkit cross-check complete — {} total discrepanc{}",
+        "[+] LD_PRELOAD check: {} suspicious process{}",
+        findings - ld_findings_start,
+        if findings - ld_findings_start == 1 { "" } else { "es" },
+    ));
+
+    // ── Check 4: Deleted libraries still mapped ───────────────────────────────
+    let del_findings_start = findings;
+    for pid in numeric_proc_dirs() {
+        let maps_path = format!("/proc/{}/maps", pid);
+        let Ok(contents) = std::fs::read_to_string(&maps_path) else {
+            continue;
+        };
+        let comm = std::fs::read_to_string(format!("/proc/{}/comm", pid))
+            .unwrap_or_default();
+        let name = comm.trim().to_string();
+        let mut reported = std::collections::HashSet::new();
+        for line in contents.lines() {
+            if !line.ends_with(" (deleted)") {
+                continue;
+            }
+            // Extract the path field (last whitespace-delimited token before " (deleted)")
+            let without_suffix = line.trim_end_matches(" (deleted)");
+            let path = without_suffix.split_whitespace().last().unwrap_or("");
+            if !path.starts_with('/') {
+                continue;
+            }
+            if path.starts_with("/dev/") || path.starts_with("/memfd:") {
+                continue;
+            }
+            if !path.contains(".so") {
+                continue;
+            }
+            if !reported.insert(path.to_string()) {
+                continue; // deduplicate per pid
+            }
+            findings += 1;
+            ctx.emit(
+                Finding::new(
+                    Severity::High,
+                    "rootkit_cross_check",
+                    format!(
+                        "Process {} (pid {}) has deleted shared library still mapped: {} — possible library rootkit",
+                        name, pid, path
+                    ),
+                    format!("pid: {}\nname: {}\ndeleted lib: {}", pid, name, path),
+                )
+                .with_context("pid", pid.to_string())
+                .with_context("name", name.clone())
+                .with_context("deleted_lib", path.to_string())
+                .with_verdict(
+                    Verdict::Investigate,
+                    format!(
+                        "Process {} has the library '{}' mapped into its address space but the \
+                         file has been deleted from disk. This is a known library-rootkit \
+                         technique — load a malicious .so, delete the file to hinder analysis, \
+                         but keep running from the already-mapped pages.",
+                        name, path
+                    ),
+                ),
+            );
+        }
+    }
+    ctx.log_msg(&format!(
+        "[+] Deleted-lib check: {} deleted-but-mapped librar{}",
+        findings - del_findings_start,
+        if findings - del_findings_start == 1 { "y" } else { "ies" },
+    ));
+
+    // ── Check 5: UDP port hiding ──────────────────────────────────────────────
+    let udp_findings_start = findings;
+    let mut udp_proc_ports = HashSet::new();
+    for path in &["/proc/net/udp", "/proc/net/udp6"] {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            // For UDP, include all entries regardless of state (UDP has no LISTEN state)
+            for line in contents.lines().skip(1) {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                if fields.len() < 2 {
+                    continue;
+                }
+                if let Some(port) = parse_hex_port(fields[1]) {
+                    udp_proc_ports.insert(port);
+                }
+            }
+        }
+    }
+    let udp_ss_ports = udp_ports_from_ss();
+    for &port in udp_proc_ports.difference(&udp_ss_ports) {
+        findings += 1;
+        ctx.emit(
+            Finding::new(
+                Severity::Critical,
+                "rootkit_cross_check",
+                format!(
+                    "UDP port {} in /proc/net/udp but hidden from ss — possible rootkit",
+                    port
+                ),
+                format!(
+                    "port: {}\nvisible_in: /proc/net/udp[6]\nhidden_from: ss -ulnp",
+                    port
+                ),
+            )
+            .with_context("port", port.to_string())
+            .with_verdict(
+                Verdict::Investigate,
+                format!(
+                    "UDP port {} is bound in the kernel's /proc/net/udp but does not appear in \
+                     ss output. A rootkit is likely filtering ss results. Identify the process \
+                     binding this port and block it at the firewall.",
+                    port
+                ),
+            ),
+        );
+    }
+    ctx.log_msg(&format!(
+        "[+] UDP port cross-check: {} in /proc/net/udp, {} in ss, {} discrepanc{}",
+        udp_proc_ports.len(),
+        udp_ss_ports.len(),
+        findings - udp_findings_start,
+        if findings - udp_findings_start == 1 { "y" } else { "ies" },
+    ));
+
+    // ── Check 6: dmesg rootkit signatures ─────────────────────────────────────
+    let dmesg_findings_start = findings;
+    // These are kernel mechanism names, not rootkit-specific symbols.
+    // We do NOT include rootkit-specific symbol names like "nic_fw" or "hide_self" --
+    // those only catch one specific rootkit and add false confidence.
+    const DMESG_SIGS: &[&str] = &[
+        "register_kretprobe",
+        "register_kprobe",
+        "kprobe: registered",
+    ];
+    if let Some(dmesg_lines) = read_dmesg_tail(500) {
+        for line in &dmesg_lines {
+            for sig in DMESG_SIGS {
+                if line.contains(sig) {
+                    findings += 1;
+                    ctx.emit(
+                        Finding::new(
+                            Severity::High,
+                            "rootkit_cross_check",
+                            format!("dmesg contains rootkit-associated string '{}': {}", sig, line.trim()),
+                            format!("signature: {}\ndmesg line: {}", sig, line.trim()),
+                        )
+                        .with_context("signature", sig.to_string())
+                        .with_context("dmesg_line", line.trim().to_string())
+                        .with_verdict(
+                            Verdict::Investigate,
+                            format!(
+                                "The kernel log contains '{}' which is associated with kernel \
+                                 probes or rootkit activity. Review the full dmesg output around \
+                                 this line to determine when and how the probe was registered.",
+                                sig
+                            ),
+                        ),
+                    );
+                    break; // one finding per line is enough
+                }
+            }
+        }
+    }
+    ctx.log_msg(&format!(
+        "[+] dmesg check: {} rootkit signature match{}",
+        findings - dmesg_findings_start,
+        if findings - dmesg_findings_start == 1 { "" } else { "es" },
+    ));
+
+    // ── Check 7: out-of-tree kernel modules ───────────────────────────────────
+    // Any module loaded that is NOT under /lib/modules/$(uname -r)/ was not
+    // installed by a package manager and is a strong rootkit indicator.
+    let oottree_findings_start = findings;
+    if let Some(kernel_ver) = get_kernel_version() {
+        let modules_dir = format!("/lib/modules/{}", kernel_ver);
+        if let Ok(lsmod_out) = std::process::Command::new("lsmod").output() {
+            let lsmod_str = String::from_utf8_lossy(&lsmod_out.stdout);
+            for line in lsmod_str.lines().skip(1) {
+                // lsmod: Name  Size  Used by
+                let mod_name = match line.split_whitespace().next() {
+                    Some(n) => n,
+                    None => continue,
+                };
+                // Check modinfo for the filename
+                let modinfo = std::process::Command::new("modinfo")
+                    .args(["-F", "filename", mod_name])
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+                if modinfo.is_empty() || modinfo == "(builtin)" {
+                    continue;
+                }
+                if !modinfo.starts_with(&modules_dir) {
+                    findings += 1;
+                    ctx.emit(
+                        Finding::new(
+                            Severity::Critical,
+                            "rootkit_cross_check",
+                            format!("Loaded kernel module '{}' is NOT from /lib/modules/{}/: {}", mod_name, kernel_ver, modinfo),
+                            format!("module: {}\nfile: {}\nexpected prefix: {}", mod_name, modinfo, modules_dir),
+                        )
+                        .with_verdict(
+                            Verdict::Investigate,
+                            format!(
+                                "Module '{}' was loaded from '{}', which is outside the kernel \
+                                 module directory for this kernel version. This is a strong indicator \
+                                 of a manually inserted rootkit module.",
+                                mod_name, modinfo
+                            ),
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    ctx.log_msg(&format!(
+        "[+] out-of-tree module check: {} suspicious module{}",
+        findings - oottree_findings_start,
+        if findings - oottree_findings_start == 1 { "" } else { "s" },
+    ));
+
+    ctx.log_msg(&format!(
+        "[✓] Rootkit cross-check complete — {} total finding{}",
         findings,
-        if findings == 1 { "y" } else { "ies" },
+        if findings == 1 { "" } else { "s" },
     ));
 
     Ok(())

@@ -19,7 +19,10 @@ use crate::core::{DefenderContext, Finding, Result, Severity, Verdict};
 // ─── Known C2 ports ──────────────────────────────────────────────────────────
 
 /// TCP ports associated with known C2 frameworks.
+/// C2 ports to watch. This is a quick-win hint list; behavioral checks (Go ELF
+/// fingerprint, deleted exe, temp-dir process) catch C2 on any port.
 const C2_PORTS: &[u16] = &[
+    53,    // DNS tunneling (MWCCDC red team has used this historically)
     50050, // Cobalt Strike team server
     4444,  // Metasploit / generic reverse shell
     8888,  // Various C2 frameworks
@@ -32,6 +35,10 @@ const C2_PORTS: &[u16] = &[
     2222,  // Alt-SSH / C2
     7777,  // Various C2
 ];
+
+/// Process names that are legitimate owners of port-53 connections.
+/// Port 53 is only suspicious when held by something other than a DNS daemon.
+const KNOWN_DNS_PROCS: &[&str] = &["named", "dnsmasq", "systemd-resolved", "unbound", "bind"];
 
 /// Temp directories from which running executables are suspicious when deleted.
 const TEMP_DIRS: &[&str] = &["/tmp/", "/dev/shm/", "/var/tmp/", "/run/shm/"];
@@ -405,6 +412,11 @@ fn check_c2_ports(ctx: &DefenderContext) {
 
         count += 1;
         let (name, uid) = proc_name_uid(pid);
+        // Port 53 is legitimate for DNS daemons; skip those to avoid noise.
+        if conn.remote_port == 53 && KNOWN_DNS_PROCS.iter().any(|&d| name.contains(d)) {
+            count -= 1;
+            continue;
+        }
         let args = read_cmdline_args(pid, 3);
         let cmdline = fmt_cmdline(&args);
         let exe_str = std::fs::read_link(format!("/proc/{}/exe", pid))

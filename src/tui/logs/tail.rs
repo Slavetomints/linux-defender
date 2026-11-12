@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
+use crate::core::strip_ansi;
+
 /// Spawn a background thread that tails `path` and sends each new line to `tx`.
 /// If `preserve_path` is Some, each line is also appended there.
 pub fn spawn_tail(path: impl Into<PathBuf>, tx: Sender<String>, preserve_path: Option<PathBuf>) {
@@ -42,7 +44,7 @@ fn tail_loop(path: &Path, tx: Sender<String>, preserve_path: Option<PathBuf>) {
                 }
             }
             Ok(_) => {
-                let trimmed = line.trim_end().to_string();
+                let trimmed = strip_ansi(line.trim_end());
                 if let Some(pp) = &preserve_path {
                     if let Ok(mut pf) = std::fs::OpenOptions::new()
                         .create(true)

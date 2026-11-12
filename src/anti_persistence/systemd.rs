@@ -8,6 +8,7 @@
 use std::path::Path;
 use std::process::Command;
 
+use crate::core::scan::suspicious_matches;
 use crate::core::{Action, DefenderContext, DefenderError, Finding, Result, Severity, prompt_yes};
 
 /// One unit as `systemctl list-units` describes it.
@@ -65,6 +66,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
     ctx.log_msg("[✓] All systemd services checked");
     check_suspicious_units(ctx, &services)?;
+    check_unit_content_patterns(ctx, &services)?;
     Ok(())
 }
 
@@ -138,7 +140,11 @@ fn disable_service(name: &str) -> Result {
 
 /// Exec paths that indicate a unit was planted by an attacker rather than
 /// installed by a package manager.
-const SUSPICIOUS_EXEC_PATHS: &[&str] = &["/tmp/", "/dev/shm/", "/var/tmp/", "/run/shm/"];
+const SUSPICIOUS_EXEC_PATHS: &[&str] = &[
+    "/tmp/", "/dev/shm/", "/var/tmp/", "/run/shm/",
+    "/home/", "/opt/",
+    "/usr/local/lib/.", "/usr/lib/.", "/var/lib/.",
+];
 
 /// Ask systemd for the on-disk path of a unit file.
 fn get_fragment_path(name: &str) -> Option<String> {
@@ -210,6 +216,70 @@ fn check_suspicious_units(ctx: &DefenderContext, services: &[Service]) -> Result
             .with_context("removed", removed.to_string())
             .with_context("unit_path", unit_path_str)
             .with_context("exec_start", exec_start),
+        );
+    }
+    Ok(())
+}
+
+/// Scan unit file content for behavioral patterns even when ExecStart looks clean.
+///
+/// A unit can have a normal-looking ExecStart path but still reference fetch-and-execute
+/// patterns, reverse shells, or obfuscation in Environment= or ExecStartPre= directives.
+/// We flag these High rather than Critical because a legitimate service might have
+/// suspicious-looking content in its description or comments.
+fn check_unit_content_patterns(ctx: &DefenderContext, services: &[Service]) -> Result {
+    for service in services {
+        let Some(unit_path_str) = get_fragment_path(&service.name) else {
+            continue;
+        };
+        let unit_path = Path::new(&unit_path_str);
+        let Ok(content) = std::fs::read_to_string(unit_path) else {
+            continue;
+        };
+
+        let hits: Vec<&'static str> = content
+            .lines()
+            .flat_map(|line| suspicious_matches(line).into_iter())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+
+        // Require at least 2 distinct pattern hits to avoid false positives from
+        // legitimate units that use curl or wget for health checks.
+        if hits.len() < 2 {
+            continue;
+        }
+
+        // Skip units already handled by check_suspicious_units (ExecStart path check).
+        if let Some(exec_start) = extract_exec_start(&content) {
+            if is_suspicious_exec(&exec_start) {
+                continue;
+            }
+        }
+
+        ctx.log_evidence_file(unit_path);
+
+        ctx.emit(
+            Finding::new(
+                Severity::High,
+                "systemd",
+                format!(
+                    "Unit {} contains suspicious behavioral patterns: [{}]",
+                    service.name,
+                    hits.join(", ")
+                ),
+                format!(
+                    "unit: {}\nunit_path: {}\npatterns: {}",
+                    service.name,
+                    unit_path_str,
+                    hits.join(", ")
+                ),
+            )
+            .with_path(unit_path.to_path_buf())
+            .with_action(Action::Manual(format!(
+                "systemctl stop {} && systemctl disable {} && rm {}",
+                service.name, service.name, unit_path_str
+            ))),
         );
     }
     Ok(())

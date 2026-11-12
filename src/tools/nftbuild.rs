@@ -24,7 +24,8 @@ pub fn sys_arg(box_type: BoxType) -> &'static str {
 /// Options for running nftbuild.
 #[derive(Default)]
 pub struct RunOptions {
-    /// Pass `-ssh` to allow outbound SSH from this box.
+    /// Also allow outbound SSH. Inbound SSH is always enabled via `-ssh i`.
+    /// Set this to true to pass `-ssh ie` instead (ingress + egress).
     pub allow_outbound_ssh: bool,
     /// Pass `-z` for Zero Trust mode (blocks outbound HTTP/HTTPS/DNS).
     pub zero_trust: bool,
@@ -55,9 +56,8 @@ pub fn run(box_type: BoxType, opts: &RunOptions) -> Result<NftbuildResult> {
     let mut cmd = Command::new(binary);
     cmd.arg("-sys").arg(sys_arg(box_type));
 
-    if opts.allow_outbound_ssh {
-        cmd.arg("-ssh");
-    }
+    // Always allow inbound SSH; optionally also allow outbound.
+    cmd.arg("-ssh").arg(if opts.allow_outbound_ssh { "ie" } else { "i" });
     if opts.zero_trust {
         cmd.arg("-z");
     }

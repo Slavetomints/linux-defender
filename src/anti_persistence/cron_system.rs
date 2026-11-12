@@ -164,6 +164,10 @@ fn scan_cron_d_directory(ctx: &DefenderContext, dir: &Path) {
 }
 
 /// Scan one file inside `/etc/cron.d/`.
+///
+/// If any suspicious line is found, the whole file is removed -- not just the
+/// offending line. A cron.d file with any malicious entry is itself the payload;
+/// there is no safe "partially clean" version to keep.
 fn scan_cron_d_file(ctx: &DefenderContext, path: &Path) {
     ctx.debug(&format!("Scanning cron.d file: {}", path.display()));
 
@@ -171,64 +175,69 @@ fn scan_cron_d_file(ctx: &DefenderContext, path: &Path) {
         return;
     };
 
-    for raw_line in content.lines() {
-        let Some(line) = effective_line(raw_line) else {
-            continue;
-        };
+    // Collect all suspicious lines and their reasons before acting.
+    let hits: Vec<(&str, Vec<String>)> = content
+        .lines()
+        .filter_map(effective_line)
+        .filter_map(|line| {
+            let r = matched_patterns(line);
+            if r.is_empty() { None } else { Some((line, r)) }
+        })
+        .collect();
 
-        let reasons = matched_patterns(line);
-        if reasons.is_empty() {
-            continue;
-        }
-
-        ctx.log_msg(&format!(
-            "[!] Suspicious cron.d line in {}: {} [{}]",
-            path.display(),
-            line,
-            reasons.join(", ")
-        ));
-        ctx.log_evidence_line(&path.display().to_string(), line);
-
-        try_clear_immutable(path);
-        let removed = ctx.remove_line_from_file_logged(path, line);
-
-        ctx.emit(
-            Finding::new(
-                Severity::High,
-                "cron_system",
-                format!(
-                    "cron.d backdoor {} in {}: {}",
-                    if removed { "REMOVED" } else { "FOUND" },
-                    path.display(),
-                    &line[..line.len().min(60)],
-                ),
-                format!(
-                    "file: {}\nline: {}\npatterns: {}\nremoved: {}",
-                    path.display(),
-                    line,
-                    reasons.join(", "),
-                    removed,
-                ),
-            )
-            .with_path(path.to_path_buf())
-            .with_context("cron.d file", path.display().to_string())
-            .with_context("line", line.to_string())
-            .with_context("patterns", reasons.join(", "))
-            .with_context("removed", removed.to_string())
-            .with_verdict(
-                if removed {
-                    Verdict::Remove
-                } else {
-                    Verdict::Investigate
-                },
-                format!(
-                    "Cron.d entry matched suspicious pattern(s) [{}]. \
-                     Files in /etc/cron.d run as any user; this entry should not exist.",
-                    reasons.join(", "),
-                ),
-            ),
-        );
+    if hits.is_empty() {
+        return;
     }
+
+    let all_reasons: Vec<String> = hits
+        .iter()
+        .flat_map(|(_, r)| r.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    ctx.log_msg(&format!(
+        "[!] Suspicious cron.d file {} ({} bad line(s)) [{}] -- nuking whole file",
+        path.display(),
+        hits.len(),
+        all_reasons.join(", ")
+    ));
+    ctx.log_evidence_file(path);
+
+    try_clear_immutable(path);
+    let removed = ctx.remove_path_logged(path);
+
+    ctx.emit(
+        Finding::new(
+            Severity::Critical,
+            "cron_system",
+            format!(
+                "cron.d backdoor file {} {}: {} suspicious line(s)",
+                path.display(),
+                if removed { "REMOVED" } else { "FOUND" },
+                hits.len(),
+            ),
+            format!(
+                "file: {}\nsuspicious_lines:\n  {}\npatterns: {}\nremoved: {}",
+                path.display(),
+                hits.iter().map(|(l, _)| *l).collect::<Vec<_>>().join("\n  "),
+                all_reasons.join(", "),
+                removed,
+            ),
+        )
+        .with_path(path.to_path_buf())
+        .with_context("cron.d file", path.display().to_string())
+        .with_context("patterns", all_reasons.join(", "))
+        .with_context("removed", removed.to_string())
+        .with_verdict(
+            if removed { Verdict::Remove } else { Verdict::Investigate },
+            format!(
+                "cron.d file matched suspicious pattern(s) [{}]. \
+                 Entire file removed -- any entry in /etc/cron.d runs as an arbitrary user.",
+                all_reasons.join(", "),
+            ),
+        ),
+    );
 }
 
 /// Scan one of the periodic script directories (hourly/daily/weekly/monthly).
@@ -427,7 +436,32 @@ fn matched_patterns(line: &str) -> Vec<String> {
         }
     }
 
+    if has_hidden_path_component(line) {
+        let r = "execution from hidden path (dot-file component in command)".to_string();
+        if !reasons.contains(&r) {
+            reasons.push(r);
+        }
+    }
+
     reasons
+}
+
+/// True if any whitespace-delimited token in `line` looks like a path with a
+/// dot-prefixed basename, e.g. `/usr/lib/.helper` or `/etc/.something`.
+///
+/// This catches hidden-file execution regardless of which directory it lives in.
+fn has_hidden_path_component(line: &str) -> bool {
+    line.split_whitespace().any(|token| {
+        // Must look like an absolute path (contains '/') and have a hidden basename.
+        if !token.contains('/') {
+            return false;
+        }
+        token
+            .rsplit('/')
+            .next()
+            .map(|basename| basename.starts_with('.') && basename.len() > 1)
+            .unwrap_or(false)
+    })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -575,5 +609,38 @@ mod tests {
     #[test]
     fn effective_line_rejects_comment_regardless_of_leading_space() {
         assert!(effective_line("  # disabled cron entry").is_none());
+    }
+
+    #[test]
+    fn hidden_path_in_usr_lib_is_flagged() {
+        let r = matched_patterns("* * * * * /usr/lib/.helper");
+        assert!(!r.is_empty(), "hidden path in /usr/lib/ should be flagged");
+        assert!(r.iter().any(|s| s.contains("hidden path")));
+    }
+
+    #[test]
+    fn hidden_path_in_etc_is_flagged() {
+        let r = matched_patterns("@reboot /etc/.backdoor arg1");
+        assert!(!r.is_empty());
+        assert!(r.iter().any(|s| s.contains("hidden path")));
+    }
+
+    #[test]
+    fn has_hidden_path_component_matches_dotfile_in_subdir() {
+        assert!(has_hidden_path_component("/usr/local/lib/.hidden_script"));
+        assert!(has_hidden_path_component("/var/lib/.payload"));
+    }
+
+    #[test]
+    fn has_hidden_path_component_ignores_normal_paths() {
+        assert!(!has_hidden_path_component("/usr/bin/python3"));
+        assert!(!has_hidden_path_component("/etc/cron.d/cleanup"));
+        assert!(!has_hidden_path_component("relative_name"));
+    }
+
+    #[test]
+    fn has_hidden_path_component_ignores_dotfiles_as_non_path_tokens() {
+        // A bare dotfile name without a directory separator should not match.
+        assert!(!has_hidden_path_component(".hidden_no_slash"));
     }
 }

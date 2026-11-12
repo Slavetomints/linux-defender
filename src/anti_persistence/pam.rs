@@ -8,13 +8,16 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::scan::{effective_line, read_text_files, references_untrusted_dir};
-use crate::core::{Action, DefenderContext, Finding, Result, Severity};
+use crate::core::{Action, DefenderContext, Finding, Result, Severity, Verdict, try_clear_immutable};
 
 /// Directory holding one PAM stack per service.
 const PAM_DIR: &str = "/etc/pam.d";
 
 /// Directories a legitimate PAM module is installed into.
 const TRUSTED_MODULE_DIRS: &[&str] = &["/lib/", "/lib64/", "/usr/lib/", "/usr/lib64/"];
+
+/// Directories where attackers drop pam_exec helper binaries as hidden files.
+const PAM_HELPER_SCAN_DIRS: &[&str] = &["/usr/lib", "/usr/lib64"];
 
 /// A PAM directive that matches a known backdoor shape.
 #[derive(Debug, PartialEq, Eq)]
@@ -46,10 +49,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
         if !ctx.in_tui() {
             println!("[✓] No PAM backdoor patterns found in {}", PAM_DIR);
         }
-        return Ok(());
-    }
-
-    if ctx.in_tui() {
+    } else if ctx.in_tui() {
         for finding in &findings {
             ctx.emit(
                 Finding::new(
@@ -79,6 +79,10 @@ pub fn run(ctx: &DefenderContext) -> Result {
         println!("[!] PAM edits are not auto-reverted — a wrong change locks you out.");
         println!("[!] Review each against a known-good config before editing by hand.");
     }
+
+    // Sweep for hidden pam_exec helper binaries -- any dot-file in /usr/lib or /usr/lib64
+    // has no business being there. We don't match on a specific name.
+    sweep_hidden_pam_binaries(ctx);
 
     Ok(())
 }
@@ -146,6 +150,57 @@ fn inspect(contents: &str) -> Vec<(String, &'static str)> {
     }
 
     findings
+}
+
+/// Scan for hidden pam_exec helper binaries in system lib directories.
+///
+/// Any dot-file or dot-directory in `/usr/lib` or `/usr/lib64` has no legitimate
+/// purpose. We flag and remove them regardless of their specific name.
+fn sweep_hidden_pam_binaries(ctx: &DefenderContext) {
+    for dir in PAM_HELPER_SCAN_DIRS {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            if !name.starts_with('.') {
+                continue;
+            }
+            ctx.log_evidence_file(&path);
+            try_clear_immutable(&path);
+            let removed = ctx.remove_path_logged(&path);
+            ctx.emit(
+                Finding::new(
+                    Severity::Critical,
+                    "pam",
+                    format!(
+                        "Hidden file in {} {} — suspected pam_exec backdoor helper",
+                        dir,
+                        if removed { "REMOVED" } else { "FOUND" },
+                    ),
+                    format!(
+                        "path: {}\nremoved: {}\n\nHidden files in system lib directories \
+                         are dropped by attackers as pam_exec.so helper binaries that log \
+                         credentials or grant backdoor access on every authentication attempt.",
+                        path.display(),
+                        removed,
+                    ),
+                )
+                .with_path(path.clone())
+                .with_context("removed", removed.to_string())
+                .with_verdict(
+                    Verdict::Remove,
+                    format!(
+                        "Remove the hidden binary with `rm -f {}` and audit \
+                         /etc/pam.d/ for any corresponding pam_exec.so line.",
+                        path.display()
+                    ),
+                )
+                .with_action(Action::Manual(format!("rm -f {}", path.display()))),
+            );
+        }
+    }
 }
 
 /// An absolute module path if the directive names one. Bare module names like

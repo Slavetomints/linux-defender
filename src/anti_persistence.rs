@@ -19,8 +19,9 @@ pub mod initramfs;
 pub mod kernel_modules;
 pub mod ld_preload;
 pub mod logrotate;
+pub mod mail_intercept;
 pub mod pam;
-pub mod php_shells;
+pub mod webshells;
 pub mod polkit;
 pub mod prompt_command;
 pub mod rc_local;
@@ -48,7 +49,7 @@ pub struct CliArgs {
     pub systemd: bool,
     /// Scan web root for PHP webshells
     #[arg(long)]
-    pub php_shells: bool,
+    pub webshells: bool,
     /// Check PROMPT_COMMAND and shell hook variables
     #[arg(long)]
     pub prompt_command: bool,
@@ -97,6 +98,9 @@ pub struct CliArgs {
     /// Review pending at(1) jobs
     #[arg(long)]
     pub at_jobs: bool,
+    /// Detect postfix mail intercept: hidden files in system lib dirs, suspicious pipe transports in master.cf, immutable postfix configs
+    #[arg(long)]
+    pub mail_intercept: bool,
     /// Checks for immutable/append-only flags on sensitive files
     #[arg(long)]
     pub immutable: bool,
@@ -144,8 +148,9 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
         ("kernel_modules", args.kernel_modules, kernel_modules::run),
         ("ld_preload", args.ld_preload, ld_preload::run),
         ("logrotate", args.logrotate, logrotate::run),
+        ("mail_intercept", args.mail_intercept, mail_intercept::run),
         ("pam", args.pam, pam::run),
-        ("php_shells", args.php_shells, php_shells::run),
+        ("webshells", args.webshells, webshells::run),
         ("polkit", args.polkit, polkit::run),
         ("prompt_command", args.prompt_command, prompt_command::run),
         ("rc_local", args.rc_local, rc_local::run),
@@ -206,8 +211,9 @@ pub fn run_module(name: &str, ctx: &DefenderContext) -> Result {
         "kernel_modules" => kernel_modules::run(ctx),
         "ld_preload" => ld_preload::run(ctx),
         "logrotate" => logrotate::run(ctx),
+        "mail_intercept" => mail_intercept::run(ctx),
         "pam" => pam::run(ctx),
-        "php_shells" => php_shells::run(ctx),
+        "webshells" => webshells::run(ctx),
         "polkit" => polkit::run(ctx),
         "prompt_command" => prompt_command::run(ctx),
         "rc_local" => rc_local::run(ctx),

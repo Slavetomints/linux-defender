@@ -214,6 +214,29 @@ impl DefenderContext {
         self.log_msg(&action_banner);
         let _ = self.log(&action_banner);
 
+        // Strip immutable bit before removal — attack artifacts are routinely
+        // locked with chattr +i. The Rust binary execs the real chattr binary,
+        // bypassing any shell-function overrides installed by shell_poison.
+        let path_str = path.display().to_string();
+        let chattr_out = std::process::Command::new("chattr")
+            .args(["-i", &path_str])
+            .output();
+        match &chattr_out {
+            Ok(o) if o.status.success() => {
+                self.debug(&format!("chattr -i {}: ok", path_str));
+            }
+            Ok(o) => {
+                self.debug(&format!(
+                    "chattr -i {}: non-zero ({})",
+                    path_str,
+                    String::from_utf8_lossy(&o.stderr).trim()
+                ));
+            }
+            Err(e) => {
+                self.debug(&format!("chattr -i {}: exec failed — {}", path_str, e));
+            }
+        }
+
         let result = if path.is_dir() {
             std::fs::remove_dir_all(path)
         } else {
@@ -277,6 +300,27 @@ impl DefenderContext {
         let _ = self.log(&action_msg);
         self.log_msg(&format!("  removing: {}", line_content));
         let _ = self.log(&format!("  removing: {}", line_content));
+
+        // Strip immutable bit before rewriting — same reasoning as remove_path_logged.
+        let path_str = path.display().to_string();
+        let chattr_out = std::process::Command::new("chattr")
+            .args(["-i", &path_str])
+            .output();
+        match &chattr_out {
+            Ok(o) if o.status.success() => {
+                self.debug(&format!("chattr -i {}: ok", path_str));
+            }
+            Ok(o) => {
+                self.debug(&format!(
+                    "chattr -i {}: non-zero ({})",
+                    path_str,
+                    String::from_utf8_lossy(&o.stderr).trim()
+                ));
+            }
+            Err(e) => {
+                self.debug(&format!("chattr -i {}: exec failed — {}", path_str, e));
+            }
+        }
 
         let Ok(original) = std::fs::read_to_string(path) else {
             let msg = format!("  FAILED to read {} for line removal", path.display());

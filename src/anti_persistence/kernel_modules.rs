@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::core::scan::{effective_line, read_text_file, read_text_files};
-use crate::core::{DefenderContext, DefenderError, Finding, Result, Severity};
+use crate::core::{Action, DefenderContext, DefenderError, Finding, Result, Severity};
 
 /// Files that list modules to load at boot.
 const LOAD_CONFIG_FILES: &[&str] = &["/etc/modules"];
@@ -35,6 +35,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
     ctx.log_msg(&format!("[+] {} kernel module(s) loaded", modules.len()));
 
     report_untracked(ctx, &modules)?;
+    report_hidden_modules(ctx, &modules);
     report_load_config(ctx);
 
     ctx.emit(Finding::new(
@@ -223,6 +224,62 @@ fn parse_proc_modules(contents: &str) -> Vec<Module> {
             })
         })
         .collect()
+}
+
+/// Cross-check /sys/module/ against lsmod — anything visible in sysfs but absent
+/// from /proc/modules removed itself from the module list (list_del_init), a classic
+/// rootkit self-hiding technique.
+fn report_hidden_modules(ctx: &DefenderContext, lsmod: &[Module]) {
+    let lsmod_names: HashSet<String> = lsmod.iter().map(|m| normalise(&m.name)).collect();
+
+    let sysfs = Path::new("/sys/module");
+    let entries = match std::fs::read_dir(sysfs) {
+        Ok(e) => e,
+        Err(err) => {
+            ctx.debug(&format!("/sys/module unreadable: {}", err));
+            return;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        // Built-in pseudo-entries lack an `initstate` file; real loadable modules have one.
+        if !path.join("initstate").exists() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let norm = normalise(&name);
+        if !lsmod_names.contains(&norm) {
+            ctx.emit(
+                Finding::new(
+                    Severity::Critical,
+                    "kernel_modules",
+                    format!(
+                        "Module '{}' visible in /sys/module/ but hidden from lsmod — rootkit indicator",
+                        name
+                    ),
+                    format!(
+                        "name: {}\nsysfs path: {}\n\n\
+                         Kernel modules can call list_del_init(&THIS_MODULE->list) to remove \
+                         themselves from /proc/modules while remaining fully loaded and active. \
+                         This is the primary self-hiding technique used by LKM rootkits. \
+                         The module cannot be listed by lsmod or removed by name with rmmod \
+                         once hidden, but it remains in /sys/module/. \
+                         Inspect /sys/module/{}/initstate for its load state and attempt \
+                         rmmod {} — if that fails, a reboot is required to unload it.",
+                        name,
+                        path.display(),
+                        name,
+                        name,
+                    ),
+                )
+                .with_action(Action::Manual(format!("rmmod {}", name))),
+            );
+        }
+    }
 }
 
 /// Parse a module-load config file, returning the list of module names to load.

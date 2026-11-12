@@ -6,7 +6,6 @@
 //! - **High** — established connection to a public (non-RFC-1918/loopback) IP.
 //! - **Medium** — LISTEN port whose associated process name matches
 //!   a set of suspicious process names.
-//! - **Info** — all other established or listening connections.
 
 use std::process::Command;
 
@@ -205,19 +204,6 @@ pub fn run(ctx: &DefenderContext) -> Result {
                 format!(
                     "proto: {}\nstate: {}\nlocal: {}\nprocess: {}\npid: {}",
                     c.proto, c.state, c.local, c.process_name, c.pid
-                ),
-            ));
-        } else {
-            ctx.emit(Finding::new(
-                Severity::Info,
-                "network_watch",
-                format!(
-                    "{} {} {} → {} ({})",
-                    c.proto, c.state, c.local, c.remote, c.process_name
-                ),
-                format!(
-                    "proto: {}\nstate: {}\nlocal: {}\nremote: {}\nprocess: {}\npid: {}",
-                    c.proto, c.state, c.local, c.remote, c.process_name, c.pid
                 ),
             ));
         }

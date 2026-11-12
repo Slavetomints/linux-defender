@@ -12,15 +12,11 @@ use walkdir::WalkDir;
 
 use crate::core::{DefenderContext, Finding, Result, Severity, Verdict};
 
-/// Standard binary directories walked when searching for recently-modified files.
-const SYSTEM_BIN_DIRS: &[&str] = &[
-    "/bin",
-    "/sbin",
-    "/usr/bin",
-    "/usr/sbin",
-    "/usr/local/bin",
-    "/usr/local/sbin",
-];
+/// Core system binary directories -- modifications here are Critical.
+const CRITICAL_BIN_DIRS: &[&str] = &["/bin", "/sbin", "/usr/bin", "/usr/sbin"];
+
+/// Admin-installed binary directories -- modifications here are High (legitimate installs happen).
+const HIGH_BIN_DIRS: &[&str] = &["/usr/local/bin", "/usr/local/sbin"];
 
 /// A binary file whose mtime is suspiciously recent.
 pub struct ModifiedBinary {
@@ -28,6 +24,8 @@ pub struct ModifiedBinary {
     pub path: PathBuf,
     /// Last-modified time of the binary.
     pub mtime: SystemTime,
+    /// Severity determined by which directory set the file belongs to.
+    pub severity: Severity,
 }
 
 /// Scan system binary directories for recently-modified files.
@@ -49,7 +47,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
         let age = ctx.mtime_label(hit.mtime);
         ctx.emit(
             Finding::new(
-                Severity::Critical,
+                hit.severity,
                 "recently_modified",
                 format!("System binary modified recently: {}", hit.path.display()),
                 format!("path: {}\nmtime: {}", hit.path.display(), age),
@@ -78,30 +76,38 @@ pub fn run(ctx: &DefenderContext) -> Result {
     Ok(())
 }
 
-/// Walk all [`SYSTEM_BIN_DIRS`] and return files whose mtime is after `cutoff`.
+/// Walk both dir sets and return files whose mtime is after `cutoff`, tagged with severity.
 fn scan_dirs(cutoff: SystemTime) -> Vec<ModifiedBinary> {
     let mut hits = Vec::new();
 
-    for dir in SYSTEM_BIN_DIRS {
-        let path = Path::new(dir);
-        if !path.is_dir() {
-            continue;
-        }
+    let dir_sets: &[(&[&str], Severity)] = &[
+        (CRITICAL_BIN_DIRS, Severity::Critical),
+        (HIGH_BIN_DIRS, Severity::High),
+    ];
 
-        for entry in WalkDir::new(path)
-            .max_depth(1) // don't recurse into subdirs of /usr/bin
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_file())
-        {
-            let Ok(meta) = entry.metadata() else { continue };
-            let Ok(mtime) = meta.modified() else { continue };
+    for (dirs, severity) in dir_sets {
+        for dir in *dirs {
+            let path = Path::new(dir);
+            if !path.is_dir() {
+                continue;
+            }
 
-            if mtime > cutoff {
-                hits.push(ModifiedBinary {
-                    path: entry.path().to_path_buf(),
-                    mtime,
-                });
+            for entry in WalkDir::new(path)
+                .max_depth(1)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_file())
+            {
+                let Ok(meta) = entry.metadata() else { continue };
+                let Ok(mtime) = meta.modified() else { continue };
+
+                if mtime > cutoff {
+                    hits.push(ModifiedBinary {
+                        path: entry.path().to_path_buf(),
+                        mtime,
+                        severity: *severity,
+                    });
+                }
             }
         }
     }

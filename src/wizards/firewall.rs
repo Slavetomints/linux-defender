@@ -108,7 +108,7 @@ impl FirewallWizard {
             detect_lines,
             profile,
             profile_cursor: cursor,
-            ssh_open: true,
+            ssh_open: false,
             exec_log: None,
             exec_done: Arc::new(Mutex::new(false)),
             log_scroll: 0,
@@ -210,9 +210,9 @@ impl FirewallWizard {
         );
 
         let ssh_label = if self.ssh_open {
-            "[✓] Keep SSH port open"
+            "[✓] Allow outbound SSH  (inbound always open)"
         } else {
-            "[ ] Keep SSH port open"
+            "[ ] Allow outbound SSH  (inbound always open)"
         };
         let ssh_style = if self.ssh_open {
             Style::default().fg(Color::Green)
@@ -250,13 +250,17 @@ impl FirewallWizard {
                 Span::styled(profile.label(), Style::default().fg(Color::Cyan)),
             ]),
             Line::from(vec![
-                Span::styled("  SSH open: ", Style::default().fg(Color::DarkGray)),
+                Span::styled("  SSH in:   ", Style::default().fg(Color::DarkGray)),
+                Span::styled("always allowed", Style::default().fg(Color::Green)),
+            ]),
+            Line::from(vec![
+                Span::styled("  SSH out:  ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    if self.ssh_open { "yes" } else { "no" },
+                    if self.ssh_open { "allowed" } else { "BLOCKED" },
                     if self.ssh_open {
-                        Style::default().fg(Color::Green)
+                        Style::default().fg(Color::Yellow)
                     } else {
-                        Style::default().fg(Color::Red)
+                        Style::default().fg(Color::Green)
                     },
                 ),
             ]),
@@ -275,7 +279,10 @@ impl FirewallWizard {
             )),
             Line::from(""),
             Line::from(Span::styled(
-                "  Command: nftbuild -sys <profile> [-ssh]",
+                format!(
+                    "  Command: nftbuild -sys <profile> -ssh {}",
+                    if self.ssh_open { "ie" } else { "i" }
+                ),
                 Style::default().fg(Color::DarkGray),
             )),
         ];
@@ -385,16 +392,13 @@ impl FirewallWizard {
             }
             push!("  ✓ nftbuild found");
 
+            let ssh_arg = if ssh { "ie" } else { "i" };
             push!(format!(
-                "→ Running: nftbuild -sys {}{}",
-                sys_flag,
-                if ssh { " -ssh" } else { "" }
+                "→ Running: nftbuild -sys {} -ssh {}",
+                sys_flag, ssh_arg
             ));
 
-            let mut args = vec!["nftbuild", "-sys", sys_flag.as_str()];
-            if ssh {
-                args.push("-ssh");
-            }
+            let args = vec!["nftbuild", "-sys", sys_flag.as_str(), "-ssh", ssh_arg];
             super::run_cmd_to_log(&args, &lc);
 
             push!("→ Checking nftables service…");

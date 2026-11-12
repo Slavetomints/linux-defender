@@ -14,11 +14,11 @@ use crate::core::{DefenderContext, Finding, Result, Severity, Verdict};
 const SERVICE_UID_MAX: u32 = 1000;
 
 /// Destination ports considered legitimate for any service
-/// (NTP, DNS, SMTP-out, HTTPS package repos, etc.).
+/// (NTP, SMTP-out, HTTPS package repos, etc.).
+/// Port 53 is NOT here — DNS is allowed per-process via KNOWN_DNS_PROCS to catch DNS tunneling.
 const EXPECTED_OUTBOUND_PORTS: &[u16] = &[
     22,   // SSH (e.g., git fetch)
     25,   // SMTP relay out
-    53,   // DNS
     80,   // HTTP (package downloads)
     123,  // NTP
     443,  // HTTPS (package downloads, APIs)
@@ -27,6 +27,9 @@ const EXPECTED_OUTBOUND_PORTS: &[u16] = &[
     9997, // Splunk forwarder
     8089, // Splunk management
 ];
+
+/// DNS processes allowed to make port-53 connections -- anything else on 53 is C2 candidate.
+const KNOWN_DNS_PROCS: &[&str] = &["named", "dnsmasq", "systemd-resolved", "unbound", "bind"];
 
 /// TCP state 01 = ESTABLISHED.
 const TCP_ESTABLISHED: &str = "01";
@@ -242,6 +245,11 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
         // Skip expected outbound ports
         if EXPECTED_OUTBOUND_PORTS.contains(&conn.remote_port) {
+            continue;
+        }
+
+        // Allow port-53 connections from known DNS daemon processes
+        if conn.remote_port == 53 && KNOWN_DNS_PROCS.iter().any(|&d| proc_name.contains(d)) {
             continue;
         }
 

@@ -56,17 +56,25 @@ impl Mode {
 }
 
 fn main() -> anyhow::Result<()> {
-    if !Uid::effective().is_root() {
-        eprintln!("[!] defender must be run as root (try: sudo defender-cli)");
-        std::process::exit(1);
-    }
-
-    // No arguments → launch the TUI.
+    // No arguments → launch the TUI, which requires root to do anything useful.
     if env::args().len() == 1 {
+        if !Uid::effective().is_root() {
+            eprintln!("[!] defender must be run as root (try: sudo defender-cli)");
+            std::process::exit(1);
+        }
         return defender_cli::tui::run();
     }
 
+    // Parse first so clap handles --help/--version (and reports usage errors)
+    // before any privilege logic.
     let cli = Cli::parse();
+
+    // Subcommands self-gate per module (each privileged check calls require_root
+    // and reports when it is skipped), so a non-root run still parses, runs, and
+    // writes a report instead of aborting. Warn once up front.
+    if !Uid::effective().is_root() {
+        eprintln!("[!] Not running as root — privileged checks will be skipped or limited.");
+    }
 
     let timestamp = Local::now().format("%d-%m-%y-%H-%M-%S").to_string();
     let report_file = env::current_dir()

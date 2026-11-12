@@ -1433,18 +1433,18 @@ impl App {
             return;
         }
         self.router_running = true;
-        self.router_log.clear();
-        self.router_log_scroll = 0;
-
-        let progress_tx = self.router_progress_tx.clone();
         let label = crate::router::ROUTER_STEPS
             .iter()
             .find(|s| s.id == step_id)
             .map(|s| s.label)
             .unwrap_or(step_id);
 
+        self.router_log = vec![format!("Starting: {}…", label)];
+        self.router_log_scroll = 0;
+
+        let progress_tx = self.router_progress_tx.clone();
+
         std::thread::spawn(move || {
-            let _ = progress_tx.send(format!("Starting: {}…", label));
             let report = PathBuf::from("/tmp/defender-router.log");
             let ctx = DefenderContext::new(report, false)
                 .with_progress(progress_tx.clone());
@@ -2112,11 +2112,52 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                         }
                     }
                 }
+                    KeyCode::PageUp | KeyCode::Char('[') => match app.tab {
+                        Tab::Router => {
+                            let max = app.router_log.len().saturating_sub(1);
+                            app.router_log_scroll = (app.router_log_scroll + 5).min(max);
+                        }
+                        Tab::Hardening => {
+                            let max = app.hardening_log.len().saturating_sub(1);
+                            app.hardening_log_scroll = (app.hardening_log_scroll + 5).min(max);
+                        }
+                        Tab::Backups => {
+                            let max = app.backups_log.len().saturating_sub(1);
+                            app.backups_log_scroll = (app.backups_log_scroll + 5).min(max);
+                        }
+                        Tab::ServiceRestore => {
+                            let max = app.restore_log.len().saturating_sub(1);
+                            app.restore_log_scroll = (app.restore_log_scroll + 5).min(max);
+                        }
+                        _ => {}
+                    },
+                    KeyCode::PageDown | KeyCode::Char(']') => match app.tab {
+                        Tab::Router => {
+                            app.router_log_scroll = app.router_log_scroll.saturating_sub(5);
+                        }
+                        Tab::Hardening => {
+                            app.hardening_log_scroll = app.hardening_log_scroll.saturating_sub(5);
+                        }
+                        Tab::Backups => {
+                            app.backups_log_scroll = app.backups_log_scroll.saturating_sub(5);
+                        }
+                        Tab::ServiceRestore => {
+                            app.restore_log_scroll = app.restore_log_scroll.saturating_sub(5);
+                        }
+                        _ => {}
+                    },
+                    KeyCode::Home => {
+                        if app.tab == Tab::Router {
+                            app.router_log_scroll = app.router_log.len().saturating_sub(1);
+                        }
+                    }
                 KeyCode::End => {
                     if app.tab == Tab::Logs
                         && let Some(p) = app.log_dashboard.active_pane_mut()
                     {
                         p.scroll_to_bottom();
+                        } else if app.tab == Tab::Router {
+                            app.router_log_scroll = 0;
                     }
                 }
                 KeyCode::Tab => {
@@ -2473,6 +2514,7 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
                 right.extend(kb("↑↓", "select", key_color));
                 right.extend(kb("Enter", "run operation", key_color));
             }
+            right.extend(kb("PgUp/PgDn", "scroll", key_color));
         }
     }
 
@@ -3732,8 +3774,16 @@ fn render_router(f: &mut ratatui::Frame, area: Rect, app: &App) {
     );
 
     // Right: output log
+    let log_title = if app.router_log_scroll > 0 {
+        format!(
+            " Output [Scrolled +{}] (PgUp/PgDn / [/]: scroll, End: bottom) ",
+            app.router_log_scroll
+        )
+    } else {
+        " Output [PgUp/PgDn / [/]: scroll] ".to_string()
+    };
     let log_block = Block::default()
-        .title(" Output ")
+        .title(log_title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 

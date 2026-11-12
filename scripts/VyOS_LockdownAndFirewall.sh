@@ -11,10 +11,9 @@
 #   ./VyOS_LockdownAndFirewall.sh --interactive
 # ==============================================================================
 
-# Source VyOS script environment
-if [ -f /opt/vyatta/etc/functions/script-template ]; then
-    source /opt/vyatta/etc/functions/script-template
-fi
+# ─── Diagnostic Logging ────────────────────────────────────────────────────────
+mkdir -p /tmp/defender/vyos 2>/dev/null
+echo "[$(date)] vbash PID=$$ GID=$(id -g -n 2>/dev/null) ARGC=$# ARGS: '$*'" >> /tmp/defender/vyos/debug_run.log
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -84,7 +83,7 @@ OPTIONS:
   --dry-run               Display commands without applying changes
   -h, --help              Show this help message
 EOF
-    exit 0
+    exit "${1:-0}"
 }
 
 # ─── Parse Arguments ──────────────────────────────────────────────────────────
@@ -157,11 +156,12 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            usage
+            usage 0
             ;;
         *)
-            echo "[-] Unknown parameter: $1"
-            usage
+            echo "[-] Unknown parameter: '$1' (Full ARGV: '$*')" >&2
+            echo "[$(date)] ERROR Unknown parameter: '$1' ARGS: '$*'" >> /tmp/defender/vyos/debug_run.log
+            usage 1
             ;;
     esac
 done
@@ -171,9 +171,15 @@ if [ -z "$MODE" ]; then
     if [ -t 0 ]; then
         MODE="interactive"
     else
-        echo "[-] Error: No operation mode specified and non-interactive input detected."
-        usage
+        echo "[-] Error: No operation mode specified and non-interactive input detected. (ARGC=$#, ARGS='$*')" >&2
+        echo "[$(date)] ERROR No operation mode specified (ARGC=$#, ARGS='$*')" >> /tmp/defender/vyos/debug_run.log
+        usage 1
     fi
+fi
+
+# Source VyOS script environment AFTER arguments are safely stored
+if [ -f /opt/vyatta/etc/functions/script-template ]; then
+    source /opt/vyatta/etc/functions/script-template
 fi
 
 # ─── Interactive Wizard ───────────────────────────────────────────────────────

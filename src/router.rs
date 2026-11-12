@@ -1,10 +1,11 @@
 //! VyOS router hardening, firewalling, and forensic audit tooling.
 
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use clap::Args;
 
@@ -135,6 +136,25 @@ pub fn run_script(ctx: &DefenderContext, script_args: &[&str]) -> Result {
         "bash"
     };
 
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(tmp_dir.join("last_execution.log"))
+        .ok()
+        .map(|f| Arc::new(Mutex::new(f)));
+
+    if let Some(ref f) = log_file {
+        if let Ok(mut file) = f.lock() {
+            let _ = writeln!(
+                file,
+                "\n=== [{}] Shell: {} | Args: {:?} ===",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                shell,
+                script_args
+            );
+        }
+    }
+
     let mut cmd = Command::new(shell);
     cmd.arg(&script_path).args(script_args);
     cmd.stdin(Stdio::null());
@@ -148,42 +168,62 @@ pub fn run_script(ctx: &DefenderContext, script_args: &[&str]) -> Result {
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => {
-            let _ = fs::remove_file(&script_path);
-            return Err(DefenderError::Io(e));
-        }
+        Err(e) => return Err(DefenderError::Io(e)),
     };
+
+    let log_file_err = log_file.clone();
+    let ctx_err = ctx.clone();
+    let stderr_handle = child.stderr.take().map(|stderr| {
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().flatten() {
+                ctx_err.progress(&format!("[err] {}", line));
+                if let Some(ref f) = log_file_err {
+                    if let Ok(mut file) = f.lock() {
+                        let _ = writeln!(file, "[err] {}", line);
+                    }
+                }
+            }
+        })
+    });
 
     if let Some(stdout) = child.stdout.take() {
         let reader = BufReader::new(stdout);
         for line in reader.lines().flatten() {
             ctx.progress(&line);
+            if let Some(ref f) = log_file {
+                if let Ok(mut file) = f.lock() {
+                    let _ = writeln!(file, "{}", line);
+                }
+            }
         }
     }
 
-    if let Some(stderr) = child.stderr.take() {
-        let reader = BufReader::new(stderr);
-        for line in reader.lines().flatten() {
-            ctx.progress(&format!("[err] {}", line));
-        }
+    if let Some(handle) = stderr_handle {
+        let _ = handle.join();
     }
 
     let status = match child.wait() {
         Ok(s) => s,
-        Err(e) => {
-            let _ = fs::remove_file(&script_path);
-            return Err(DefenderError::Io(e));
-        }
+        Err(e) => return Err(DefenderError::Io(e)),
     };
-
-    let _ = fs::remove_file(&script_path);
 
     if status.success() {
         ctx.progress("✓ Execution completed successfully.");
+        if let Some(ref f) = log_file {
+            if let Ok(mut file) = f.lock() {
+                let _ = writeln!(file, "=== Status: SUCCESS ===");
+            }
+        }
         Ok(())
     } else {
         let code = status.code().unwrap_or(-1);
         ctx.progress(&format!("✗ Execution failed with exit code {}.", code));
+        if let Some(ref f) = log_file {
+            if let Ok(mut file) = f.lock() {
+                let _ = writeln!(file, "=== Status: FAILED (exit code: {}) ===", code);
+            }
+        }
         Err(DefenderError::Command(format!("Script failed with exit code {}", code)))
     }
 }

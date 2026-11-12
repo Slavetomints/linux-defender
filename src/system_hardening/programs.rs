@@ -1,8 +1,13 @@
 //! Restrict dangerous programs that should not be world-accessible.
 //!
-//! Sets permissions to 750 on compilers, network tools, and package managers.
-//! This does not uninstall anything — it limits an unprivileged attacker's
-//! ability to compile payloads, pivot laterally, or install new tools.
+//! Sets permissions to 750 on compilers and pure recon/tunnelling tools so an
+//! unprivileged attacker can't compile payloads or pivot. It does not uninstall
+//! anything.
+//!
+//! Package managers (apt/dnf/...) and `curl`/`wget` are deliberately NOT
+//! restricted: operators and injects routinely install packages and fetch files
+//! as non-root, the security benefit is thin (root attackers are unaffected),
+//! and the restriction breaks legitimate competition workflow.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -13,17 +18,9 @@ use crate::core::{DefenderContext, Finding, Result, Severity};
 /// Compilers that should not be world-executable on a competition box.
 const COMPILERS: &[&str] = &["gcc", "g++", "clang", "cc", "make"];
 
-/// Network reconnaissance and tunnelling tools.
-const NETWORK_TOOLS: &[&str] = &["nmap", "nc", "netcat", "socat", "curl", "wget"];
-
-/// Package managers at their canonical absolute paths.
-const PACKAGE_MANAGERS: &[&str] = &[
-    "/usr/bin/apt",
-    "/usr/bin/apt-get",
-    "/usr/bin/dnf",
-    "/usr/bin/yum",
-    "/usr/bin/zypper",
-];
+/// Network reconnaissance and tunnelling tools. `curl`/`wget` are intentionally
+/// excluded: they are needed by legitimate tooling and restore flows.
+const NETWORK_TOOLS: &[&str] = &["nmap", "nc", "netcat", "socat"];
 
 /// Return the octal permission bits for a file, or `None` if it does not exist.
 pub(crate) fn mode_of(path: &Path) -> Option<u32> {
@@ -122,25 +119,14 @@ fn restrict_network_tools(ctx: &DefenderContext) {
     }
 }
 
-/// Check and restrict package manager binaries at their canonical paths.
-fn restrict_package_managers(ctx: &DefenderContext) {
-    ctx.log_msg("[+] Checking package manager permissions...");
-    for &path_str in PACKAGE_MANAGERS {
-        let path = Path::new(path_str);
-        if path.exists() {
-            restrict_binary(ctx, path);
-        } else {
-            ctx.debug(&format!("  {} not present — skipping", path_str));
-        }
-    }
-}
-
-/// Restrict compilers, network tools, and package managers to mode 750.
+/// Restrict compilers and recon/tunnelling tools to mode 750.
+///
+/// Package managers and curl/wget are intentionally left alone — see the module
+/// docs for why.
 pub fn run(ctx: &DefenderContext) -> Result {
     ctx.log_msg("[+] Hardening program permissions...");
     restrict_compilers(ctx);
     restrict_network_tools(ctx);
-    restrict_package_managers(ctx);
     ctx.log_msg("[✓] Program permission hardening complete");
     Ok(())
 }

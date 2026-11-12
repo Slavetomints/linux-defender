@@ -111,12 +111,21 @@ pub struct CliArgs {
 
 /// Execute the embedded VyOS script with the given command-line arguments.
 pub fn run_script(ctx: &DefenderContext, script_args: &[&str]) -> Result {
-    let tmp_dir = PathBuf::from("/tmp/defender/vyos");
-    if let Err(e) = fs::create_dir_all(&tmp_dir) {
+    let target_dir = if nix::unistd::geteuid().is_root() {
+        let dir = PathBuf::from("/etc/linux-defender/vyos");
+        if fs::create_dir_all(&dir).is_ok() {
+            dir
+        } else {
+            PathBuf::from("/tmp/defender/vyos")
+        }
+    } else {
+        PathBuf::from("/tmp/defender/vyos")
+    };
+    if let Err(e) = fs::create_dir_all(&target_dir) {
         return Err(DefenderError::Io(e));
     }
 
-    let script_path = tmp_dir.join("VyOS_LockdownAndFirewall.sh");
+    let script_path = target_dir.join("VyOS_LockdownAndFirewall.sh");
     if let Err(e) = fs::write(&script_path, VYOS_SCRIPT) {
         return Err(DefenderError::Io(e));
     }
@@ -139,7 +148,7 @@ pub fn run_script(ctx: &DefenderContext, script_args: &[&str]) -> Result {
     let log_file = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(tmp_dir.join("last_execution.log"))
+        .open(target_dir.join("last_execution.log"))
         .ok()
         .map(|f| Arc::new(Mutex::new(f)));
 

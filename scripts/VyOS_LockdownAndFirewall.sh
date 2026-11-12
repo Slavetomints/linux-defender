@@ -5,15 +5,25 @@
 #
 # Usage:
 #   ./VyOS_LockdownAndFirewall.sh --audit
-#   ./VyOS_LockdownAndFirewall.sh --diff [/config/baseline/latest.log]
+#   ./VyOS_LockdownAndFirewall.sh --diff [/etc/linux-defender/baseline/latest.log]
 #   ./VyOS_LockdownAndFirewall.sh --team 5 --harden [--pass <secret>] [--ssh-key '<key>']
 #   ./VyOS_LockdownAndFirewall.sh --console-lockdown
 #   ./VyOS_LockdownAndFirewall.sh --interactive
 # ==============================================================================
 
-# ─── Diagnostic Logging ────────────────────────────────────────────────────────
-mkdir -p /tmp/defender/vyos 2>/dev/null
-echo "[$(date)] vbash PID=$$ GID=$(id -g -n 2>/dev/null) ARGC=$# ARGS: '$*'" >> /tmp/defender/vyos/debug_run.log
+# ─── Diagnostic Logging & Unified Working Directories ─────────────────────────
+if mkdir -p /etc/linux-defender 2>/dev/null; then
+    DEFENDER_DIR="/etc/linux-defender"
+else
+    DEFENDER_DIR="/tmp/defender"
+fi
+
+BASELINE_DIR="${DEFENDER_DIR}/baseline"
+LATEST_LINK="${BASELINE_DIR}/latest.log"
+LOG_DIR="${DEFENDER_DIR}/vyos"
+
+mkdir -p "$LOG_DIR" "$BASELINE_DIR" 2>/dev/null
+echo "[$(date)] vbash PID=$$ GID=$(id -g -n 2>/dev/null) ARGC=$# ARGS: '$*' DIR='$DEFENDER_DIR'" >> "${LOG_DIR}/debug_run.log"
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -41,13 +51,6 @@ DRY_RUN=false
 STDOUT_ONLY=false
 MODE=""
 DIFF_LOG=""
-
-if [ -d /config ] && [ -w /config ]; then
-    BASELINE_DIR="/config/baseline"
-else
-    BASELINE_DIR="/tmp/baseline"
-fi
-LATEST_LINK="${BASELINE_DIR}/latest.log"
 
 run_op() {
     if [ -x /opt/vyatta/bin/vyatta-op-cmd-wrapper ]; then
@@ -160,7 +163,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "[-] Unknown parameter: '$1' (Full ARGV: '$*')" >&2
-            echo "[$(date)] ERROR Unknown parameter: '$1' ARGS: '$*'" >> /tmp/defender/vyos/debug_run.log
+            echo "[$(date)] ERROR Unknown parameter: '$1' ARGS: '$*'" >> "${LOG_DIR}/debug_run.log"
             usage 1
             ;;
     esac
@@ -172,7 +175,7 @@ if [ -z "$MODE" ]; then
         MODE="interactive"
     else
         echo "[-] Error: No operation mode specified and non-interactive input detected. (ARGC=$#, ARGS='$*')" >&2
-        echo "[$(date)] ERROR No operation mode specified (ARGC=$#, ARGS='$*')" >> /tmp/defender/vyos/debug_run.log
+        echo "[$(date)] ERROR No operation mode specified (ARGC=$#, ARGS='$*')" >> "${LOG_DIR}/debug_run.log"
         usage 1
     fi
 fi
@@ -418,11 +421,7 @@ if [ "$MODE" == "console-lockdown" ]; then
         fi
     fi
 
-    if [ -d /config ] && [ -w /config ]; then
-        BACKUP_DIR="/config/quarantine_$(date +%Y%m%d_%H%M%S)"
-    else
-        BACKUP_DIR="/tmp/quarantine_$(date +%Y%m%d_%H%M%S)"
-    fi
+    BACKUP_DIR="${DEFENDER_DIR}/quarantine/quarantine_$(date +%Y%m%d_%H%M%S)"
     mkdir -p "$BACKUP_DIR"
     log_info "Quarantining commit hooks and boot scripts to $BACKUP_DIR..."
     if [ -d /config/scripts/commit ]; then
@@ -515,11 +514,7 @@ if [ "$MODE" == "harden" ]; then
     fi
 
     # 1. Quarantine persistence hooks
-    if [ -d /config ] && [ -w /config ]; then
-        BACKUP_DIR="/config/quarantine_$(date +%Y%m%d_%H%M%S)"
-    else
-        BACKUP_DIR="/tmp/quarantine_$(date +%Y%m%d_%H%M%S)"
-    fi
+    BACKUP_DIR="${DEFENDER_DIR}/quarantine/quarantine_$(date +%Y%m%d_%H%M%S)"
     mkdir -p "$BACKUP_DIR"
     log_info "Step 1: Quarantining filesystem hooks to $BACKUP_DIR..."
 
@@ -647,8 +642,8 @@ if [ "$MODE" == "harden" ]; then
         echo -e "${RED}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${RESET}"
         commit
         save
-        exit
         log_ok "Configuration committed and saved permanently."
+        exit 0
     else
         log_info "Step 7: Applying configuration with ${COMMIT_TIMEOUT}-minute failsafe rollback..."
         commit-confirm "$COMMIT_TIMEOUT"

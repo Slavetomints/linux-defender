@@ -739,6 +739,7 @@ impl RouterConfigDialog {
                         pass: Some(pass),
                         mgmt_subnet: Some(mgmt),
                         ssh_key,
+                        no_confirm: true,
                         ..Default::default()
                     },
                 )
@@ -1460,7 +1461,7 @@ impl App {
                 pass: None,
                 ssh_key: None,
                 commit_timeout: None,
-                no_confirm: false,
+                no_confirm: step_id == "harden",
                 force: false,
                 dry_run: false,
             });

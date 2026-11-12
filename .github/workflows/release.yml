@@ -38,13 +38,13 @@ jobs:
       - name: Stage binary
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/defender-cli \
-             dist/defender-cli-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/linux-defender \
+             dist/linux-defender-${{ matrix.target }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: defender-cli-${{ matrix.target }}
-          path: dist/defender-cli-${{ matrix.target }}
+          name: linux-defender-${{ matrix.target }}
+          path: dist/linux-defender-${{ matrix.target }}
 
   publish:
     name: Publish release

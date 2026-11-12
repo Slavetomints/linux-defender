@@ -2,3 +2,15 @@
 [default.extend-words]
 # Linux kernel module names, e.g. snd_hda_intel (Intel HD Audio).
 hda = "hda"
+# Crate name (the TUI library), not the dish.
+ratatui = "ratatui"
+# Verbatim webshell signature strings we match on in anti_persistence/webshells.rs:
+# "lolipop-shell" is the real (misspelled) shell family name, and "ded" comes from
+# the attacker banner "c0ded by : shutdown57". These must not be "corrected".
+lolipop = "lolipop"
+ded = "ded"
+
+[files]
+# The practice-attack payloads under bin/attack and bin/persist contain deliberate
+# attacker strings (e.g. the vendored p0wny-shell JS); don't spell-check them.
+extend-exclude = ["bin/attack/**", "bin/persist/**"]

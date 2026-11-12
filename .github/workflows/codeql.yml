@@ -18,6 +18,12 @@ jobs:
     name: Analyze
     runs-on: ubuntu-latest
 
+    # The .cargo/config.toml default target is musl; CodeQL's autobuild only
+    # needs a successful compile to analyze, so pin gnu to avoid setting up the
+    # musl toolchain inside the CodeQL build environment.
+    env:
+      CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
+
     strategy:
       fail-fast: false
       matrix:

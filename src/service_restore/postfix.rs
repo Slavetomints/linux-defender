@@ -16,7 +16,9 @@ use std::process::Command;
 
 use crate::core::{DefenderContext, DefenderError, Result, prompt_yes};
 
-use super::distro::{Distro, enable_and_restart, restore_config_from_backup};
+use super::distro::{
+    Distro, enable_and_restart, restore_ad_integration, restore_config_from_backup,
+};
 use super::webserver::verify_tcp_service;
 
 /// systemd service name for Postfix.
@@ -73,6 +75,8 @@ pub fn run(ctx: &DefenderContext) -> Result {
     // Restore AD/SASL/LDAP integration config from backup (covers main.cf, sasl/, etc.).
     restore_config_from_backup("/etc/postfix", ctx)?;
     restore_config_from_backup("/etc/aliases", ctx)?;
+    // Re-apply AD/LDAP/Kerberos join state so AD auth survives a from-scratch reinstall.
+    restore_ad_integration(ctx)?;
 
     // Rebuild the aliases binary database from the (possibly restored) text file.
     ctx.progress("[+] Rebuilding aliases database...");

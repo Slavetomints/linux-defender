@@ -322,6 +322,47 @@ pub fn restore_config_from_backup(config_path: &str, ctx: &DefenderContext) -> R
     Ok(true)
 }
 
+/// Shared AD / LDAP / Kerberos join state restored on either mail service.
+///
+/// This lives outside the postfix/dovecot trees; without it the box can lose
+/// AD authentication even after a clean mail reinstall. Backed up by
+/// `backups::mail`. Paths absent from the backup are silently skipped.
+const AD_INTEGRATION_PATHS: &[&str] = &[
+    "/etc/sssd",
+    "/etc/krb5.conf",
+    "/etc/krb5.keytab",
+    "/etc/nsswitch.conf",
+    "/etc/ldap",
+    "/etc/openldap",
+    "/etc/sasl2",
+];
+
+/// Restore the AD/LDAP/Kerberos join state from the latest backup.
+///
+/// Returns the number of paths actually restored. Safe to call from both the
+/// Postfix and Dovecot restores: it is idempotent, and if no backup exists it
+/// reports that once and restores nothing.
+pub fn restore_ad_integration(ctx: &DefenderContext) -> Result<usize> {
+    if latest_backup_dir().is_none() {
+        ctx.progress(
+            "[!] No backup found — AD/LDAP/Kerberos join state NOT restored (manual re-join may be needed)",
+        );
+        return Ok(0);
+    }
+    let mut restored = 0usize;
+    for path in AD_INTEGRATION_PATHS {
+        if restore_config_from_backup(path, ctx)? {
+            restored += 1;
+        }
+    }
+    if restored == 0 {
+        ctx.progress("[!] No AD/LDAP join files were present in the backup — nothing to restore");
+    } else {
+        ctx.progress(&format!("[✓] Restored {restored} AD/LDAP/Kerberos join path(s)"));
+    }
+    Ok(restored)
+}
+
 /// Return the path of the most recently created `/etc/ccdc-b@ckup-*` directory.
 fn latest_backup_dir() -> Option<PathBuf> {
     let base = Path::new("/etc");

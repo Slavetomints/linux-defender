@@ -15,7 +15,9 @@
 
 use crate::core::{DefenderContext, DefenderError, Result, prompt_yes};
 
-use super::distro::{Distro, enable_and_restart, restore_config_from_backup};
+use super::distro::{
+    Distro, enable_and_restart, restore_ad_integration, restore_config_from_backup,
+};
 use super::webserver::verify_tcp_service;
 
 /// systemd service name for Dovecot.
@@ -77,6 +79,8 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
     // Restore AD/LDAP auth config from backup (covers conf.d/, dovecot.conf, etc.).
     restore_config_from_backup("/etc/dovecot", ctx)?;
+    // Re-apply AD/LDAP/Kerberos join state so AD auth survives a from-scratch reinstall.
+    restore_ad_integration(ctx)?;
 
     enable_and_restart(SERVICE, ctx)?;
 

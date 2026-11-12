@@ -72,6 +72,7 @@ const MONITOR_MODULES: &[(&str, &str)] = &[
     ("binary_integrity", "Binary integrity baseline"),
     ("git_hooks", "Malicious git hooks"),
     ("webserver_config", "Webserver config audit"),
+    ("apt_sources", "APT source integrity"),
     ("bind_mounts", "Bind/overlay mount detection"),
 ];
 
@@ -311,6 +312,12 @@ const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
     (
         "webserver_config",
         "Webserver config audit",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "apt_sources",
+        "APT source integrity",
         false,
         ScanInterval::Frequent,
     ),

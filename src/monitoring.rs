@@ -10,6 +10,7 @@ use crate::core::{DefenderContext, DefenderError, Result};
 
 pub mod access_log;
 pub mod ai_artifacts;
+pub mod apt_sources;
 pub mod attacker_tools;
 pub mod auth_log;
 pub mod auth_log_watch;
@@ -126,6 +127,10 @@ pub struct CliArgs {
     #[arg(long)]
     pub webserver_config: bool,
 
+    /// Audit apt sources for untrusted mirrors and disabled signature verification
+    #[arg(long)]
+    pub apt_sources: bool,
+
     /// Detect bind mounts and overlay/tmpfs hiding system paths
     #[arg(long)]
     pub bind_mounts: bool,
@@ -220,6 +225,9 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
     if args.all || args.webserver_config {
         run_module("webserver_config", ctx)?;
     }
+    if args.all || args.apt_sources {
+        run_module("apt_sources", ctx)?;
+    }
     if args.all || args.bind_mounts {
         run_module("bind_mounts", ctx)?;
     }
@@ -267,6 +275,7 @@ pub fn run_module(name: &str, ctx: &DefenderContext) -> Result {
         "binary_integrity" => binary_integrity::run(ctx),
         "git_hooks" => git_hooks::run(ctx),
         "webserver_config" => webserver_config::run(ctx),
+        "apt_sources" => apt_sources::run(ctx),
         "bind_mounts" => bind_mounts::run(ctx),
         "pspy" => pspy::run(ctx),
         "network_watch" => network_watch::run(ctx),

@@ -1,0 +1,8 @@
+# Default to a statically-linked musl build so the binary drops onto any
+# competition box without worrying about glibc versions.
+#
+# Note: cargo has no per-profile target, so this applies to every cargo command
+# (build, test, run, clippy), not just `--release`. Override for a one-off glibc
+# build with:  cargo build --target x86_64-unknown-linux-gnu
+[build]
+target = "x86_64-unknown-linux-musl"

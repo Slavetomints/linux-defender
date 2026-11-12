@@ -179,8 +179,71 @@ pub fn run(ctx: &DefenderContext) -> Result {
         );
     }
 
+    check_masked_scored_units(ctx);
+
     ctx.log_msg("[✓] Service hardening complete");
     Ok(())
+}
+
+/// Detect scored services that have been masked and unmask them.
+///
+/// `systemctl mask <svc>` symlinks the unit to /dev/null, so the service can't
+/// start and never shows up as "enabled". It's a one-command way to take a
+/// scored service offline, and nothing else in the hardening loop catches it
+/// (masked units aren't enabled). We list masked units, and for any that back a
+/// scored service we unmask it and flag Critical.
+fn check_masked_scored_units(ctx: &DefenderContext) {
+    ctx.log_msg("[+] Checking for masked scored services...");
+    let output = Command::new("systemctl")
+        .args(["list-unit-files", "--state=masked", "--no-legend", "--plain"])
+        .output();
+
+    let Ok(out) = output else {
+        ctx.log_msg("[!] Could not list masked units");
+        return;
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    for svc in stdout.lines().filter_map(parse_unit_line) {
+        if !is_scored_unit(&svc) {
+            continue;
+        }
+        ctx.log_evidence_line("systemctl list-unit-files --state=masked", &svc);
+        let unmasked = ctx.run_remediation(&["systemctl", "unmask", &svc]);
+        // Bring it back up after unmasking.
+        let started = unmasked && ctx.run_remediation(&["systemctl", "enable", "--now", &svc]);
+        let still_active = check_active(&svc);
+        ctx.log_msg(&format!(
+            "PROOF: {} unmasked: {}, active after restart: {}",
+            svc, unmasked, still_active
+        ));
+
+        ctx.emit(
+            Finding::new(
+                Severity::Critical,
+                "services",
+                format!("Scored service '{}' was MASKED — unmasked and restarted", svc),
+                format!(
+                    "service: {}\nwas: masked (unit symlinked to /dev/null)\nunmasked: {}\n\
+                     restarted: {}\nactive_now: {}",
+                    svc, unmasked, started, still_active
+                ),
+            )
+            .with_context("service", svc.as_str())
+            .with_context("unmasked", unmasked.to_string())
+            .with_context("active_now", still_active.to_string())
+            .with_verdict(
+                Verdict::Investigate,
+                format!(
+                    "'{}' backs a scored service and had been masked, which takes it offline \
+                     and blocks restart. It has been unmasked and started. Confirm with \
+                     `systemctl status {}` and investigate who masked it.",
+                    svc, svc
+                ),
+            )
+            .with_action(Action::Manual(format!("systemctl unmask {} && systemctl enable --now {}", svc, svc))),
+        );
+    }
 }
 
 /// Return the list of enabled service *base names* (without the `.service` suffix)

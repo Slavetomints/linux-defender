@@ -235,6 +235,15 @@ pub fn ensure_root_or_reexec() -> Result<()> {
 pub fn enable_and_restart(service: &str, ctx: &DefenderContext) -> Result {
     ctx.debug(&format!("enabling and restarting {service}"));
 
+    // Clear a mask first: `systemctl enable --now` fails outright on a masked
+    // unit ("Unit is masked"), which is exactly how an attacker takes a scored
+    // service offline. Unmask is a no-op on a normal unit.
+    let _ = Command::new("systemctl")
+        .args(["unmask", service])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
     let status = Command::new("systemctl")
         .args(["enable", "--now", service])
         .stdout(std::process::Stdio::null())

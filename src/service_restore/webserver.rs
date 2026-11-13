@@ -8,7 +8,7 @@
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use regex::Regex;
@@ -253,7 +253,10 @@ pub fn extract_zip(
             .by_index(i)
             .map_err(|e| DefenderError::Other(format!("bad zip entry {i}: {e}")))?;
 
-        let raw_name = entry.name().to_string();
+        let raw_name = entry
+            .name()
+            .map_err(|e| DefenderError::Other(format!("bad zip entry name {i}: {e}")))?
+            .to_string();
 
         // Resolve relative path, stripping the upload prefix when present.
         let relative: &str = match prefix.as_deref() {
@@ -272,9 +275,12 @@ pub fn extract_zip(
 
         let relative_path = Path::new(relative);
 
-        // Zip-slip guard: reject entries that would write outside dest.
+        // Zip-slip guard: reject entries that would write outside dest. Checking
+        // `out_path.starts_with(dest)` is not enough, because it compares
+        // components without resolving `..` (`dest/../x` still "starts with"
+        // dest), so refuse any entry that is absolute or contains `..`.
         let out_path = dest.join(relative_path);
-        if !out_path.starts_with(dest) {
+        if !is_contained_relative(relative_path) || !out_path.starts_with(dest) {
             return Err(DefenderError::Other(format!(
                 "zip-slip attempt: {raw_name} would escape {dest:?}"
             )));
@@ -308,6 +314,13 @@ pub fn extract_zip(
     Ok(())
 }
 
+/// True when `path` stays inside whatever directory it is joined onto: it is
+/// relative and has no `..`, root, or drive-prefix component.
+fn is_contained_relative(path: &Path) -> bool {
+    path.components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
 /// Scan a zip for an `upload/` subtree and return the prefix to strip.
 fn detect_upload_prefix(zip_path: &Path) -> Result<Option<String>> {
     let file = fs::File::open(zip_path)?;
@@ -318,7 +331,9 @@ fn detect_upload_prefix(zip_path: &Path) -> Result<Option<String>> {
         let entry = archive
             .by_index(i)
             .map_err(|e| DefenderError::Other(format!("zip scan entry {i}: {e}")))?;
-        let name = entry.name();
+        let name = entry
+            .name()
+            .map_err(|e| DefenderError::Other(format!("zip scan entry name {i}: {e}")))?;
 
         if let Some(pos) = name.find("/upload/") {
             return Ok(Some(name[..pos + "/upload/".len()].to_string()));
@@ -898,4 +913,102 @@ pub fn ensure_ssl(distro: &Distro, ctx: &DefenderContext) -> Result<()> {
     enable_and_restart(svc, ctx)?;
     ctx.progress("[✓] HTTPS/SSL enabled");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+    use zip::CompressionMethod;
+    use zip::write::{SimpleFileOptions, ZipWriter};
+
+    /// Write a zip at `path` holding `(name, contents)` entries.
+    fn make_zip(path: &Path, entries: &[(&str, &str)]) {
+        let mut zw = ZipWriter::new(fs::File::create(path).unwrap());
+        let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        for (name, body) in entries {
+            zw.start_file(*name, opts).unwrap();
+            zw.write_all(body.as_bytes()).unwrap();
+        }
+        zw.finish().unwrap();
+    }
+
+    fn ctx() -> DefenderContext {
+        DefenderContext::new(PathBuf::from("/dev/null"), false)
+    }
+
+    #[test]
+    fn contained_relative_rejects_escapes() {
+        assert!(is_contained_relative(Path::new("index.php")));
+        assert!(is_contained_relative(Path::new("admin/config.php")));
+        assert!(is_contained_relative(Path::new("./a/b")));
+        assert!(!is_contained_relative(Path::new("../x")));
+        assert!(!is_contained_relative(Path::new("a/../../x")));
+        assert!(!is_contained_relative(Path::new("/etc/passwd")));
+    }
+
+    #[test]
+    fn extracts_flat_layout_and_preserves_listed_paths() {
+        let tmp = TempDir::new().unwrap();
+        let zip_path = tmp.path().join("flat.zip");
+        make_zip(
+            &zip_path,
+            &[
+                ("index.php", "<?php // new"),
+                ("config/settings.php", "new"),
+            ],
+        );
+        let dest = tmp.path().join("root");
+        fs::create_dir_all(dest.join("config")).unwrap();
+        fs::write(dest.join("config/settings.php"), "keep").unwrap();
+
+        extract_zip(&zip_path, &dest, &["config/settings.php"], &ctx()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dest.join("index.php")).unwrap(),
+            "<?php // new"
+        );
+        assert_eq!(
+            fs::read_to_string(dest.join("config/settings.php")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn strips_the_upload_prefix() {
+        let tmp = TempDir::new().unwrap();
+        let zip_path = tmp.path().join("oc.zip");
+        make_zip(
+            &zip_path,
+            &[
+                ("README.md", "skip me"),
+                ("upload/index.php", "shop"),
+                ("upload/admin/a.php", "a"),
+            ],
+        );
+        let dest = tmp.path().join("root");
+        fs::create_dir_all(&dest).unwrap();
+
+        extract_zip(&zip_path, &dest, &[], &ctx()).unwrap();
+
+        assert_eq!(fs::read_to_string(dest.join("index.php")).unwrap(), "shop");
+        assert!(dest.join("admin/a.php").is_file());
+        assert!(!dest.join("README.md").exists());
+        assert!(!dest.join("upload").exists());
+    }
+
+    #[test]
+    fn rejects_a_parent_dir_entry_without_writing_outside_dest() {
+        let tmp = TempDir::new().unwrap();
+        let zip_path = tmp.path().join("evil.zip");
+        make_zip(&zip_path, &[("../escaped.txt", "pwned")]);
+        let dest = tmp.path().join("root");
+        fs::create_dir_all(&dest).unwrap();
+
+        let err = extract_zip(&zip_path, &dest, &[], &ctx()).unwrap_err();
+
+        assert!(err.to_string().contains("zip-slip"), "got: {err}");
+        assert!(!tmp.path().join("escaped.txt").exists());
+    }
 }

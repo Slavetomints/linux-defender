@@ -647,7 +647,10 @@ pub(crate) struct RouterConfigDialog {
 /// Auto-detect CCDC team number from WAN interface IP `172.31.{20+T}.2/29`.
 fn detect_vyos_team_number() -> Option<u8> {
     use std::process::Command;
-    let out = Command::new("ip").args(["-4", "addr", "show"]).output().ok()?;
+    let out = Command::new("ip")
+        .args(["-4", "addr", "show"])
+        .output()
+        .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     for word in text.split_whitespace() {
         if let Some(ip) = word.split('/').next() {
@@ -1425,11 +1428,7 @@ impl App {
     }
 
     /// Spawn a background thread to run the selected router operation.
-    fn start_router(
-        &mut self,
-        step_id: &'static str,
-        custom_args: Option<crate::router::CliArgs>,
-    ) {
+    fn start_router(&mut self, step_id: &'static str, custom_args: Option<crate::router::CliArgs>) {
         if self.router_running {
             return;
         }
@@ -1447,8 +1446,7 @@ impl App {
 
         std::thread::spawn(move || {
             let report = PathBuf::from("/tmp/defender-router.log");
-            let ctx = DefenderContext::new(report, false)
-                .with_progress(progress_tx.clone());
+            let ctx = DefenderContext::new(report, false).with_progress(progress_tx.clone());
             let args = custom_args.unwrap_or_else(|| crate::router::CliArgs {
                 audit: step_id == "audit",
                 diff: if step_id == "diff" { Some(None) } else { None },
@@ -1746,47 +1744,47 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                 continue;
             }
 
-                if let Some(ref mut dlg) = app.router_config_dialog {
-                    match key.code {
-                        KeyCode::Esc => {
-                            app.router_config_dialog = None;
-                        }
-                        KeyCode::Tab | KeyCode::Down => {
-                            dlg.focused = (dlg.focused + 1).min(dlg.field_count() - 1);
-                        }
-                        KeyCode::BackTab | KeyCode::Up => {
-                            dlg.focused = dlg.focused.saturating_sub(1);
-                        }
-                        KeyCode::Enter => {
-                            let max_field = dlg.field_count() - 1;
-                            if dlg.focused == max_field {
-                                let pass_idx = match dlg.step {
-                                    RouterDialogStep::Harden => 1,
-                                    RouterDialogStep::ConsoleLockdown => 0,
-                                };
-                                if dlg.fields[pass_idx].trim().is_empty() {
-                                    // Required password is empty
-                                    return Ok(());
-                                }
-                                let dialog = app.router_config_dialog.take().unwrap();
-                                let (step_id, cli_args) = dialog.into_cli_args();
-                                app.start_router(step_id, Some(cli_args));
-                            } else {
-                                dlg.focused += 1;
-                            }
-                        }
-                        KeyCode::Backspace => {
-                            let idx = dlg.focused;
-                            dlg.fields[idx].pop();
-                        }
-                        KeyCode::Char(c) => {
-                            let idx = dlg.focused;
-                            dlg.fields[idx].push(c);
-                        }
-                        _ => {}
+            if let Some(ref mut dlg) = app.router_config_dialog {
+                match key.code {
+                    KeyCode::Esc => {
+                        app.router_config_dialog = None;
                     }
-                    continue;
+                    KeyCode::Tab | KeyCode::Down => {
+                        dlg.focused = (dlg.focused + 1).min(dlg.field_count() - 1);
+                    }
+                    KeyCode::BackTab | KeyCode::Up => {
+                        dlg.focused = dlg.focused.saturating_sub(1);
+                    }
+                    KeyCode::Enter => {
+                        let max_field = dlg.field_count() - 1;
+                        if dlg.focused == max_field {
+                            let pass_idx = match dlg.step {
+                                RouterDialogStep::Harden => 1,
+                                RouterDialogStep::ConsoleLockdown => 0,
+                            };
+                            if dlg.fields[pass_idx].trim().is_empty() {
+                                // Required password is empty
+                                return Ok(());
+                            }
+                            let dialog = app.router_config_dialog.take().unwrap();
+                            let (step_id, cli_args) = dialog.into_cli_args();
+                            app.start_router(step_id, Some(cli_args));
+                        } else {
+                            dlg.focused += 1;
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        let idx = dlg.focused;
+                        dlg.fields[idx].pop();
+                    }
+                    KeyCode::Char(c) => {
+                        let idx = dlg.focused;
+                        dlg.fields[idx].push(c);
+                    }
+                    _ => {}
                 }
+                continue;
+            }
 
             match key.code {
                 KeyCode::Char('q') => break,
@@ -1858,12 +1856,12 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                             .checked_sub(1)
                             .unwrap_or(RESTORE_SERVICES.len() - 1);
                     }
-                        Tab::Router => {
-                            app.router_cursor = app
-                                .router_cursor
-                                .checked_sub(1)
-                                .unwrap_or(crate::router::ROUTER_STEPS.len() - 1);
-                        }
+                    Tab::Router => {
+                        app.router_cursor = app
+                            .router_cursor
+                            .checked_sub(1)
+                            .unwrap_or(crate::router::ROUTER_STEPS.len() - 1);
+                    }
                     _ => {}
                 },
                 KeyCode::Down => match app.tab {
@@ -1907,9 +1905,10 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                     Tab::ServiceRestore => {
                         app.restore_cursor = (app.restore_cursor + 1) % RESTORE_SERVICES.len();
                     }
-                        Tab::Router => {
-                            app.router_cursor = (app.router_cursor + 1) % crate::router::ROUTER_STEPS.len();
-                        }
+                    Tab::Router => {
+                        app.router_cursor =
+                            (app.router_cursor + 1) % crate::router::ROUTER_STEPS.len();
+                    }
                     _ => {}
                 },
                 KeyCode::Enter => {
@@ -1945,22 +1944,22 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                             }
                             _ => app.start_restore(service_id, None),
                         }
-                        } else if app.tab == Tab::Router && !app.router_running {
-                            let step_id = crate::router::ROUTER_STEPS[app.router_cursor].id;
-                            match step_id {
-                                "harden" => {
-                                    app.router_config_dialog =
-                                        Some(RouterConfigDialog::new(RouterDialogStep::Harden));
-                                }
-                                "console_lockdown" => {
-                                    app.router_config_dialog = Some(RouterConfigDialog::new(
-                                        RouterDialogStep::ConsoleLockdown,
-                                    ));
-                                }
-                                _ => {
-                                    app.start_router(step_id, None);
-                                }
+                    } else if app.tab == Tab::Router && !app.router_running {
+                        let step_id = crate::router::ROUTER_STEPS[app.router_cursor].id;
+                        match step_id {
+                            "harden" => {
+                                app.router_config_dialog =
+                                    Some(RouterConfigDialog::new(RouterDialogStep::Harden));
                             }
+                            "console_lockdown" => {
+                                app.router_config_dialog = Some(RouterConfigDialog::new(
+                                    RouterDialogStep::ConsoleLockdown,
+                                ));
+                            }
+                            _ => {
+                                app.start_router(step_id, None);
+                            }
+                        }
                     }
                 }
                 KeyCode::Char('x') => {
@@ -2113,52 +2112,52 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                         }
                     }
                 }
-                    KeyCode::PageUp | KeyCode::Char('[') => match app.tab {
-                        Tab::Router => {
-                            let max = app.router_log.len().saturating_sub(1);
-                            app.router_log_scroll = (app.router_log_scroll + 5).min(max);
-                        }
-                        Tab::Hardening => {
-                            let max = app.hardening_log.len().saturating_sub(1);
-                            app.hardening_log_scroll = (app.hardening_log_scroll + 5).min(max);
-                        }
-                        Tab::Backups => {
-                            let max = app.backups_log.len().saturating_sub(1);
-                            app.backups_log_scroll = (app.backups_log_scroll + 5).min(max);
-                        }
-                        Tab::ServiceRestore => {
-                            let max = app.restore_log.len().saturating_sub(1);
-                            app.restore_log_scroll = (app.restore_log_scroll + 5).min(max);
-                        }
-                        _ => {}
-                    },
-                    KeyCode::PageDown | KeyCode::Char(']') => match app.tab {
-                        Tab::Router => {
-                            app.router_log_scroll = app.router_log_scroll.saturating_sub(5);
-                        }
-                        Tab::Hardening => {
-                            app.hardening_log_scroll = app.hardening_log_scroll.saturating_sub(5);
-                        }
-                        Tab::Backups => {
-                            app.backups_log_scroll = app.backups_log_scroll.saturating_sub(5);
-                        }
-                        Tab::ServiceRestore => {
-                            app.restore_log_scroll = app.restore_log_scroll.saturating_sub(5);
-                        }
-                        _ => {}
-                    },
-                    KeyCode::Home => {
-                        if app.tab == Tab::Router {
-                            app.router_log_scroll = app.router_log.len().saturating_sub(1);
-                        }
+                KeyCode::PageUp | KeyCode::Char('[') => match app.tab {
+                    Tab::Router => {
+                        let max = app.router_log.len().saturating_sub(1);
+                        app.router_log_scroll = (app.router_log_scroll + 5).min(max);
                     }
+                    Tab::Hardening => {
+                        let max = app.hardening_log.len().saturating_sub(1);
+                        app.hardening_log_scroll = (app.hardening_log_scroll + 5).min(max);
+                    }
+                    Tab::Backups => {
+                        let max = app.backups_log.len().saturating_sub(1);
+                        app.backups_log_scroll = (app.backups_log_scroll + 5).min(max);
+                    }
+                    Tab::ServiceRestore => {
+                        let max = app.restore_log.len().saturating_sub(1);
+                        app.restore_log_scroll = (app.restore_log_scroll + 5).min(max);
+                    }
+                    _ => {}
+                },
+                KeyCode::PageDown | KeyCode::Char(']') => match app.tab {
+                    Tab::Router => {
+                        app.router_log_scroll = app.router_log_scroll.saturating_sub(5);
+                    }
+                    Tab::Hardening => {
+                        app.hardening_log_scroll = app.hardening_log_scroll.saturating_sub(5);
+                    }
+                    Tab::Backups => {
+                        app.backups_log_scroll = app.backups_log_scroll.saturating_sub(5);
+                    }
+                    Tab::ServiceRestore => {
+                        app.restore_log_scroll = app.restore_log_scroll.saturating_sub(5);
+                    }
+                    _ => {}
+                },
+                KeyCode::Home => {
+                    if app.tab == Tab::Router {
+                        app.router_log_scroll = app.router_log.len().saturating_sub(1);
+                    }
+                }
                 KeyCode::End => {
                     if app.tab == Tab::Logs
                         && let Some(p) = app.log_dashboard.active_pane_mut()
                     {
                         p.scroll_to_bottom();
-                        } else if app.tab == Tab::Router {
-                            app.router_log_scroll = 0;
+                    } else if app.tab == Tab::Router {
+                        app.router_log_scroll = 0;
                     }
                 }
                 KeyCode::Tab => {

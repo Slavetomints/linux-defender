@@ -11,8 +11,10 @@ use chrono::Local;
 use clap::{Parser, Subcommand};
 use nix::unistd::Uid;
 
-use defender_cli::core::DefenderContext;
-use defender_cli::{anti_persistence, backups, monitoring, router, service_restore, system_hardening};
+use linux_defender::core::DefenderContext;
+use linux_defender::{
+    anti_persistence, backups, monitoring, router, service_restore, system_hardening,
+};
 
 /// CCDC Helper Program
 #[derive(Parser)]
@@ -107,9 +109,7 @@ fn main() -> anyhow::Result<()> {
         Mode::ServiceRestore(args) => {
             service_restore::run(&ctx, &args, None).context("Couldn't run Service Restore mode")?
         }
-        Mode::Router(args) => {
-            router::run(&ctx, &args).context("Couldn't run Router mode")?
-        }
+        Mode::Router(args) => router::run(&ctx, &args).context("Couldn't run Router mode")?,
     }
 
     let elapsed = ctx.elapsed();

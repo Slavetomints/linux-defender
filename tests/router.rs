@@ -1,7 +1,7 @@
 //! Integration tests for `src/router.rs`.
 
-use defender_cli::core::BoxType;
-use defender_cli::router::{ROUTER_STEPS, VYOS_SCRIPT};
+use linux_defender::core::BoxType;
+use linux_defender::router::{ROUTER_STEPS, VYOS_SCRIPT};
 
 #[test]
 fn embedded_script_is_valid() {

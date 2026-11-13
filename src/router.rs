@@ -158,7 +158,10 @@ pub fn run_script(
         out
     };
 
-    ctx.progress(&format!("→ Executing VyOS script with args: {:?}", sanitized_args));
+    ctx.progress(&format!(
+        "→ Executing VyOS script with args: {:?}",
+        sanitized_args
+    ));
 
     let shell = if std::path::Path::new("/bin/vbash").exists() {
         "/bin/vbash"
@@ -257,7 +260,10 @@ pub fn run_script(
                 let _ = writeln!(file, "=== Status: FAILED (exit code: {}) ===", code);
             }
         }
-        Err(DefenderError::Command(format!("Script failed with exit code {}", code)))
+        Err(DefenderError::Command(format!(
+            "Script failed with exit code {}",
+            code
+        )))
     }
 }
 

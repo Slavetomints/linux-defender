@@ -1409,469 +1409,457 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
         app.tick();
         terminal.draw(|f| render(f, &mut app))?;
 
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
+        if event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
 
-                // When the "add user" modal is open, route all keys to it.
-                if app.user_input_active {
-                    match key.code {
-                        KeyCode::Esc => {
-                            app.user_input_active = false;
-                            app.user_input_buf.clear();
-                        }
-                        KeyCode::Enter => {
-                            let username = app.user_input_buf.trim().to_string();
-                            if !username.is_empty() && !app.authorized_users.contains(&username) {
-                                app.authorized_users.push(username);
-                            }
-                            app.user_input_active = false;
-                            app.user_input_buf.clear();
-                        }
-                        KeyCode::Backspace => {
-                            app.user_input_buf.pop();
-                        }
-                        KeyCode::Char(c) => {
-                            app.user_input_buf.push(c);
-                        }
-                        _ => {}
+            // When the "add user" modal is open, route all keys to it.
+            if app.user_input_active {
+                match key.code {
+                    KeyCode::Esc => {
+                        app.user_input_active = false;
+                        app.user_input_buf.clear();
                     }
-                    continue;
+                    KeyCode::Enter => {
+                        let username = app.user_input_buf.trim().to_string();
+                        if !username.is_empty() && !app.authorized_users.contains(&username) {
+                            app.authorized_users.push(username);
+                        }
+                        app.user_input_active = false;
+                        app.user_input_buf.clear();
+                    }
+                    KeyCode::Backspace => {
+                        app.user_input_buf.pop();
+                    }
+                    KeyCode::Char(c) => {
+                        app.user_input_buf.push(c);
+                    }
+                    _ => {}
                 }
+                continue;
+            }
 
-                // When a wizard is open, route all keys to it; Esc always closes.
-                if let Some(ref mut wizard) = app.active_wizard {
-                    match key.code {
-                        KeyCode::Esc => {
+            // When a wizard is open, route all keys to it; Esc always closes.
+            if let Some(ref mut wizard) = app.active_wizard {
+                match key.code {
+                    KeyCode::Esc => {
+                        app.active_wizard = None;
+                    }
+                    _ => {
+                        if let crate::wizards::WizardAction::Close = wizard.handle_key(key.code) {
                             app.active_wizard = None;
                         }
-                        _ => {
-                            if let crate::wizards::WizardAction::Close = wizard.handle_key(key.code)
-                            {
-                                app.active_wizard = None;
-                            }
-                        }
                     }
-                    continue;
                 }
+                continue;
+            }
 
-                // Credential input dialog for OpenCart / PrestaShop restores.
-                if app.restore_cred_dialog.is_some() {
-                    match key.code {
-                        KeyCode::Esc => {
-                            app.restore_cred_dialog = None;
-                        }
-                        KeyCode::Tab | KeyCode::Down => {
-                            if let Some(ref mut dlg) = app.restore_cred_dialog {
-                                let svc = dlg.service;
-                                dlg.focused = dlg.focused.next(svc);
-                            }
-                        }
-                        KeyCode::BackTab | KeyCode::Up => {
-                            if let Some(ref mut dlg) = app.restore_cred_dialog {
-                                dlg.focused = dlg.focused.prev();
-                            }
-                        }
-                        KeyCode::Enter => {
-                            if let Some(ref dlg) = app.restore_cred_dialog {
-                                let svc = dlg.service;
-                                let max_field = dlg.field_count() - 1;
-                                if dlg.focused as usize == max_field {
-                                    // Validate required fields before submitting.
-                                    let missing = match svc {
-                                        // Splunk: admin pass(1)
-                                        RestoreCredService::Splunk => {
-                                            [1].iter().any(|&i| dlg.fields[i].trim().is_empty())
-                                        }
-                                        // OpenCart: DB user(1), DB pass(2), admin pass(7)
-                                        RestoreCredService::OpenCart => [1, 2, 7]
-                                            .iter()
-                                            .any(|&i| dlg.fields[i].trim().is_empty()),
-                                        // PrestaShop: DB user(3), DB pass(4), admin pass(6)
-                                        RestoreCredService::PrestaShop => [3, 4, 6]
-                                            .iter()
-                                            .any(|&i| dlg.fields[i].trim().is_empty()),
-                                    };
-                                    if missing {
-                                        // Required field empty — stay on dialog, do nothing.
-                                        return Ok(());
-                                    }
-                                    // Last field confirmed — start restore.
-                                    let dialog = app.restore_cred_dialog.take().unwrap();
-                                    let service_id = match svc {
-                                        RestoreCredService::Splunk => "splunk",
-                                        RestoreCredService::OpenCart => "opencart",
-                                        RestoreCredService::PrestaShop => "prestashop",
-                                    };
-                                    let creds = dialog.into_credentials();
-                                    app.start_restore(service_id, Some(creds));
-                                } else {
-                                    // Advance to next field.
-                                    if let Some(ref mut dlg) = app.restore_cred_dialog {
-                                        dlg.focused = dlg.focused.next(svc);
-                                    }
-                                }
-                            }
-                        }
-                        KeyCode::Backspace => {
-                            if let Some(ref mut dlg) = app.restore_cred_dialog {
-                                let idx = dlg.focused as usize;
-                                dlg.fields[idx].pop();
-                            }
-                        }
-                        KeyCode::Char(c) => {
-                            if let Some(ref mut dlg) = app.restore_cred_dialog {
-                                let idx = dlg.focused as usize;
-                                dlg.fields[idx].push(c);
-                            }
-                        }
-                        _ => {}
-                    }
-                    continue;
-                }
-
+            // Credential input dialog for OpenCart / PrestaShop restores.
+            if app.restore_cred_dialog.is_some() {
                 match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char(d @ '1'..='8') => {
-                        if let Some(tab) = Tab::from_digit(d) {
-                            app.tab = tab;
-                        }
-                    }
                     KeyCode::Esc => {
-                        if app.show_finding_detail {
-                            app.show_finding_detail = false;
-                            app.action_feedback = None;
+                        app.restore_cred_dialog = None;
+                    }
+                    KeyCode::Tab | KeyCode::Down => {
+                        if let Some(ref mut dlg) = app.restore_cred_dialog {
+                            let svc = dlg.service;
+                            dlg.focused = dlg.focused.next(svc);
                         }
                     }
-                    KeyCode::Up => match app.tab {
-                        Tab::Tools => {
-                            use crate::tui::tools_view::SelectedTool;
-                            let total = SelectedTool::total();
-                            if total > 0 {
-                                app.tools_cursor =
-                                    app.tools_cursor.checked_sub(1).unwrap_or(total - 1);
-                            }
+                    KeyCode::BackTab | KeyCode::Up => {
+                        if let Some(ref mut dlg) = app.restore_cred_dialog {
+                            dlg.focused = dlg.focused.prev();
                         }
-                        Tab::Logs => {
-                            if let Some(p) = app.log_dashboard.active_pane_mut() {
-                                p.scroll_up();
-                            }
-                        }
-                        Tab::Scan => match app.scan_focus {
-                            ScanFocus::Modules => {
-                                app.scan_cursor = app
-                                    .scan_cursor
-                                    .checked_sub(1)
-                                    .unwrap_or(SCAN_MODULES.len() - 1);
-                            }
-                            ScanFocus::Findings => {
-                                let n = app.display_findings().len();
-                                if n > 0 {
-                                    app.findings_cursor =
-                                        app.findings_cursor.checked_sub(1).unwrap_or(n - 1);
-                                }
-                            }
-                        },
-                        Tab::Hardening => {
-                            app.hardening_cursor = app
-                                .hardening_cursor
-                                .checked_sub(1)
-                                .unwrap_or(HARDENING_STEPS.len() - 1);
-                        }
-                        Tab::Monitor => {
-                            if app.monitor_running {
-                                // Scroll output log up (toward older lines)
-                                app.monitor_log_scroll = app.monitor_log_scroll.saturating_add(1);
-                            } else if !MONITOR_MODULES.is_empty() {
-                                app.monitor_cursor = app
-                                    .monitor_cursor
-                                    .checked_sub(1)
-                                    .unwrap_or(MONITOR_MODULES.len() - 1);
-                            }
-                        }
-                        Tab::Backups => {
-                            app.backups_cursor = app
-                                .backups_cursor
-                                .checked_sub(1)
-                                .unwrap_or(BACKUP_STEPS.len() - 1);
-                        }
-                        Tab::ServiceRestore => {
-                            app.restore_cursor = app
-                                .restore_cursor
-                                .checked_sub(1)
-                                .unwrap_or(RESTORE_SERVICES.len() - 1);
-                        }
-                        _ => {}
-                    },
-                    KeyCode::Down => match app.tab {
-                        Tab::Tools => {
-                            use crate::tui::tools_view::SelectedTool;
-                            let total = SelectedTool::total();
-                            if total > 0 {
-                                app.tools_cursor = (app.tools_cursor + 1) % total;
-                            }
-                        }
-                        Tab::Logs => {
-                            if let Some(p) = app.log_dashboard.active_pane_mut() {
-                                p.scroll_down();
-                            }
-                        }
-                        Tab::Scan => match app.scan_focus {
-                            ScanFocus::Modules => {
-                                app.scan_cursor = (app.scan_cursor + 1) % SCAN_MODULES.len();
-                            }
-                            ScanFocus::Findings => {
-                                let n = app.display_findings().len();
-                                if n > 0 {
-                                    app.findings_cursor = (app.findings_cursor + 1) % n;
-                                }
-                            }
-                        },
-                        Tab::Hardening => {
-                            app.hardening_cursor =
-                                (app.hardening_cursor + 1) % HARDENING_STEPS.len();
-                        }
-                        Tab::Monitor => {
-                            if app.monitor_running {
-                                // Scroll output log down (toward newer lines); 0 = bottom
-                                app.monitor_log_scroll = app.monitor_log_scroll.saturating_sub(1);
-                            } else if !MONITOR_MODULES.is_empty() {
-                                app.monitor_cursor =
-                                    (app.monitor_cursor + 1) % MONITOR_MODULES.len();
-                            }
-                        }
-                        Tab::Backups => {
-                            app.backups_cursor = (app.backups_cursor + 1) % BACKUP_STEPS.len();
-                        }
-                        Tab::ServiceRestore => {
-                            app.restore_cursor = (app.restore_cursor + 1) % RESTORE_SERVICES.len();
-                        }
-                        _ => {}
-                    },
+                    }
                     KeyCode::Enter => {
-                        if app.tab == Tab::Scan
-                            && app.scan_focus == ScanFocus::Findings
-                            && !app.findings.is_empty()
-                        {
-                            app.show_finding_detail = !app.show_finding_detail;
-                            app.action_feedback = None;
-                        } else if app.tab == Tab::Hardening && !app.hardening_running {
-                            let step_id = HARDENING_STEPS[app.hardening_cursor].0;
-                            app.start_hardening(step_id);
-                        } else if app.tab == Tab::Monitor && !app.monitor_running {
-                            let module_id = MONITOR_MODULES[app.monitor_cursor].0;
-                            app.start_monitor(module_id);
-                        } else if app.tab == Tab::Backups && !app.backups_running {
-                            let step_id = BACKUP_STEPS[app.backups_cursor].0;
-                            app.start_backup(step_id);
-                        } else if app.tab == Tab::ServiceRestore && !app.restore_running {
-                            let service_id = RESTORE_SERVICES[app.restore_cursor].0;
-                            match service_id {
-                                "splunk" => {
-                                    app.restore_cred_dialog =
-                                        Some(RestoreCredDialog::new(RestoreCredService::Splunk));
-                                }
-                                "opencart" => {
-                                    app.restore_cred_dialog =
-                                        Some(RestoreCredDialog::new(RestoreCredService::OpenCart));
-                                }
-                                "prestashop" => {
-                                    app.restore_cred_dialog = Some(RestoreCredDialog::new(
-                                        RestoreCredService::PrestaShop,
-                                    ));
-                                }
-                                _ => app.start_restore(service_id, None),
-                            }
-                        }
-                    }
-                    KeyCode::Char('x') => {
-                        if app.tab == Tab::Scan && app.show_finding_detail {
-                            let cursor = app.findings_cursor;
-                            // Resolve cursor against display_findings (log findings excluded)
-                            if let Some(action) = app
-                                .display_findings()
-                                .get(cursor)
-                                .and_then(|f| f.actions.first())
-                                .cloned()
-                            {
-                                match execute_action(&action) {
-                                    Ok(msg) => {
-                                        app.action_feedback = Some(format!("Done: {}", msg));
-                                        // Find and mark the same finding resolved in the full list
-                                        if let Some(f) = app
-                                            .findings
-                                            .iter_mut()
-                                            .filter(|f| f.module != "log")
-                                            .nth(cursor)
-                                        {
-                                            f.resolved = true;
-                                        }
+                        if let Some(ref dlg) = app.restore_cred_dialog {
+                            let svc = dlg.service;
+                            let max_field = dlg.field_count() - 1;
+                            if dlg.focused as usize == max_field {
+                                // Validate required fields before submitting.
+                                let missing = match svc {
+                                    // Splunk: admin pass(1)
+                                    RestoreCredService::Splunk => {
+                                        [1].iter().any(|&i| dlg.fields[i].trim().is_empty())
                                     }
-                                    Err(e) => {
-                                        app.action_feedback = Some(format!("Failed: {}", e));
+                                    // OpenCart: DB user(1), DB pass(2), admin pass(7)
+                                    RestoreCredService::OpenCart => {
+                                        [1, 2, 7].iter().any(|&i| dlg.fields[i].trim().is_empty())
                                     }
-                                }
-                            }
-                        }
-                    }
-                    KeyCode::Char(' ') => {
-                        if app.tab == Tab::Scan
-                            && !app.scan_running
-                            && app.scan_focus == ScanFocus::Modules
-                        {
-                            let i = app.scan_cursor;
-                            app.scan_selected[i] = !app.scan_selected[i];
-                        }
-                    }
-                    KeyCode::Char('s') => {
-                        if app.tab == Tab::Scan && app.scan_focus == ScanFocus::Modules {
-                            app.start_scan();
-                        }
-                    }
-                    KeyCode::Char('S') => {
-                        if app.tab == Tab::Scan
-                            && !app.scan_running
-                            && app.scan_focus == ScanFocus::Modules
-                        {
-                            app.scan_selected.fill(true);
-                            app.start_scan();
-                        }
-                    }
-                    KeyCode::Char('a') => {
-                        if app.tab == Tab::Scan
-                            && !app.scan_running
-                            && app.scan_focus == ScanFocus::Modules
-                        {
-                            let all_on = app.scan_selected.iter().all(|&b| b);
-                            app.scan_selected.fill(!all_on);
-                        }
-                    }
-                    KeyCode::Char('w') => {
-                        if app.tab == Tab::Scan {
-                            app.auto_scan_enabled = !app.auto_scan_enabled;
-                            if app.auto_scan_enabled {
-                                // Clear last-run times so all due modules start immediately.
-                                app.auto_scan_last_run.clear();
-                            }
-                        } else if app.tab == Tab::Dashboard {
-                            app.watchdog_enabled = !app.watchdog_enabled;
-                            if app.watchdog_enabled {
-                                // Reset restart counts when watchdog is freshly enabled.
-                                app.watchdog_restart_count.clear();
-                            }
-                        }
-                    }
-                    KeyCode::Char('u') => {
-                        if app.tab == Tab::Dashboard {
-                            app.user_input_active = true;
-                            app.user_input_buf.clear();
-                        }
-                    }
-                    KeyCode::Char('b') => {
-                        if app.tab == Tab::Dashboard {
-                            // Jump straight to Backups and queue an --all run
-                            app.tab = Tab::Backups;
-                            app.start_backup("all");
-                        }
-                    }
-                    KeyCode::Char('e') => {
-                        if app.tab == Tab::Scan && app.scan_focus == ScanFocus::Findings {
-                            match app.export_ir_report() {
-                                Ok(path) => {
-                                    app.action_feedback = Some(format!("Exported: {}", path))
-                                }
-                                Err(e) => {
-                                    app.action_feedback = Some(format!("Export failed: {}", e))
-                                }
-                            }
-                        }
-                    }
-                    KeyCode::Char('d') => {
-                        if app.tab == Tab::Tools {
-                            use crate::tui::tools_view::SelectedTool;
-                            if let SelectedTool::Binary(_) =
-                                SelectedTool::from_cursor(app.tools_cursor)
-                            {
-                                use crate::tools::catalog::NFTBUILD;
-                                app.download_status = Some("nftbuild: downloading…".into());
-                                let tool = NFTBUILD.clone();
-                                let (dl_tx, dl_rx) = mpsc::channel::<String>();
-                                app.download_result_rx = dl_rx;
-                                std::thread::spawn(move || {
-                                    let msg = match crate::tools::downloader::download(&tool) {
-                                        Ok(result) => format!(
-                                            "nftbuild: downloaded to {}",
-                                            result.path.display()
-                                        ),
-                                        Err(e) => format!("nftbuild: download failed — {}", e),
-                                    };
-                                    let _ = dl_tx.send(msg);
-                                });
-                            }
-                        }
-                    }
-                    KeyCode::Char('r') => {
-                        if app.tab == Tab::Tools {
-                            use crate::tui::tools_view::SelectedTool;
-                            match SelectedTool::from_cursor(app.tools_cursor) {
-                                SelectedTool::Binary(_) => {
-                                    // Run nftbuild in background — avoids blocking the TUI event loop
-                                    let box_type = app.box_type;
-                                    let opts = crate::tools::nftbuild::RunOptions::default();
-                                    let (nft_tx, nft_rx) =
-                                        mpsc::channel::<Result<String, String>>();
-                                    app.nftbuild_result_rx = nft_rx;
-                                    app.action_feedback = Some("nftbuild: running…".into());
-                                    std::thread::spawn(move || {
-                                        let result =
-                                            match crate::tools::nftbuild::run(box_type, &opts) {
-                                                Ok(r) => Ok(r.config),
-                                                Err(e) => Err(e.to_string()),
-                                            };
-                                        let _ = nft_tx.send(result);
-                                    });
-                                }
-                                SelectedTool::Wizard(idx) => {
-                                    if let Some(w) =
-                                        crate::wizards::ActiveWizard::new(idx, app.box_type)
-                                    {
-                                        app.active_wizard = Some(w);
+                                    // PrestaShop: DB user(3), DB pass(4), admin pass(6)
+                                    RestoreCredService::PrestaShop => {
+                                        [3, 4, 6].iter().any(|&i| dlg.fields[i].trim().is_empty())
                                     }
+                                };
+                                if missing {
+                                    // Required field empty — stay on dialog, do nothing.
+                                    return Ok(());
+                                }
+                                // Last field confirmed — start restore.
+                                let dialog = app.restore_cred_dialog.take().unwrap();
+                                let service_id = match svc {
+                                    RestoreCredService::Splunk => "splunk",
+                                    RestoreCredService::OpenCart => "opencart",
+                                    RestoreCredService::PrestaShop => "prestashop",
+                                };
+                                let creds = dialog.into_credentials();
+                                app.start_restore(service_id, Some(creds));
+                            } else {
+                                // Advance to next field.
+                                if let Some(ref mut dlg) = app.restore_cred_dialog {
+                                    dlg.focused = dlg.focused.next(svc);
                                 }
                             }
                         }
                     }
-                    KeyCode::End => {
-                        if app.tab == Tab::Logs {
-                            if let Some(p) = app.log_dashboard.active_pane_mut() {
-                                p.scroll_to_bottom();
-                            }
+                    KeyCode::Backspace => {
+                        if let Some(ref mut dlg) = app.restore_cred_dialog {
+                            let idx = dlg.focused as usize;
+                            dlg.fields[idx].pop();
                         }
                     }
-                    KeyCode::Tab => {
-                        if app.tab == Tab::Logs {
-                            app.log_dashboard.next_pane();
-                        } else if app.tab == Tab::Scan {
-                            app.scan_focus = match app.scan_focus {
-                                ScanFocus::Modules => ScanFocus::Findings,
-                                ScanFocus::Findings => ScanFocus::Modules,
-                            };
-                        }
-                    }
-                    KeyCode::BackTab => {
-                        if app.tab == Tab::Logs {
-                            app.log_dashboard.prev_pane();
-                        }
-                    }
-                    KeyCode::Char('p') if app.tab == Tab::Logs => {
-                        if let Some(p) = app.log_dashboard.active_pane_mut() {
-                            p.paused = !p.paused;
+                    KeyCode::Char(c) => {
+                        if let Some(ref mut dlg) = app.restore_cred_dialog {
+                            let idx = dlg.focused as usize;
+                            dlg.fields[idx].push(c);
                         }
                     }
                     _ => {}
                 }
+                continue;
+            }
+
+            match key.code {
+                KeyCode::Char('q') => break,
+                KeyCode::Char(d @ '1'..='8') => {
+                    if let Some(tab) = Tab::from_digit(d) {
+                        app.tab = tab;
+                    }
+                }
+                KeyCode::Esc => {
+                    if app.show_finding_detail {
+                        app.show_finding_detail = false;
+                        app.action_feedback = None;
+                    }
+                }
+                KeyCode::Up => match app.tab {
+                    Tab::Tools => {
+                        use crate::tui::tools_view::SelectedTool;
+                        let total = SelectedTool::total();
+                        if total > 0 {
+                            app.tools_cursor = app.tools_cursor.checked_sub(1).unwrap_or(total - 1);
+                        }
+                    }
+                    Tab::Logs => {
+                        if let Some(p) = app.log_dashboard.active_pane_mut() {
+                            p.scroll_up();
+                        }
+                    }
+                    Tab::Scan => match app.scan_focus {
+                        ScanFocus::Modules => {
+                            app.scan_cursor = app
+                                .scan_cursor
+                                .checked_sub(1)
+                                .unwrap_or(SCAN_MODULES.len() - 1);
+                        }
+                        ScanFocus::Findings => {
+                            let n = app.display_findings().len();
+                            if n > 0 {
+                                app.findings_cursor =
+                                    app.findings_cursor.checked_sub(1).unwrap_or(n - 1);
+                            }
+                        }
+                    },
+                    Tab::Hardening => {
+                        app.hardening_cursor = app
+                            .hardening_cursor
+                            .checked_sub(1)
+                            .unwrap_or(HARDENING_STEPS.len() - 1);
+                    }
+                    Tab::Monitor => {
+                        if app.monitor_running {
+                            // Scroll output log up (toward older lines)
+                            app.monitor_log_scroll = app.monitor_log_scroll.saturating_add(1);
+                        } else if !MONITOR_MODULES.is_empty() {
+                            app.monitor_cursor = app
+                                .monitor_cursor
+                                .checked_sub(1)
+                                .unwrap_or(MONITOR_MODULES.len() - 1);
+                        }
+                    }
+                    Tab::Backups => {
+                        app.backups_cursor = app
+                            .backups_cursor
+                            .checked_sub(1)
+                            .unwrap_or(BACKUP_STEPS.len() - 1);
+                    }
+                    Tab::ServiceRestore => {
+                        app.restore_cursor = app
+                            .restore_cursor
+                            .checked_sub(1)
+                            .unwrap_or(RESTORE_SERVICES.len() - 1);
+                    }
+                    _ => {}
+                },
+                KeyCode::Down => match app.tab {
+                    Tab::Tools => {
+                        use crate::tui::tools_view::SelectedTool;
+                        let total = SelectedTool::total();
+                        if total > 0 {
+                            app.tools_cursor = (app.tools_cursor + 1) % total;
+                        }
+                    }
+                    Tab::Logs => {
+                        if let Some(p) = app.log_dashboard.active_pane_mut() {
+                            p.scroll_down();
+                        }
+                    }
+                    Tab::Scan => match app.scan_focus {
+                        ScanFocus::Modules => {
+                            app.scan_cursor = (app.scan_cursor + 1) % SCAN_MODULES.len();
+                        }
+                        ScanFocus::Findings => {
+                            let n = app.display_findings().len();
+                            if n > 0 {
+                                app.findings_cursor = (app.findings_cursor + 1) % n;
+                            }
+                        }
+                    },
+                    Tab::Hardening => {
+                        app.hardening_cursor = (app.hardening_cursor + 1) % HARDENING_STEPS.len();
+                    }
+                    Tab::Monitor => {
+                        if app.monitor_running {
+                            // Scroll output log down (toward newer lines); 0 = bottom
+                            app.monitor_log_scroll = app.monitor_log_scroll.saturating_sub(1);
+                        } else if !MONITOR_MODULES.is_empty() {
+                            app.monitor_cursor = (app.monitor_cursor + 1) % MONITOR_MODULES.len();
+                        }
+                    }
+                    Tab::Backups => {
+                        app.backups_cursor = (app.backups_cursor + 1) % BACKUP_STEPS.len();
+                    }
+                    Tab::ServiceRestore => {
+                        app.restore_cursor = (app.restore_cursor + 1) % RESTORE_SERVICES.len();
+                    }
+                    _ => {}
+                },
+                KeyCode::Enter => {
+                    if app.tab == Tab::Scan
+                        && app.scan_focus == ScanFocus::Findings
+                        && !app.findings.is_empty()
+                    {
+                        app.show_finding_detail = !app.show_finding_detail;
+                        app.action_feedback = None;
+                    } else if app.tab == Tab::Hardening && !app.hardening_running {
+                        let step_id = HARDENING_STEPS[app.hardening_cursor].0;
+                        app.start_hardening(step_id);
+                    } else if app.tab == Tab::Monitor && !app.monitor_running {
+                        let module_id = MONITOR_MODULES[app.monitor_cursor].0;
+                        app.start_monitor(module_id);
+                    } else if app.tab == Tab::Backups && !app.backups_running {
+                        let step_id = BACKUP_STEPS[app.backups_cursor].0;
+                        app.start_backup(step_id);
+                    } else if app.tab == Tab::ServiceRestore && !app.restore_running {
+                        let service_id = RESTORE_SERVICES[app.restore_cursor].0;
+                        match service_id {
+                            "splunk" => {
+                                app.restore_cred_dialog =
+                                    Some(RestoreCredDialog::new(RestoreCredService::Splunk));
+                            }
+                            "opencart" => {
+                                app.restore_cred_dialog =
+                                    Some(RestoreCredDialog::new(RestoreCredService::OpenCart));
+                            }
+                            "prestashop" => {
+                                app.restore_cred_dialog =
+                                    Some(RestoreCredDialog::new(RestoreCredService::PrestaShop));
+                            }
+                            _ => app.start_restore(service_id, None),
+                        }
+                    }
+                }
+                KeyCode::Char('x') => {
+                    if app.tab == Tab::Scan && app.show_finding_detail {
+                        let cursor = app.findings_cursor;
+                        // Resolve cursor against display_findings (log findings excluded)
+                        if let Some(action) = app
+                            .display_findings()
+                            .get(cursor)
+                            .and_then(|f| f.actions.first())
+                            .cloned()
+                        {
+                            match execute_action(&action) {
+                                Ok(msg) => {
+                                    app.action_feedback = Some(format!("Done: {}", msg));
+                                    // Find and mark the same finding resolved in the full list
+                                    if let Some(f) = app
+                                        .findings
+                                        .iter_mut()
+                                        .filter(|f| f.module != "log")
+                                        .nth(cursor)
+                                    {
+                                        f.resolved = true;
+                                    }
+                                }
+                                Err(e) => {
+                                    app.action_feedback = Some(format!("Failed: {}", e));
+                                }
+                            }
+                        }
+                    }
+                }
+                KeyCode::Char(' ') => {
+                    if app.tab == Tab::Scan
+                        && !app.scan_running
+                        && app.scan_focus == ScanFocus::Modules
+                    {
+                        let i = app.scan_cursor;
+                        app.scan_selected[i] = !app.scan_selected[i];
+                    }
+                }
+                KeyCode::Char('s') => {
+                    if app.tab == Tab::Scan && app.scan_focus == ScanFocus::Modules {
+                        app.start_scan();
+                    }
+                }
+                KeyCode::Char('S') => {
+                    if app.tab == Tab::Scan
+                        && !app.scan_running
+                        && app.scan_focus == ScanFocus::Modules
+                    {
+                        app.scan_selected.fill(true);
+                        app.start_scan();
+                    }
+                }
+                KeyCode::Char('a') => {
+                    if app.tab == Tab::Scan
+                        && !app.scan_running
+                        && app.scan_focus == ScanFocus::Modules
+                    {
+                        let all_on = app.scan_selected.iter().all(|&b| b);
+                        app.scan_selected.fill(!all_on);
+                    }
+                }
+                KeyCode::Char('w') => {
+                    if app.tab == Tab::Scan {
+                        app.auto_scan_enabled = !app.auto_scan_enabled;
+                        if app.auto_scan_enabled {
+                            // Clear last-run times so all due modules start immediately.
+                            app.auto_scan_last_run.clear();
+                        }
+                    } else if app.tab == Tab::Dashboard {
+                        app.watchdog_enabled = !app.watchdog_enabled;
+                        if app.watchdog_enabled {
+                            // Reset restart counts when watchdog is freshly enabled.
+                            app.watchdog_restart_count.clear();
+                        }
+                    }
+                }
+                KeyCode::Char('u') => {
+                    if app.tab == Tab::Dashboard {
+                        app.user_input_active = true;
+                        app.user_input_buf.clear();
+                    }
+                }
+                KeyCode::Char('b') => {
+                    if app.tab == Tab::Dashboard {
+                        // Jump straight to Backups and queue an --all run
+                        app.tab = Tab::Backups;
+                        app.start_backup("all");
+                    }
+                }
+                KeyCode::Char('e') => {
+                    if app.tab == Tab::Scan && app.scan_focus == ScanFocus::Findings {
+                        match app.export_ir_report() {
+                            Ok(path) => app.action_feedback = Some(format!("Exported: {}", path)),
+                            Err(e) => app.action_feedback = Some(format!("Export failed: {}", e)),
+                        }
+                    }
+                }
+                KeyCode::Char('d') => {
+                    if app.tab == Tab::Tools {
+                        use crate::tui::tools_view::SelectedTool;
+                        if let SelectedTool::Binary(_) = SelectedTool::from_cursor(app.tools_cursor)
+                        {
+                            use crate::tools::catalog::NFTBUILD;
+                            app.download_status = Some("nftbuild: downloading…".into());
+                            let tool = NFTBUILD.clone();
+                            let (dl_tx, dl_rx) = mpsc::channel::<String>();
+                            app.download_result_rx = dl_rx;
+                            std::thread::spawn(move || {
+                                let msg = match crate::tools::downloader::download(&tool) {
+                                    Ok(result) => {
+                                        format!("nftbuild: downloaded to {}", result.path.display())
+                                    }
+                                    Err(e) => format!("nftbuild: download failed — {}", e),
+                                };
+                                let _ = dl_tx.send(msg);
+                            });
+                        }
+                    }
+                }
+                KeyCode::Char('r') => {
+                    if app.tab == Tab::Tools {
+                        use crate::tui::tools_view::SelectedTool;
+                        match SelectedTool::from_cursor(app.tools_cursor) {
+                            SelectedTool::Binary(_) => {
+                                // Run nftbuild in background — avoids blocking the TUI event loop
+                                let box_type = app.box_type;
+                                let opts = crate::tools::nftbuild::RunOptions::default();
+                                let (nft_tx, nft_rx) = mpsc::channel::<Result<String, String>>();
+                                app.nftbuild_result_rx = nft_rx;
+                                app.action_feedback = Some("nftbuild: running…".into());
+                                std::thread::spawn(move || {
+                                    let result = match crate::tools::nftbuild::run(box_type, &opts)
+                                    {
+                                        Ok(r) => Ok(r.config),
+                                        Err(e) => Err(e.to_string()),
+                                    };
+                                    let _ = nft_tx.send(result);
+                                });
+                            }
+                            SelectedTool::Wizard(idx) => {
+                                if let Some(w) =
+                                    crate::wizards::ActiveWizard::new(idx, app.box_type)
+                                {
+                                    app.active_wizard = Some(w);
+                                }
+                            }
+                        }
+                    }
+                }
+                KeyCode::End => {
+                    if app.tab == Tab::Logs
+                        && let Some(p) = app.log_dashboard.active_pane_mut()
+                    {
+                        p.scroll_to_bottom();
+                    }
+                }
+                KeyCode::Tab => {
+                    if app.tab == Tab::Logs {
+                        app.log_dashboard.next_pane();
+                    } else if app.tab == Tab::Scan {
+                        app.scan_focus = match app.scan_focus {
+                            ScanFocus::Modules => ScanFocus::Findings,
+                            ScanFocus::Findings => ScanFocus::Modules,
+                        };
+                    }
+                }
+                KeyCode::BackTab => {
+                    if app.tab == Tab::Logs {
+                        app.log_dashboard.prev_pane();
+                    }
+                }
+                KeyCode::Char('p') if app.tab == Tab::Logs => {
+                    if let Some(p) = app.log_dashboard.active_pane_mut() {
+                        p.paused = !p.paused;
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -2361,10 +2349,10 @@ fn render_scan(f: &mut ratatui::Frame, area: Rect, app: &App) {
     }
 
     // Detail overlay — drawn on top of the full scan area
-    if app.show_finding_detail {
-        if let Some(finding) = app.display_findings().get(app.findings_cursor).copied() {
-            render_finding_detail(f, area, finding, app.action_feedback.as_deref());
-        }
+    if app.show_finding_detail
+        && let Some(finding) = app.display_findings().get(app.findings_cursor).copied()
+    {
+        render_finding_detail(f, area, finding, app.action_feedback.as_deref());
     }
 }
 
@@ -3163,24 +3151,24 @@ fn select_box_type(
     loop {
         terminal.draw(|f| draw_box_select(f, options, selected, detected))?;
 
-        if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
+        if event::poll(Duration::from_millis(200))?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            match key.code {
+                KeyCode::Up => {
+                    selected = selected.checked_sub(1).unwrap_or(options.len() - 1);
                 }
-                match key.code {
-                    KeyCode::Up => {
-                        selected = selected.checked_sub(1).unwrap_or(options.len() - 1);
-                    }
-                    KeyCode::Down => {
-                        selected = (selected + 1) % options.len();
-                    }
-                    KeyCode::Enter => return Ok(options[selected]),
-                    KeyCode::Char('q') => {
-                        return Err(anyhow::anyhow!("Quit before selecting box type"));
-                    }
-                    _ => {}
+                KeyCode::Down => {
+                    selected = (selected + 1) % options.len();
                 }
+                KeyCode::Enter => return Ok(options[selected]),
+                KeyCode::Char('q') => {
+                    return Err(anyhow::anyhow!("Quit before selecting box type"));
+                }
+                _ => {}
             }
         }
     }

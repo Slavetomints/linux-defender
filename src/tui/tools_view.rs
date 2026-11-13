@@ -112,26 +112,26 @@ fn render_tool_list(
             )
         };
 
-        if let Some(status) = download_status {
-            if status.starts_with(tool.name) {
-                let line = Line::from(vec![
-                    Span::styled(
-                        " […] ",
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("{:<12}", tool.name),
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(format!("  {}", status), Style::default().fg(Color::Yellow)),
-                ]);
-                items.push(maybe_highlight(ListItem::new(line), is_sel));
-                continue;
-            }
+        if let Some(status) = download_status
+            && status.starts_with(tool.name)
+        {
+            let line = Line::from(vec![
+                Span::styled(
+                    " […] ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{:<12}", tool.name),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("  {}", status), Style::default().fg(Color::Yellow)),
+            ]);
+            items.push(maybe_highlight(ListItem::new(line), is_sel));
+            continue;
         }
 
         let base = if is_sel {

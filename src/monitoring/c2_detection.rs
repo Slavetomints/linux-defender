@@ -201,12 +201,11 @@ fn inode_to_pid(target_inodes: &HashMap<u64, ()>) -> HashMap<u64, u32> {
                 continue;
             };
             let s = link.to_string_lossy();
-            if let Some(inode_str) = s.strip_prefix("socket:[").and_then(|s| s.strip_suffix(']')) {
-                if let Ok(inode) = inode_str.parse::<u64>() {
-                    if target_inodes.contains_key(&inode) {
-                        result.insert(inode, pid);
-                    }
-                }
+            if let Some(inode_str) = s.strip_prefix("socket:[").and_then(|s| s.strip_suffix(']'))
+                && let Ok(inode) = inode_str.parse::<u64>()
+                && target_inodes.contains_key(&inode)
+            {
+                result.insert(inode, pid);
             }
         }
     }

@@ -494,13 +494,13 @@ fn check_http_curl(host: &str, port: u16, path: &str, expected: u16) -> (bool, S
         };
 
         if (300..400).contains(&status) {
-            if let Some(loc) = parse_location_header(&resp) {
-                if let Some((h, p, pth)) = parse_http_url(&loc, &cur_host, cur_port) {
-                    cur_host = h;
-                    cur_port = p;
-                    cur_path = pth;
-                    continue;
-                }
+            if let Some(loc) = parse_location_header(&resp)
+                && let Some((h, p, pth)) = parse_http_url(&loc, &cur_host, cur_port)
+            {
+                cur_host = h;
+                cur_port = p;
+                cur_path = pth;
+                continue;
             }
             return (false, format!("HTTP {} (no Location)", status));
         }

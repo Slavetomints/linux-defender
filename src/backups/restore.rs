@@ -121,17 +121,16 @@ pub fn run(ctx: &DefenderContext, backup_dir: &Path) -> Result {
         ctx.log_msg(&format!("  Restoring {orig_path}"));
 
         // Create parent directory if needed before asking to copy.
-        if let Some(parent) = dst.parent() {
-            if !parent.exists() {
-                if let Err(e) = fs::create_dir_all(parent) {
-                    ctx.log_msg(&format!(
-                        "[!] Could not create parent dir {}: {e}",
-                        parent.display()
-                    ));
-                    skipped += 1;
-                    continue;
-                }
-            }
+        if let Some(parent) = dst.parent()
+            && !parent.exists()
+            && let Err(e) = fs::create_dir_all(parent)
+        {
+            ctx.log_msg(&format!(
+                "[!] Could not create parent dir {}: {e}",
+                parent.display()
+            ));
+            skipped += 1;
+            continue;
         }
 
         if ctx.run_remediation(&["cp", "-a", &src_str, &dst_str]) {

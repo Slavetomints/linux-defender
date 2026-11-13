@@ -54,66 +54,65 @@ fn parse_events(contents: &str) -> Vec<AuthEvent> {
 
     for line in contents.lines() {
         // Accepted password for <user> from <ip>
-        if let Some(rest) = line.find("Accepted password for ").map(|i| &line[i + 22..]) {
-            if let Some((user, ip)) = parse_for_from(rest) {
-                events.push(AuthEvent {
-                    source_ip: ip,
-                    success: true,
-                    user,
-                    method: AuthMethod::Password,
-                });
-                continue;
-            }
+        if let Some(rest) = line.find("Accepted password for ").map(|i| &line[i + 22..])
+            && let Some((user, ip)) = parse_for_from(rest)
+        {
+            events.push(AuthEvent {
+                source_ip: ip,
+                success: true,
+                user,
+                method: AuthMethod::Password,
+            });
+            continue;
         }
         // Accepted publickey for <user> from <ip>
         if let Some(rest) = line
             .find("Accepted publickey for ")
             .map(|i| &line[i + 23..])
+            && let Some((user, ip)) = parse_for_from(rest)
         {
-            if let Some((user, ip)) = parse_for_from(rest) {
-                events.push(AuthEvent {
-                    source_ip: ip,
-                    success: true,
-                    user,
-                    method: AuthMethod::Publickey,
-                });
-                continue;
-            }
+            events.push(AuthEvent {
+                source_ip: ip,
+                success: true,
+                user,
+                method: AuthMethod::Publickey,
+            });
+            continue;
         }
         // Failed password for <user> from <ip>
-        if let Some(rest) = line.find("Failed password for ").map(|i| &line[i + 20..]) {
-            if let Some((user, ip)) = parse_for_from(rest) {
-                events.push(AuthEvent {
-                    source_ip: ip,
-                    success: false,
-                    user,
-                    method: AuthMethod::Password,
-                });
-                continue;
-            }
+        if let Some(rest) = line.find("Failed password for ").map(|i| &line[i + 20..])
+            && let Some((user, ip)) = parse_for_from(rest)
+        {
+            events.push(AuthEvent {
+                source_ip: ip,
+                success: false,
+                user,
+                method: AuthMethod::Password,
+            });
+            continue;
         }
         // Invalid user <user> from <ip>
-        if let Some(rest) = line.find("Invalid user ").map(|i| &line[i + 13..]) {
-            if let Some((user, ip)) = parse_user_from(rest) {
-                events.push(AuthEvent {
-                    source_ip: ip,
-                    success: false,
-                    user,
-                    method: AuthMethod::Unknown,
-                });
-                continue;
-            }
+        if let Some(rest) = line.find("Invalid user ").map(|i| &line[i + 13..])
+            && let Some((user, ip)) = parse_user_from(rest)
+        {
+            events.push(AuthEvent {
+                source_ip: ip,
+                success: false,
+                user,
+                method: AuthMethod::Unknown,
+            });
+            continue;
         }
         // Connection closed by authenticating user <user> <ip> — often a probe
-        if line.contains("Connection closed by authenticating user") {
-            if let Some(ip) = extract_ip(line) {
-                events.push(AuthEvent {
-                    source_ip: ip,
-                    success: false,
-                    user: "unknown".into(),
-                    method: AuthMethod::Unknown,
-                });
-            }
+        if line.contains("Connection closed by authenticating user")
+            && let Some(ip) = extract_ip(line)
+        {
+            events.push(AuthEvent {
+                source_ip: ip,
+                success: false,
+                user: "unknown".into(),
+                method: AuthMethod::Unknown,
+            });
         }
     }
 

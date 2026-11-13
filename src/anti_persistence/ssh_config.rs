@@ -414,9 +414,10 @@ fn inspect(ctx: &DefenderContext, path: &Path, contents: &str) -> Vec<Finding> {
 
             "listenaddress" => {
                 // Flag if the address contains an unusual port (not 22).
-                if let Some(port) = extract_port(value) {
-                    if port != 22 {
-                        findings.push(
+                if let Some(port) = extract_port(value)
+                    && port != 22
+                {
+                    findings.push(
                             Finding::new(
                                 Severity::Medium,
                                 "ssh_config",
@@ -441,40 +442,39 @@ fn inspect(ctx: &DefenderContext, path: &Path, contents: &str) -> Vec<Finding> {
                                  If not, restore ListenAddress to the default and reload sshd.",
                             ),
                         );
-                    }
                 }
             }
 
             "maxauthtries" => {
-                if let Ok(n) = value.parse::<u32>() {
-                    if n > 6 {
-                        findings.push(
-                            Finding::new(
-                                Severity::Medium,
-                                "ssh_config",
-                                format!(
-                                    "MaxAuthTries {} is above 6{} — makes brute-force easier",
-                                    n, block_prefix
-                                ),
-                                format!(
-                                    "File: {}\nLine: {}\n\n\
+                if let Ok(n) = value.parse::<u32>()
+                    && n > 6
+                {
+                    findings.push(
+                        Finding::new(
+                            Severity::Medium,
+                            "ssh_config",
+                            format!(
+                                "MaxAuthTries {} is above 6{} — makes brute-force easier",
+                                n, block_prefix
+                            ),
+                            format!(
+                                "File: {}\nLine: {}\n\n\
                                      A high MaxAuthTries allows an attacker to attempt many \
                                      passwords per connection, reducing the effectiveness of \
                                      brute-force rate limiting.",
-                                    path_str, directive.raw
-                                ),
-                            )
-                            .with_path(path.to_path_buf())
-                            .with_context("file", path_str.clone())
-                            .with_context("directive", directive.raw.clone())
-                            .with_context("value", n.to_string())
-                            .with_verdict(
-                                Verdict::Investigate,
-                                "Set MaxAuthTries to 3 or 4. The default in most distributions \
-                                 is 6; lower is safer.",
+                                path_str, directive.raw
                             ),
-                        );
-                    }
+                        )
+                        .with_path(path.to_path_buf())
+                        .with_context("file", path_str.clone())
+                        .with_context("directive", directive.raw.clone())
+                        .with_context("value", n.to_string())
+                        .with_verdict(
+                            Verdict::Investigate,
+                            "Set MaxAuthTries to 3 or 4. The default in most distributions \
+                                 is 6; lower is safer.",
+                        ),
+                    );
                 }
             }
 

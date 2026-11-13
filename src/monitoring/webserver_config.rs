@@ -110,22 +110,22 @@ fn check_nginx_file(ctx: &DefenderContext, path: &Path) {
         let trimmed = line.trim();
 
         // proxy_pass pointing to an external host.
-        if let Some(rest) = trimmed.strip_prefix("proxy_pass ") {
-            if proxy_pass_is_external(rest) {
-                flag_line(
-                    ctx,
-                    path,
-                    trimmed,
-                    Severity::High,
-                    "webserver_config",
-                    format!("nginx proxy_pass to external host in {}", path.display()),
-                    format!(
-                        "nginx is forwarding requests to a potentially attacker-controlled host: {}",
-                        rest.trim_end_matches(';')
-                    ),
-                    "Remove or correct the proxy_pass directive. Traffic should not be forwarded to external or untrusted hosts.",
-                );
-            }
+        if let Some(rest) = trimmed.strip_prefix("proxy_pass ")
+            && proxy_pass_is_external(rest)
+        {
+            flag_line(
+                ctx,
+                path,
+                trimmed,
+                Severity::High,
+                "webserver_config",
+                format!("nginx proxy_pass to external host in {}", path.display()),
+                format!(
+                    "nginx is forwarding requests to a potentially attacker-controlled host: {}",
+                    rest.trim_end_matches(';')
+                ),
+                "Remove or correct the proxy_pass directive. Traffic should not be forwarded to external or untrusted hosts.",
+            );
         }
 
         // alias/root pointing into volatile directories.
@@ -231,30 +231,30 @@ fn check_apache_file(ctx: &DefenderContext, path: &Path) {
         let trimmed = line.trim();
 
         // AddHandler for unusual extensions.
-        if let Some(rest) = trimmed.strip_prefix("AddHandler ") {
-            if rest.contains("x-httpd-php") || rest.contains("application/x-httpd-php") {
-                let parts: Vec<&str> = rest.split_whitespace().collect();
-                // parts[0] = handler, parts[1..] = extensions
-                for ext in parts.iter().skip(1) {
-                    if is_unusual_php_extension(ext) {
-                        flag_line(
-                            ctx,
-                            path,
-                            trimmed,
-                            Severity::High,
-                            "webserver_config",
-                            format!(
-                                "Apache maps PHP handler to unusual extension {} in {}",
-                                ext,
-                                path.display()
-                            ),
-                            format!(
-                                "AddHandler maps the PHP interpreter to extension {}. Attackers use this to execute PHP code from files with innocuous extensions (e.g. .jpg.php or .xyz).",
-                                ext
-                            ),
-                            "Remove the AddHandler directive for non-standard extensions. PHP should only execute .php files.",
-                        );
-                    }
+        if let Some(rest) = trimmed.strip_prefix("AddHandler ")
+            && (rest.contains("x-httpd-php") || rest.contains("application/x-httpd-php"))
+        {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            // parts[0] = handler, parts[1..] = extensions
+            for ext in parts.iter().skip(1) {
+                if is_unusual_php_extension(ext) {
+                    flag_line(
+                        ctx,
+                        path,
+                        trimmed,
+                        Severity::High,
+                        "webserver_config",
+                        format!(
+                            "Apache maps PHP handler to unusual extension {} in {}",
+                            ext,
+                            path.display()
+                        ),
+                        format!(
+                            "AddHandler maps the PHP interpreter to extension {}. Attackers use this to execute PHP code from files with innocuous extensions (e.g. .jpg.php or .xyz).",
+                            ext
+                        ),
+                        "Remove the AddHandler directive for non-standard extensions. PHP should only execute .php files.",
+                    );
                 }
             }
         }
@@ -274,29 +274,29 @@ fn check_apache_file(ctx: &DefenderContext, path: &Path) {
         }
 
         // AddType PHP handler for non-PHP extensions.
-        if let Some(rest) = trimmed.strip_prefix("AddType ") {
-            if rest.contains("x-httpd-php") {
-                let parts: Vec<&str> = rest.split_whitespace().collect();
-                for ext in parts.iter().skip(1) {
-                    if is_unusual_php_extension(ext) {
-                        flag_line(
-                            ctx,
-                            path,
-                            trimmed,
-                            Severity::High,
-                            "webserver_config",
-                            format!(
-                                "Apache AddType maps PHP to unusual extension {} in {}",
-                                ext,
-                                path.display()
-                            ),
-                            format!(
-                                "AddType routes the PHP MIME type to extension {}. This allows PHP execution in files that look like static assets.",
-                                ext
-                            ),
-                            "Remove the AddType directive for non-standard extensions.",
-                        );
-                    }
+        if let Some(rest) = trimmed.strip_prefix("AddType ")
+            && rest.contains("x-httpd-php")
+        {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            for ext in parts.iter().skip(1) {
+                if is_unusual_php_extension(ext) {
+                    flag_line(
+                        ctx,
+                        path,
+                        trimmed,
+                        Severity::High,
+                        "webserver_config",
+                        format!(
+                            "Apache AddType maps PHP to unusual extension {} in {}",
+                            ext,
+                            path.display()
+                        ),
+                        format!(
+                            "AddType routes the PHP MIME type to extension {}. This allows PHP execution in files that look like static assets.",
+                            ext
+                        ),
+                        "Remove the AddType directive for non-standard extensions.",
+                    );
                 }
             }
         }

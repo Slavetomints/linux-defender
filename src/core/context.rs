@@ -522,10 +522,10 @@ impl DefenderContext {
         } else {
             format!("{}h {}m ago", mins / 60, mins % 60)
         };
-        if let Some(start) = self.competition_start {
-            if mtime > start {
-                return format!("{} (after competition start — suspicious)", base);
-            }
+        if let Some(start) = self.competition_start
+            && mtime > start
+        {
+            return format!("{} (after competition start — suspicious)", base);
         }
         base
     }

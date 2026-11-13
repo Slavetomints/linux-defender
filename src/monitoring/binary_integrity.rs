@@ -99,10 +99,11 @@ fn collect_executables(dir: &Path) -> Vec<PathBuf> {
         if path.is_dir() {
             // Recurse one level (usr/lib has subdirs).
             out.extend(collect_executables(&path));
-        } else if let Ok(meta) = path.metadata() {
-            if meta.is_file() && (meta.permissions().mode() & 0o111 != 0) {
-                out.push(path);
-            }
+        } else if let Ok(meta) = path.metadata()
+            && meta.is_file()
+            && (meta.permissions().mode() & 0o111 != 0)
+        {
+            out.push(path);
         }
     }
     out
@@ -207,10 +208,11 @@ pub fn run(ctx: &DefenderContext) -> Result {
                 .with_path(PathBuf::from(path))
                 .with_verdict(Verdict::Investigate, "Determine whether the binary was removed by a package manager update or deliberately deleted by an attacker."),
             );
-        } else if let Some(current_hash) = current.get(path) {
-            if current_hash != baseline_hash {
-                ctx.log_evidence_file(p);
-                ctx.emit(
+        } else if let Some(current_hash) = current.get(path)
+            && current_hash != baseline_hash
+        {
+            ctx.log_evidence_file(p);
+            ctx.emit(
                     Finding::new(
                         Severity::Critical,
                         "binary_integrity",
@@ -225,7 +227,6 @@ pub fn run(ctx: &DefenderContext) -> Result {
                     .with_context("current_hash", current_hash.clone())
                     .with_verdict(Verdict::Investigate, "This binary has been replaced or patched since the baseline was taken. Treat it as compromised."),
                 );
-            }
         }
     }
 
@@ -322,10 +323,10 @@ mod tests {
 
         let mut modified = Vec::new();
         for (path, b_hash) in &baseline {
-            if let Some(c_hash) = current.get(path) {
-                if c_hash != b_hash {
-                    modified.push(path.clone());
-                }
+            if let Some(c_hash) = current.get(path)
+                && c_hash != b_hash
+            {
+                modified.push(path.clone());
             }
         }
         assert_eq!(modified, vec!["/usr/bin/sudo"]);

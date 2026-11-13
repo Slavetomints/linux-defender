@@ -309,10 +309,10 @@ fn check_unit_content_patterns(ctx: &DefenderContext, services: &[Service]) -> R
         }
 
         // Skip units already handled by check_suspicious_units (ExecStart path check).
-        if let Some(exec_start) = extract_exec_start(&content) {
-            if is_suspicious_exec(&exec_start) {
-                continue;
-            }
+        if let Some(exec_start) = extract_exec_start(&content)
+            && is_suspicious_exec(&exec_start)
+        {
+            continue;
         }
 
         ctx.log_evidence_file(unit_path);

@@ -170,13 +170,13 @@ fn collect_ini_paths() -> Vec<PathBuf> {
                     }
                     // /etc/phpX.Y/<sapi>/conf.d/*.ini
                     let conf_d = ep.join("conf.d");
-                    if conf_d.is_dir() {
-                        if let Ok(confs) = std::fs::read_dir(&conf_d) {
-                            for cf in confs.flatten() {
-                                let cp = cf.path();
-                                if cp.extension().and_then(|e| e.to_str()) == Some("ini") {
-                                    paths.push(cp);
-                                }
+                    if conf_d.is_dir()
+                        && let Ok(confs) = std::fs::read_dir(&conf_d)
+                    {
+                        for cf in confs.flatten() {
+                            let cp = cf.path();
+                            if cp.extension().and_then(|e| e.to_str()) == Some("ini") {
+                                paths.push(cp);
                             }
                         }
                     }
@@ -375,21 +375,20 @@ fn check_extension_dirs(ctx: &DefenderContext) {
                 ));
             }
 
-            if let Ok(meta) = std::fs::metadata(&entry) {
-                if let Ok(mtime) = meta.modified() {
-                    if mtime > cutoff {
-                        let age = mtime
-                            .duration_since(SystemTime::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0);
-                        ctx.emit(Finding::new(
-                            Severity::High,
-                            "php_modules",
-                            format!("Recently modified PHP extension: {name}"),
-                            format!("file: {path_str}\nmtime epoch: {age}"),
-                        ));
-                    }
-                }
+            if let Ok(meta) = std::fs::metadata(&entry)
+                && let Ok(mtime) = meta.modified()
+                && mtime > cutoff
+            {
+                let age = mtime
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                ctx.emit(Finding::new(
+                    Severity::High,
+                    "php_modules",
+                    format!("Recently modified PHP extension: {name}"),
+                    format!("file: {path_str}\nmtime epoch: {age}"),
+                ));
             }
         }
     }
@@ -567,17 +566,17 @@ fn scan_php_dir(dir: &Path, ctx: &DefenderContext, count: &mut usize, scanned: &
             continue;
         }
         *count += 1;
-        if *count % 1000 == 0 {
+        if (*count).is_multiple_of(1000) {
             ctx.log_msg(&format!(
                 "  [+] Webshell scan: {count} PHP files checked..."
             ));
         }
 
         // Skip oversized files
-        if let Ok(meta) = std::fs::metadata(&p) {
-            if meta.len() > MAX_WEBSHELL_FILE_BYTES {
-                continue;
-            }
+        if let Ok(meta) = std::fs::metadata(&p)
+            && meta.len() > MAX_WEBSHELL_FILE_BYTES
+        {
+            continue;
         }
 
         let Ok(contents) = std::fs::read_to_string(&p) else {

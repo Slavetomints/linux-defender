@@ -784,10 +784,10 @@ fn probe_php() -> Option<String> {
         }
     }
     // Accept generic `php` only if it meets the minimum version requirement.
-    if let Some((major, minor)) = php_semver("php") {
-        if major > 8 || (major == 8 && minor >= 1) {
-            return Some("php".to_string());
-        }
+    if let Some((major, minor)) = php_semver("php")
+        && (major > 8 || (major == 8 && minor >= 1))
+    {
+        return Some("php".to_string());
     }
     None
 }

@@ -94,10 +94,10 @@ fn scan_timer_dir(ctx: &DefenderContext, dir: &Path) {
         let service_stem = &name_str[..name_str.len() - ".timer".len()];
         let service_path = dir.join(format!("{}.service", service_stem));
 
-        if service_path.is_file() {
-            if let Ok(svc_content) = std::fs::read_to_string(&service_path) {
-                check_service_exec(ctx, &service_path, &svc_content, &timer_path, &unit_name);
-            }
+        if service_path.is_file()
+            && let Ok(svc_content) = std::fs::read_to_string(&service_path)
+        {
+            check_service_exec(ctx, &service_path, &svc_content, &timer_path, &unit_name);
         }
     }
 }
@@ -120,45 +120,45 @@ fn check_timer_interval(ctx: &DefenderContext, timer_path: &Path, content: &str,
 
         match key {
             "OnUnitActiveSec" | "OnBootSec" | "OnStartupSec" => {
-                if let Some(secs) = parse_duration_secs(val) {
-                    if secs < 60 {
-                        ctx.log_msg(&format!(
-                            "[!] Very frequent timer {}: {} = {} ({}s)",
-                            unit_name, key, val, secs
-                        ));
-                        ctx.log_evidence_line(&timer_path.display().to_string(), trimmed);
+                if let Some(secs) = parse_duration_secs(val)
+                    && secs < 60
+                {
+                    ctx.log_msg(&format!(
+                        "[!] Very frequent timer {}: {} = {} ({}s)",
+                        unit_name, key, val, secs
+                    ));
+                    ctx.log_evidence_line(&timer_path.display().to_string(), trimmed);
 
-                        ctx.emit(
-                            Finding::new(
-                                Severity::Medium,
-                                "systemd_timers",
-                                format!(
-                                    "Very frequent timer: {} ({} = {}, {}s interval)",
-                                    unit_name, key, val, secs
-                                ),
-                                format!(
-                                    "timer: {}\n{} = {}\ninterval_secs: {}",
-                                    timer_path.display(),
-                                    key,
-                                    val,
-                                    secs
-                                ),
-                            )
-                            .with_path(timer_path.to_path_buf())
-                            .with_context("unit", unit_name.to_string())
-                            .with_context("interval_setting", format!("{} = {}", key, val))
-                            .with_context("interval_secs", secs.to_string())
-                            .with_verdict(
-                                Verdict::Investigate,
-                                format!(
-                                    "Timer {} fires every {} second(s). Legitimate system timers \
+                    ctx.emit(
+                        Finding::new(
+                            Severity::Medium,
+                            "systemd_timers",
+                            format!(
+                                "Very frequent timer: {} ({} = {}, {}s interval)",
+                                unit_name, key, val, secs
+                            ),
+                            format!(
+                                "timer: {}\n{} = {}\ninterval_secs: {}",
+                                timer_path.display(),
+                                key,
+                                val,
+                                secs
+                            ),
+                        )
+                        .with_path(timer_path.to_path_buf())
+                        .with_context("unit", unit_name.to_string())
+                        .with_context("interval_setting", format!("{} = {}", key, val))
+                        .with_context("interval_secs", secs.to_string())
+                        .with_verdict(
+                            Verdict::Investigate,
+                            format!(
+                                "Timer {} fires every {} second(s). Legitimate system timers \
                                      rarely need sub-minute intervals. Verify this timer is \
                                      expected and check its paired service ExecStart.",
-                                    unit_name, secs
-                                ),
+                                unit_name, secs
                             ),
-                        );
-                    }
+                        ),
+                    );
                 }
             }
             "OnCalendar" if oncalendar_is_frequent(val) => {

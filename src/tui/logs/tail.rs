@@ -33,26 +33,23 @@ fn tail_loop(path: &Path, tx: Sender<String>, preserve_path: Option<PathBuf>) {
             Ok(0) => {
                 std::thread::sleep(Duration::from_millis(200));
                 // detect log rotation: if our position is beyond current file size, reopen
-                if let Ok(pos) = reader.stream_position() {
-                    if let Ok(meta) = std::fs::metadata(path) {
-                        if pos > meta.len() {
-                            if let Ok(f) = File::open(path) {
-                                reader = BufReader::new(f);
-                            }
-                        }
-                    }
+                if let Ok(pos) = reader.stream_position()
+                    && let Ok(meta) = std::fs::metadata(path)
+                    && pos > meta.len()
+                    && let Ok(f) = File::open(path)
+                {
+                    reader = BufReader::new(f);
                 }
             }
             Ok(_) => {
                 let trimmed = strip_ansi(line.trim_end());
-                if let Some(pp) = &preserve_path {
-                    if let Ok(mut pf) = std::fs::OpenOptions::new()
+                if let Some(pp) = &preserve_path
+                    && let Ok(mut pf) = std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
                         .open(pp)
-                    {
-                        let _ = writeln!(pf, "{}", trimmed);
-                    }
+                {
+                    let _ = writeln!(pf, "{}", trimmed);
                 }
                 if tx.send(trimmed).is_err() {
                     break;

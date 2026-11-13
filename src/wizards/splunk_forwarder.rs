@@ -760,10 +760,9 @@ fn find_packages() -> Vec<String> {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if (name.starts_with("splunk") || name.starts_with("splunkforwarder"))
                     && (name.ends_with(".deb") || name.ends_with(".rpm"))
+                    && let Ok(path) = entry.path().canonicalize()
                 {
-                    if let Ok(path) = entry.path().canonicalize() {
-                        found.push(path.to_string_lossy().into_owned());
-                    }
+                    found.push(path.to_string_lossy().into_owned());
                 }
             }
         }

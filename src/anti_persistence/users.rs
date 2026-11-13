@@ -89,13 +89,12 @@ fn emit_uid0_finding(ctx: &DefenderContext, acct: &Account) {
     ctx.log_evidence_line("/etc/passwd", &acct.raw_line);
 
     // 2. If /etc/shadow is readable, log the shadow entry too.
-    if let Ok(shadow) = fs::read_to_string("/etc/shadow") {
-        if let Some(shadow_line) = shadow
+    if let Ok(shadow) = fs::read_to_string("/etc/shadow")
+        && let Some(shadow_line) = shadow
             .lines()
             .find(|l| l.split(':').next() == Some(&acct.name))
-        {
-            ctx.log_evidence_line("/etc/shadow", shadow_line);
-        }
+    {
+        ctx.log_evidence_line("/etc/shadow", shadow_line);
     }
 
     // 3. Remove the account.  ctx.run_remediation() uses .output() internally,

@@ -36,10 +36,10 @@ pub struct Connection {
 /// Run `ss -tunap` and return its stdout, or fall back to `netstat -tunap`.
 fn capture_ss() -> String {
     // Try `ss` first (iproute2, present on all modern Linux distros).
-    if let Ok(out) = Command::new("ss").args(["-tunap"]).output() {
-        if out.status.success() {
-            return String::from_utf8_lossy(&out.stdout).into_owned();
-        }
+    if let Ok(out) = Command::new("ss").args(["-tunap"]).output()
+        && out.status.success()
+    {
+        return String::from_utf8_lossy(&out.stdout).into_owned();
     }
     // Fall back to `netstat` for older systems.
     Command::new("netstat")

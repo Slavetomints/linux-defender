@@ -37,10 +37,10 @@ pub fn setup(sources: &[&str]) -> PreserveConfig {
 
     for src in sources {
         let p = Path::new(src);
-        if p.exists() {
-            if let Some(name) = p.file_name() {
-                let _ = fs::copy(p, snapshot_dir.join(name));
-            }
+        if p.exists()
+            && let Some(name) = p.file_name()
+        {
+            let _ = fs::copy(p, snapshot_dir.join(name));
         }
     }
 

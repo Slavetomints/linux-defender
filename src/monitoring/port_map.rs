@@ -132,12 +132,10 @@ fn build_inode_pid_map(target_inodes: &HashMap<u64, u16>) -> HashMap<u64, u32> {
             if let Some(inode_str) = link_str
                 .strip_prefix("socket:[")
                 .and_then(|s| s.strip_suffix(']'))
+                && let Ok(inode) = inode_str.parse::<u64>()
+                && target_inodes.contains_key(&inode)
             {
-                if let Ok(inode) = inode_str.parse::<u64>() {
-                    if target_inodes.contains_key(&inode) {
-                        result.insert(inode, pid);
-                    }
-                }
+                result.insert(inode, pid);
             }
         }
     }

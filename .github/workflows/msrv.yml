@@ -44,15 +44,14 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.msrv.outputs.msrv }}
-          targets: x86_64-unknown-linux-musl
-
-      - name: Install musl tooling
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - uses: Swatinem/rust-cache@v2
 
+      # MSRV is a compiler-version check, not a target check: build for the
+      # always-available gnu target and override the repo's musl default (which
+      # would otherwise need the musl std + musl-tools installed for this toolchain).
       - name: Build against MSRV
-        run: cargo build --all-features --locked
+        run: cargo build --all-features --locked --target x86_64-unknown-linux-gnu
 
       - name: Test against MSRV
-        run: cargo test --all-features --locked
+        run: cargo test --all-features --locked --target x86_64-unknown-linux-gnu

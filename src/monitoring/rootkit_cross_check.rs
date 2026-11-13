@@ -152,12 +152,11 @@ fn parse_ss_ports(output: &str) -> HashSet<u16> {
         if trimmed.starts_with("LISTEN") {
             let fields: Vec<&str> = trimmed.split_whitespace().collect();
             // LISTEN  backlog  recv-q  local:port  peer:port  ...
-            if let Some(local) = fields.get(3) {
-                if let Some(port_str) = local.rsplit(':').next() {
-                    if let Ok(port) = port_str.parse::<u16>() {
-                        ports.insert(port);
-                    }
-                }
+            if let Some(local) = fields.get(3)
+                && let Some(port_str) = local.rsplit(':').next()
+                && let Ok(port) = port_str.parse::<u16>()
+            {
+                ports.insert(port);
             }
             continue;
         }
@@ -167,12 +166,11 @@ fn parse_ss_ports(output: &str) -> HashSet<u16> {
         {
             let fields: Vec<&str> = trimmed.split_whitespace().collect();
             // tcp  recv-q  send-q  local:port  foreign:port  state  ...
-            if let Some(local) = fields.get(3) {
-                if let Some(port_str) = local.rsplit(':').next() {
-                    if let Ok(port) = port_str.parse::<u16>() {
-                        ports.insert(port);
-                    }
-                }
+            if let Some(local) = fields.get(3)
+                && let Some(port_str) = local.rsplit(':').next()
+                && let Ok(port) = port_str.parse::<u16>()
+            {
+                ports.insert(port);
             }
         }
     }
@@ -206,12 +204,11 @@ fn udp_ports_from_ss() -> HashSet<u16> {
             continue;
         }
         let fields: Vec<&str> = trimmed.split_whitespace().collect();
-        if let Some(local) = fields.get(4) {
-            if let Some(port_str) = local.rsplit(':').next() {
-                if let Ok(port) = port_str.parse::<u16>() {
-                    ports.insert(port);
-                }
-            }
+        if let Some(local) = fields.get(4)
+            && let Some(port_str) = local.rsplit(':').next()
+            && let Ok(port) = port_str.parse::<u16>()
+        {
+            ports.insert(port);
         }
     }
     ports

@@ -85,10 +85,10 @@ fn suspicious_reason(path: &Path) -> Option<&'static str> {
         return Some("dotfile with ELF magic");
     }
 
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        if NON_EXEC_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
-            return Some("ELF magic in non-executable extension");
-        }
+    if let Some(ext) = path.extension().and_then(|e| e.to_str())
+        && NON_EXEC_EXTENSIONS.contains(&ext.to_lowercase().as_str())
+    {
+        return Some("ELF magic in non-executable extension");
     }
 
     None

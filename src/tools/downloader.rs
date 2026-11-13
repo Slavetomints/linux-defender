@@ -127,10 +127,10 @@ fn fetch_bytes(url: &str) -> std::result::Result<Vec<u8>, String> {
         .args(["-fsSL", "--max-time", "30", "-o", "-", url])
         .output();
 
-    if let Ok(out) = curl {
-        if out.status.success() {
-            return Ok(out.stdout);
-        }
+    if let Ok(out) = curl
+        && out.status.success()
+    {
+        return Ok(out.stdout);
     }
 
     let wget = Command::new("wget")

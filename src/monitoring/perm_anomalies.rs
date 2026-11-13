@@ -45,10 +45,10 @@ fn load_known_ids(path: &str, field_idx: usize) -> HashSet<u32> {
             continue;
         }
         let fields: Vec<&str> = line.split(':').collect();
-        if let Some(raw) = fields.get(field_idx) {
-            if let Ok(id) = raw.trim().parse::<u32>() {
-                ids.insert(id);
-            }
+        if let Some(raw) = fields.get(field_idx)
+            && let Ok(id) = raw.trim().parse::<u32>()
+        {
+            ids.insert(id);
         }
     }
     ids

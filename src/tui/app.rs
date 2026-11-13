@@ -633,14 +633,19 @@ impl RestoreCredDialog {
 /// Which router phase the configuration dialog is prompting for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RouterDialogStep {
+    /// Phase 1 hardening: rotate admin password, harden SSH, apply control plane firewall.
     Harden,
+    /// Phase 2 console lockdown: disable SSH entirely and terminate active sessions.
     ConsoleLockdown,
 }
 
 /// Modal configuration dialog for Router Phase 1 & Phase 2 operations.
 pub(crate) struct RouterConfigDialog {
+    /// Active router operation step being configured.
     step: RouterDialogStep,
+    /// Input field string values.
     fields: [String; 4],
+    /// Index of the currently focused input field.
     focused: usize,
 }
 
@@ -655,12 +660,13 @@ fn detect_vyos_team_number() -> Option<u8> {
     for word in text.split_whitespace() {
         if let Some(ip) = word.split('/').next() {
             let parts: Vec<&str> = ip.split('.').collect();
-            if parts.len() == 4 && parts[0] == "172" && parts[1] == "31" {
-                if let Ok(octet) = parts[2].parse::<u8>() {
-                    if (21..=40).contains(&octet) {
-                        return Some(octet - 20);
-                    }
-                }
+            if parts.len() == 4
+                && parts[0] == "172"
+                && parts[1] == "31"
+                && let Ok(octet) = parts[2].parse::<u8>()
+                && (21..=40).contains(&octet)
+            {
+                return Some(octet - 20);
             }
         }
     }
@@ -668,6 +674,7 @@ fn detect_vyos_team_number() -> Option<u8> {
 }
 
 impl RouterConfigDialog {
+    /// Create a new modal configuration dialog for the given step with sensible defaults.
     fn new(step: RouterDialogStep) -> Self {
         let fields = match step {
             RouterDialogStep::Harden => {
@@ -695,6 +702,7 @@ impl RouterConfigDialog {
         }
     }
 
+    /// Return the number of input fields used by the current dialog step.
     fn field_count(&self) -> usize {
         match self.step {
             RouterDialogStep::Harden => 4,
@@ -702,6 +710,7 @@ impl RouterConfigDialog {
         }
     }
 
+    /// Return the display label for an input field at `idx`.
     fn field_label(&self, idx: usize) -> &'static str {
         match self.step {
             RouterDialogStep::Harden => match idx {
@@ -719,6 +728,7 @@ impl RouterConfigDialog {
         }
     }
 
+    /// Convert dialog form inputs into a step identifier and CLI arguments.
     fn into_cli_args(self) -> (&'static str, crate::router::CliArgs) {
         match self.step {
             RouterDialogStep::Harden => {

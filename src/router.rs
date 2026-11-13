@@ -176,16 +176,16 @@ pub fn run_script(
         .ok()
         .map(|f| Arc::new(Mutex::new(f)));
 
-    if let Some(ref f) = log_file {
-        if let Ok(mut file) = f.lock() {
-            let _ = writeln!(
-                file,
-                "\n=== [{}] Shell: {} | Args: {:?} ===",
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-                shell,
-                sanitized_args
-            );
-        }
+    if let Some(ref f) = log_file
+        && let Ok(mut file) = f.lock()
+    {
+        let _ = writeln!(
+            file,
+            "\n=== [{}] Shell: {} | Args: {:?} ===",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            shell,
+            sanitized_args
+        );
     }
 
     let mut cmd = Command::new(shell);
@@ -212,12 +212,12 @@ pub fn run_script(
     let stderr_handle = child.stderr.take().map(|stderr| {
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(Result::ok) {
                 ctx_err.progress(&format!("[err] {}", line));
-                if let Some(ref f) = log_file_err {
-                    if let Ok(mut file) = f.lock() {
-                        let _ = writeln!(file, "[err] {}", line);
-                    }
+                if let Some(ref f) = log_file_err
+                    && let Ok(mut file) = f.lock()
+                {
+                    let _ = writeln!(file, "[err] {}", line);
                 }
             }
         })
@@ -225,12 +225,12 @@ pub fn run_script(
 
     if let Some(stdout) = child.stdout.take() {
         let reader = BufReader::new(stdout);
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             ctx.progress(&line);
-            if let Some(ref f) = log_file {
-                if let Ok(mut file) = f.lock() {
-                    let _ = writeln!(file, "{}", line);
-                }
+            if let Some(ref f) = log_file
+                && let Ok(mut file) = f.lock()
+            {
+                let _ = writeln!(file, "{}", line);
             }
         }
     }
@@ -246,19 +246,19 @@ pub fn run_script(
 
     if status.success() {
         ctx.progress("✓ Execution completed successfully.");
-        if let Some(ref f) = log_file {
-            if let Ok(mut file) = f.lock() {
-                let _ = writeln!(file, "=== Status: SUCCESS ===");
-            }
+        if let Some(ref f) = log_file
+            && let Ok(mut file) = f.lock()
+        {
+            let _ = writeln!(file, "=== Status: SUCCESS ===");
         }
         Ok(())
     } else {
         let code = status.code().unwrap_or(-1);
         ctx.progress(&format!("✗ Execution failed with exit code {}.", code));
-        if let Some(ref f) = log_file {
-            if let Ok(mut file) = f.lock() {
-                let _ = writeln!(file, "=== Status: FAILED (exit code: {}) ===", code);
-            }
+        if let Some(ref f) = log_file
+            && let Ok(mut file) = f.lock()
+        {
+            let _ = writeln!(file, "=== Status: FAILED (exit code: {}) ===", code);
         }
         Err(DefenderError::Command(format!(
             "Script failed with exit code {}",

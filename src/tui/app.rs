@@ -683,17 +683,14 @@ impl RouterConfigDialog {
                     .unwrap_or_default();
                 [
                     team_str,
-                    "ChangeMeNowCCDC2026!".into(),
+                    String::new(),
                     "172.17.0.0/24".into(),
                     String::new(),
                 ]
             }
-            RouterDialogStep::ConsoleLockdown => [
-                "ChangeMeNowCCDC2026!".into(),
-                "no".into(),
-                String::new(),
-                String::new(),
-            ],
+            RouterDialogStep::ConsoleLockdown => {
+                [String::new(), "no".into(), String::new(), String::new()]
+            }
         };
         Self {
             step,
@@ -1773,8 +1770,8 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                 RouterDialogStep::ConsoleLockdown => 0,
                             };
                             if dlg.fields[pass_idx].trim().is_empty() {
-                                // Required password is empty
-                                return Ok(());
+                                // Required password is empty; stay on dialog
+                                continue;
                             }
                             let dialog = app.router_config_dialog.take().unwrap();
                             let (step_id, cli_args) = dialog.into_cli_args();

@@ -1,10 +1,10 @@
 [package]
 name = "linux-defender"
-version = "1.0.3"
+version = "1.0.4"
 edition = "2024"
 # Verified in CI by .github/workflows/msrv.yml. Edition 2024 sets a hard floor
 # of 1.85; 1.86 is the oldest version the dependency tree builds and tests on.
-rust-version = "1.86"
+rust-version = "1.88"
 description = "CCDC system hardening, anti-persistence, and backup tooling"
 repository = "https://github.com/UWStout-CCDC/linux-defender"
 license = "MIT"

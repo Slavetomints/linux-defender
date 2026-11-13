@@ -21,6 +21,12 @@ ignore = [
     { id = "RUSTSEC-2026-0367", reason = "we do not call ZipArchive::extract(); manual by_index() extraction with zip-slip guard" },
     { id = "RUSTSEC-2026-0368", reason = "we do not call ZipArchive::extract(); symlink traversal advisory does not apply" },
     { id = "RUSTSEC-2026-0369", reason = "we do not call extract(); permissions-through-symlinks advisory does not apply" },
+
+    # RUSTSEC-2026-0429: ZipArchive::extract() aborts the process on a symlink
+    # entry with a large declared size. Same class as the 0367-0369 advisories:
+    # we extract via by_index() with our own zip-slip guard and never call
+    # extract(), so this does not apply.
+    { id = "RUSTSEC-2026-0429", reason = "we do not call ZipArchive::extract(); manual by_index() extraction, advisory does not apply" },
 ]
 
 [licenses]

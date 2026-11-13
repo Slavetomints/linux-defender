@@ -34,14 +34,14 @@ jobs:
       - name: Build documentation
         run: |
           cargo doc --no-deps --document-private-items
-          echo '<meta http-equiv="refresh" content="0; url=linux_defender/">' > target/doc/index.html
+          echo '<meta http-equiv="refresh" content="0; url=linux_defender/">' > target/x86_64-unknown-linux-musl/doc/index.html
         env:
           RUSTDOCFLAGS: "-D warnings"
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          path: target/doc
+          path: target/x86_64-unknown-linux-musl/doc
 
   deploy:
     name: Deploy to Pages

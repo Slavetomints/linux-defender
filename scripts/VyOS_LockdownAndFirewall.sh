@@ -34,7 +34,7 @@ log_info()  { echo -e "${CYAN}[INFO]${RESET}  $*"; }
 log_ok()    { echo -e "${GREEN}[ OK ]${RESET}  $*"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
 log_error() { echo -e "${RED}[ERR ]${RESET}  $*" >&2; }
-die()       { log_error "$*"; exit 1; }
+die()       { log_error "$*"; builtin exit 1; }
 
 # ─── Defaults & Global State ──────────────────────────────────────────────────
 TEAM=""
@@ -87,7 +87,7 @@ OPTIONS:
   --dry-run               Display commands without applying changes
   -h, --help              Show this help message
 EOF
-    exit "${1:-0}"
+    builtin exit "${1:-0}"
 }
 
 # ─── Parse Arguments ──────────────────────────────────────────────────────────
@@ -188,6 +188,26 @@ if [ -f /opt/vyatta/etc/functions/script-template ]; then
     source /opt/vyatta/etc/functions/script-template
 fi
 
+# VyOS script-template defines an 'exit' shell function that wraps
+# vyatta-cfg-cmd-wrapper end "$@". When called with a numeric argument (e.g. exit 0 or exit 1),
+# VyOS attempts to parse the number as a configuration command, printing
+# "Invalid command: [0]" / "line XXX: 0: command not found" and returning exit status 127.
+# We define vyos_exit_cfg to cleanly exit configuration mode, and wrap exit so numeric arguments
+# invoke bash's builtin exit.
+vyos_exit_cfg() {
+    if declare -f exit >/dev/null 2>&1; then
+        /opt/vyatta/sbin/vyatta-cfg-cmd-wrapper end 2>/dev/null || true
+    fi
+}
+
+exit() {
+    if [ $# -gt 0 ]; then
+        builtin exit "$1"
+    else
+        vyos_exit_cfg
+    fi
+}
+
 # ─── Interactive Wizard ───────────────────────────────────────────────────────
 if [ "$MODE" == "interactive" ]; then
     echo "======================================================================"
@@ -204,7 +224,7 @@ if [ "$MODE" == "interactive" ]; then
         2) MODE="diff" ;;
         3) MODE="harden" ;;
         4) MODE="console-lockdown" ;;
-        *) exit 0 ;;
+        *) builtin exit 0 ;;
     esac
 
     if [ "$MODE" == "harden" ]; then
@@ -261,16 +281,49 @@ if [ "$MODE" == "diff" ]; then
     fi
     TMP_CURRENT=$(mktemp /tmp/vyos_audit_current.XXXXXX)
     log_info "Generating temporary audit snapshot..."
-    "$0" --audit --stdout > "$TMP_CURRENT"
-    log_info "Comparing current state against: $PREV_LOG"
+    "$0" --audit --stdout > "$TMP_CURRENT" 2>/dev/null
+    log_info "Comparing current state against baseline: $PREV_LOG"
     echo "======================================================================"
-    if [ -t 1 ]; then
-        diff -u --color=always "$PREV_LOG" "$TMP_CURRENT" | less -R
+
+    # Run unified diff ignoring ephemeral timestamps and baseline confirmation messages
+    DIFF_OPTS=(-u -I '^[[:space:]]*Timestamp[[:space:]]*:' -I 'Baseline captured:' -I 'Latest symlink' --label "Baseline ($PREV_LOG)" --label "Live Router State")
+
+    # Check if any actual differences exist
+    DIFF_OUTPUT=$(diff "${DIFF_OPTS[@]}" "$PREV_LOG" "$TMP_CURRENT" 2>&1 || true)
+
+    if [ -z "$DIFF_OUTPUT" ]; then
+        echo -e "${GREEN}======================================================================${RESET}"
+        echo -e "${GREEN}[ OK ] CLEAN AUDIT: NO SYSTEM OR CONFIGURATION DRIFT DETECTED!        ${RESET}"
+        echo -e "${GREEN}======================================================================${RESET}"
+        echo "  Baseline Reference : $PREV_LOG"
+        echo "  Live System State  : Verified identical across all 12 audit sections."
+        echo ""
+        echo "  ✓ No unauthorized users in /etc/passwd or VyOS config"
+        echo "  ✓ No rogue SSH keys in ~/.ssh/authorized_keys"
+        echo "  ✓ No unapproved crontabs or systemd timers"
+        echo "  ✓ No boot scripts or commit hooks modified in /config/scripts/"
+        echo "  ✓ No rogue interfaces or VPN tunnels (WireGuard, OpenVPN)"
+        echo "  ✓ No unexpected listening ports or container services"
+        echo "  ✓ No SUID binaries or /etc/ld.so.preload rootkits"
+        echo -e "${GREEN}======================================================================${RESET}"
     else
-        diff -u --color=never "$PREV_LOG" "$TMP_CURRENT"
+        echo -e "${RED}======================================================================${RESET}"
+        echo -e "${RED}[!] SYSTEM DRIFT DETECTED: DIFFERENCES FOUND AGAINST BASELINE!         ${RESET}"
+        echo -e "${RED}======================================================================${RESET}"
+        echo "  Baseline Reference : $PREV_LOG"
+        echo "  Live System State  : Current router configuration & system state"
+        echo ""
+        echo "Key: (-) in baseline but removed | (+) added since baseline"
+        echo "----------------------------------------------------------------------"
+        if [ -t 1 ]; then
+            diff "${DIFF_OPTS[@]}" --color=always "$PREV_LOG" "$TMP_CURRENT" | less -R
+        else
+            diff "${DIFF_OPTS[@]}" --color=never "$PREV_LOG" "$TMP_CURRENT"
+        fi
+        echo -e "${RED}======================================================================${RESET}"
     fi
     rm -f "$TMP_CURRENT"
-    exit 0
+    builtin exit 0
 fi
 
 # ==============================================================================
@@ -286,6 +339,7 @@ if [ "$MODE" == "audit" ]; then
         mkdir -p "$BASELINE_DIR"
         log_ok "Running VyOS Forensic & Persistence Audit..."
         log_ok "Saving baseline report to: ${OUTPUT_FILE}"
+        exec 3>&1
         exec > >(tee "${OUTPUT_FILE}")
     fi
 
@@ -389,11 +443,12 @@ if [ "$MODE" == "audit" ]; then
     echo "          FORENSIC AUDIT COMPLETE"
     echo "======================================================================"
     if [ "$STDOUT_ONLY" = false ]; then
+        exec 1>&3 3>&-
         ln -sf "${OUTPUT_FILE}" "${LATEST_LINK}"
         log_ok "Baseline captured: ${OUTPUT_FILE}"
         log_ok "Latest symlink   : ${LATEST_LINK}"
     fi
-    exit 0
+    builtin exit 0
 fi
 
 # ==============================================================================
@@ -407,7 +462,7 @@ if [ "$MODE" == "console-lockdown" ]; then
             echo "    This will immediately sever your connection and lock you out."
             echo "    Switch to the VMware Console to execute this mode safely."
             echo "    (If you are 100% sure, pass --force to override this safety check)."
-            exit 1
+            builtin exit 1
         fi
     fi
 
@@ -443,7 +498,7 @@ if [ "$MODE" == "console-lockdown" ]; then
 
     if [ "$DRY_RUN" = true ]; then
         log_ok "Dry run enabled. Halting before configuration commit."
-        exit 0
+        builtin exit 0
     fi
 
     configure
@@ -487,7 +542,7 @@ if [ "$MODE" == "console-lockdown" ]; then
 
     commit
     save
-    exit
+    vyos_exit_cfg
 
     log_info "Terminating lingering sshd and dropbear daemons..."
     killall -9 sshd 2>/dev/null || true
@@ -499,7 +554,7 @@ if [ "$MODE" == "console-lockdown" ]; then
     log_ok "Default user '$ADMIN_USER' password updated."
     log_ok "Scored transit traffic continues forwarding normally."
     echo "======================================================================"
-    exit 0
+    builtin exit 0
 fi
 
 # ==============================================================================
@@ -554,7 +609,7 @@ if [ "$MODE" == "harden" ]; then
 
     if [ "$DRY_RUN" = true ]; then
         log_ok "Dry run enabled. Exiting before configuration modifications."
-        exit 0
+        builtin exit 0
     fi
 
     # 2. Enter configuration mode
@@ -654,7 +709,7 @@ if [ "$MODE" == "harden" ]; then
         echo -e "${RED}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${RESET}"
         commit
         save
-        exit
+        vyos_exit_cfg
         log_ok "Configuration committed and saved permanently."
     else
         log_info "Step 7: Applying configuration with ${COMMIT_TIMEOUT}-minute failsafe rollback..."
@@ -673,7 +728,7 @@ if [ "$MODE" == "harden" ]; then
         echo "    4. If login fails or you lose access, DO NOTHING!"
         echo "       VyOS will automatically roll back after ${COMMIT_TIMEOUT} minutes."
         echo "----------------------------------------------------------------------"
-        exit
+        vyos_exit_cfg
     fi
-    exit 0
+    builtin exit 0
 fi

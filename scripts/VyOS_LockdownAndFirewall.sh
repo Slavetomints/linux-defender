@@ -188,25 +188,16 @@ if [ -f /opt/vyatta/etc/functions/script-template ]; then
     source /opt/vyatta/etc/functions/script-template
 fi
 
-# VyOS script-template defines an 'exit' shell function that wraps
+# VyOS script-template defines an 'exit' shell function or alias that wraps
 # vyatta-cfg-cmd-wrapper end "$@". When called with a numeric argument (e.g. exit 0 or exit 1),
 # VyOS attempts to parse the number as a configuration command, printing
 # "Invalid command: [0]" / "line XXX: 0: command not found" and returning exit status 127.
-# We define vyos_exit_cfg to cleanly exit configuration mode, and wrap exit so numeric arguments
-# invoke bash's builtin exit.
+# We define vyos_exit_cfg to cleanly exit configuration mode, unalias exit, and use
+# bash's builtin exit for process termination.
 vyos_exit_cfg() {
-    if declare -f exit >/dev/null 2>&1; then
-        /opt/vyatta/sbin/vyatta-cfg-cmd-wrapper end 2>/dev/null || true
-    fi
+    /opt/vyatta/sbin/vyatta-cfg-cmd-wrapper end 2>/dev/null || true
 }
-
-exit() {
-    if [ $# -gt 0 ]; then
-        builtin exit "$1"
-    else
-        vyos_exit_cfg
-    fi
-}
+unalias exit 2>/dev/null || true
 
 # ─── Interactive Wizard ───────────────────────────────────────────────────────
 if [ "$MODE" == "interactive" ]; then

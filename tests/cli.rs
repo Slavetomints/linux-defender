@@ -148,3 +148,29 @@ fn a_failing_module_does_not_abort_the_run() {
     assert!(out.status.success(), "run should survive a module failure");
     assert!(stdout(&out).contains("prompt_command module complete"));
 }
+
+#[test]
+fn router_confirm_flag_is_accepted_and_maps_to_confirm_mode() {
+    let dir = TempDir::new().unwrap();
+    let out = run_in(dir.path(), &["router", "--confirm", "--dry-run"]);
+
+    assert!(
+        out.status.success(),
+        "router --confirm --dry-run should succeed"
+    );
+    let text = stdout(&out);
+    assert!(
+        text.contains("--confirm"),
+        "stdout should show script execution with --confirm, got: {}",
+        text
+    );
+    assert!(
+        text.contains("Dry run enabled"),
+        "script in --confirm --dry-run should report dry run enabled, got: {}",
+        text
+    );
+
+    let out_help = run_in(dir.path(), &["router", "--help"]);
+    assert!(out_help.status.success());
+    assert!(stdout(&out_help).contains("--confirm"));
+}

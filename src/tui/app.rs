@@ -749,7 +749,6 @@ impl RouterConfigDialog {
                         pass: Some(pass),
                         mgmt_subnet: Some(mgmt),
                         ssh_key,
-                        no_confirm: true,
                         ..Default::default()
                     },
                 )
@@ -904,6 +903,21 @@ pub struct App {
     router_progress_rx: Receiver<String>,
     /// Modal dialog for collecting Phase 1/2 router credentials.
     pub(crate) router_config_dialog: Option<RouterConfigDialog>,
+    /// Active pending commit-confirm state on the router, if any.
+    pub(crate) router_pending_confirm: Option<RouterPendingConfirm>,
+    /// Step ID of the currently active router background run.
+    pub(crate) router_active_step: Option<&'static str>,
+    /// CliArgs of the currently active router background run.
+    pub(crate) router_active_args: Option<crate::router::CliArgs>,
+}
+
+/// State for tracking a pending VyOS commit-confirm rollback window.
+#[derive(Debug, Clone)]
+pub(crate) struct RouterPendingConfirm {
+    /// Instant when the commit-confirm will automatically roll back if not confirmed.
+    pub(crate) deadline: Instant,
+    /// Whether the confirmation modal dialog is currently visible.
+    pub(crate) modal_open: bool,
 }
 
 impl App {
@@ -1005,6 +1019,9 @@ impl App {
             router_progress_tx,
             router_progress_rx,
             router_config_dialog: None,
+            router_pending_confirm: None,
+            router_active_step: None,
+            router_active_args: None,
         }
     }
 
@@ -1111,13 +1128,29 @@ impl App {
                 self.restore_log.push(strip_ansi(&p));
             }
         }
-        // Drain router progress: empty string = done, non-empty = log line.
+        // Drain router progress: sentinels = done, non-empty = log line.
         while let Ok(p) = self.router_progress_rx.try_recv() {
-            if p.is_empty() {
+            if p == crate::router::ROUTER_PROGRESS_DONE_OK {
                 self.router_running = false;
+                self.handle_router_completion(true);
+            } else if p == crate::router::ROUTER_PROGRESS_DONE_ERROR {
+                self.router_running = false;
+                self.handle_router_completion(false);
+            } else if p.is_empty() {
+                self.router_running = false;
+                self.handle_router_completion(true);
             } else {
                 self.router_log.push(p);
             }
+        }
+        if let Some(ref pending) = self.router_pending_confirm
+            && crate::router::is_pending_expired(Instant::now(), pending.deadline)
+        {
+            self.router_pending_confirm = None;
+            self.router_log.push(
+                "✗ Commit-confirm deadline expired! VyOS has rolled back the changes. Phase 1 must be run again."
+                    .to_string(),
+            );
         }
         // Drain completed auto-scan threads.
         while let Ok(id) = self.auto_scan_done_rx.try_recv() {
@@ -1439,42 +1472,90 @@ impl App {
         if self.router_running {
             return;
         }
+        if self.router_pending_confirm.is_some()
+            && (step_id == "harden" || step_id == "console_lockdown")
+        {
+            self.router_log.push(
+                "[WARN] Cannot start Phase 1 or Phase 2 while confirmation is pending.".to_string(),
+            );
+            return;
+        }
         self.router_running = true;
-        let label = crate::router::ROUTER_STEPS
-            .iter()
-            .find(|s| s.id == step_id)
-            .map(|s| s.label)
-            .unwrap_or(step_id);
+        let label = match step_id {
+            "confirm" => "Confirm Changes (confirm + save)",
+            other => crate::router::ROUTER_STEPS
+                .iter()
+                .find(|s| s.id == other)
+                .map(|s| s.label)
+                .unwrap_or(other),
+        };
 
         self.router_log = vec![format!("Starting: {}…", label)];
         self.router_log_scroll = 0;
 
         let progress_tx = self.router_progress_tx.clone();
+        let args = custom_args.unwrap_or_else(|| crate::router::CliArgs {
+            audit: step_id == "audit",
+            diff: if step_id == "diff" { Some(None) } else { None },
+            harden: step_id == "harden",
+            console_lockdown: step_id == "console_lockdown",
+            confirm: step_id == "confirm",
+            interactive: false,
+            team: None,
+            mgmt_subnet: None,
+            user: None,
+            pass: None,
+            ssh_key: None,
+            commit_timeout: None,
+            no_confirm: false,
+            force: false,
+            dry_run: false,
+        });
+
+        self.router_active_step = Some(step_id);
+        self.router_active_args = Some(args.clone());
 
         std::thread::spawn(move || {
             let report = PathBuf::from("/tmp/defender-router.log");
             let ctx = DefenderContext::new(report, false).with_progress(progress_tx.clone());
-            let args = custom_args.unwrap_or_else(|| crate::router::CliArgs {
-                audit: step_id == "audit",
-                diff: if step_id == "diff" { Some(None) } else { None },
-                harden: step_id == "harden",
-                console_lockdown: step_id == "console_lockdown",
-                interactive: false,
-                team: None,
-                mgmt_subnet: None,
-                user: None,
-                pass: None,
-                ssh_key: None,
-                commit_timeout: None,
-                no_confirm: step_id == "harden",
-                force: false,
-                dry_run: false,
-            });
             if let Err(e) = crate::router::run(&ctx, &args) {
                 let _ = progress_tx.send(format!("ERROR: {}", e));
+                let _ = progress_tx.send(crate::router::ROUTER_PROGRESS_DONE_ERROR.to_string());
+            } else {
+                let _ = progress_tx.send(crate::router::ROUTER_PROGRESS_DONE_OK.to_string());
             }
-            let _ = progress_tx.send(String::new()); // signal done
         });
+    }
+
+    /// Handle completion of a background router operation.
+    fn handle_router_completion(&mut self, success: bool) {
+        let step_id = self.router_active_step.take();
+        let args = self.router_active_args.take();
+
+        if let Some(id) = step_id {
+            if crate::router::should_enter_pending_state(
+                id,
+                args.as_ref().is_some_and(|a| a.no_confirm),
+                success,
+            ) {
+                let timeout_mins = args
+                    .as_ref()
+                    .and_then(|a| a.commit_timeout)
+                    .unwrap_or(crate::router::DEFAULT_COMMIT_TIMEOUT_MINUTES);
+                let duration = Duration::from_secs(u64::from(timeout_mins) * 60);
+                let deadline = Instant::now() + duration;
+                self.router_pending_confirm = Some(RouterPendingConfirm {
+                    deadline,
+                    modal_open: true,
+                });
+            } else if id == "confirm" && success {
+                self.router_pending_confirm = None;
+                self.router_log
+                    .push("✓ VyOS configuration confirmed and saved permanently.".to_string());
+                // When confirm fails, keep the pending state so the operator can retry.
+                // The error line is already recorded in router_log.
+            }
+        }
     }
 
     /// Export the current findings as a timestamped IR report.
@@ -1793,6 +1874,30 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                 continue;
             }
 
+            if let Some(ref mut pending) = app.router_pending_confirm
+                && pending.modal_open
+            {
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        if !app.router_running {
+                            pending.modal_open = false;
+                            app.start_router(
+                                "confirm",
+                                Some(crate::router::CliArgs {
+                                    confirm: true,
+                                    ..Default::default()
+                                }),
+                            );
+                        }
+                    }
+                    KeyCode::Esc => {
+                        pending.modal_open = false;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
             match key.code {
                 KeyCode::Char('q') => break,
                 KeyCode::Char(d @ '1'..='9') => {
@@ -1953,6 +2058,15 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                         }
                     } else if app.tab == Tab::Router && !app.router_running {
                         let step_id = crate::router::ROUTER_STEPS[app.router_cursor].id;
+                        if app.router_pending_confirm.is_some()
+                            && (step_id == "harden" || step_id == "console_lockdown")
+                        {
+                            app.router_log.push(
+                                "[WARN] Cannot start Phase 1 or Phase 2 while confirmation is pending. Press 'c' to confirm or wait for rollback."
+                                    .to_string(),
+                            );
+                            continue;
+                        }
                         match step_id {
                             "harden" => {
                                 app.router_config_dialog =
@@ -2057,6 +2171,13 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                         // Jump straight to Backups and queue an --all run
                         app.tab = Tab::Backups;
                         app.start_backup("all");
+                    }
+                }
+                KeyCode::Char('c') => {
+                    if app.tab == Tab::Router
+                        && let Some(ref mut pending) = app.router_pending_confirm
+                    {
+                        pending.modal_open = true;
                     }
                 }
                 KeyCode::Char('e') => {
@@ -2274,6 +2395,13 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
         render_router_config_dialog(f, size, dlg);
     }
 
+    // Router pending confirmation modal renders on top of the router tab.
+    if let Some(ref pending) = app.router_pending_confirm
+        && pending.modal_open
+    {
+        render_router_confirm_modal(f, size, pending);
+    }
+
     // User input modal renders on top of everything.
     if app.user_input_active {
         render_user_input_modal(f, size, &app.user_input_buf);
@@ -2436,6 +2564,20 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
         ));
     }
 
+    // router pending confirmation indicator
+    if let Some(ref pending) = app.router_pending_confirm {
+        let remaining = pending
+            .deadline
+            .saturating_duration_since(Instant::now())
+            .as_secs();
+        let countdown = crate::router::format_countdown(remaining);
+        left.push(Span::styled("  │  ", Style::default().fg(sep_color)));
+        left.push(Span::styled(
+            format!("⚠ PENDING CONFIRM ({})", countdown),
+            Style::default().fg(warn_color).add_modifier(Modifier::BOLD),
+        ));
+    }
+
     // ── RIGHT: context keybinds ──────────────────────────────────────────────
     let mut right: Vec<Span> = Vec::new();
 
@@ -2520,6 +2662,9 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
             } else {
                 right.extend(kb("↑↓", "select", key_color));
                 right.extend(kb("Enter", "run operation", key_color));
+            }
+            if app.router_pending_confirm.is_some() {
+                right.extend(kb("c", "confirm dialog", Color::Yellow));
             }
             right.extend(kb("PgUp/PgDn", "scroll", key_color));
         }
@@ -3723,6 +3868,102 @@ fn render_router_config_dialog(f: &mut ratatui::Frame, area: Rect, dlg: &RouterC
     );
 }
 
+/// Render the commit-confirm pending modal dialog.
+fn render_router_confirm_modal(f: &mut ratatui::Frame, area: Rect, pending: &RouterPendingConfirm) {
+    use crate::wizards::modal_popup;
+
+    let remaining_secs = pending
+        .deadline
+        .saturating_duration_since(Instant::now())
+        .as_secs();
+    let countdown = crate::router::format_countdown(remaining_secs);
+
+    let title = format!(" VyOS Confirmation Required [Rollback in {}] ", countdown);
+    let inner = modal_popup(f, area, 65, 55, &title);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // Warning banner
+            Constraint::Length(5), // Verification instructions
+            Constraint::Length(3), // Countdown box
+            Constraint::Min(1),    // Spacing
+            Constraint::Length(2), // Action keys hint
+        ])
+        .split(inner);
+
+    let warning_lines = vec![
+        Line::from(vec![
+            Span::styled(
+                "⚠ WARNING: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Phase 1 changes are applied, but "),
+            Span::styled(
+                "NOT permanent!",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from("VyOS will automatically roll back to previous settings unless confirmed."),
+    ];
+    f.render_widget(Paragraph::new(warning_lines), chunks[0]);
+
+    let instructions = vec![
+        Line::from(Span::styled(
+            "Verification steps:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  1. Open a separate terminal window now."),
+        Line::from("  2. Verify you can SSH into the router with the NEW password:"),
+        Line::from(Span::styled(
+            "     ssh vyos@172.17.0.1",
+            Style::default().fg(Color::Cyan),
+        )),
+        Line::from("  3. Only confirm if login succeeds and access is verified!"),
+    ];
+    f.render_widget(Paragraph::new(instructions), chunks[1]);
+
+    let timer_color = if remaining_secs < 60 {
+        Color::Red
+    } else {
+        Color::Yellow
+    };
+    let timer_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(timer_color))
+        .title(" Rollback Timer ");
+    let timer_text = vec![Line::from(vec![
+        Span::raw(" Time Remaining: "),
+        Span::styled(
+            format!("{} (mm:ss)", countdown),
+            Style::default()
+                .fg(timer_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
+    f.render_widget(Paragraph::new(timer_text).block(timer_block), chunks[2]);
+
+    let hint = Line::from(vec![
+        Span::styled(
+            "[y] ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("keep changes (confirm + save)   "),
+        Span::styled(
+            "[Esc] ",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("hide dialog"),
+    ]);
+    f.render_widget(Paragraph::new(hint), chunks[4]);
+}
+
 /// Render the Router tab: operations list on the left, output log on the right.
 fn render_router(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let cols = Layout::default()
@@ -3732,11 +3973,24 @@ fn render_router(f: &mut ratatui::Frame, area: Rect, app: &App) {
 
     let (list_title, list_border) = if app.router_running {
         (
-            " VyOS Operations — running… ",
+            " VyOS Operations — running… ".to_string(),
+            Style::default().fg(Color::Yellow),
+        )
+    } else if let Some(ref pending) = app.router_pending_confirm {
+        let remaining = pending
+            .deadline
+            .saturating_duration_since(Instant::now())
+            .as_secs();
+        let countdown = crate::router::format_countdown(remaining);
+        (
+            format!(" VyOS Operations [⚠ PENDING: {} — press 'c'] ", countdown),
             Style::default().fg(Color::Yellow),
         )
     } else {
-        (" VyOS Operations ", Style::default().fg(Color::Cyan))
+        (
+            " VyOS Operations ".to_string(),
+            Style::default().fg(Color::Cyan),
+        )
     };
 
     let items: Vec<ListItem> = crate::router::ROUTER_STEPS
@@ -3746,6 +4000,13 @@ fn render_router(f: &mut ratatui::Frame, area: Rect, app: &App) {
             let is_cursor = i == app.router_cursor;
             let running_tag = if app.router_running && is_cursor {
                 " ↻"
+            } else {
+                ""
+            };
+            let blocked_tag = if app.router_pending_confirm.is_some()
+                && (step.id == "harden" || step.id == "console_lockdown")
+            {
+                " [BLOCKED - pending confirmation]"
             } else {
                 ""
             };
@@ -3763,8 +4024,12 @@ fn render_router(f: &mut ratatui::Frame, area: Rect, app: &App) {
                     style,
                 )),
                 Line::from(Span::styled(
-                    format!("    {}", step.description),
-                    Style::default().fg(Color::DarkGray),
+                    format!("    {}{}", step.description, blocked_tag),
+                    if blocked_tag.is_empty() {
+                        Style::default().fg(Color::DarkGray)
+                    } else {
+                        Style::default().fg(Color::Yellow)
+                    },
                 )),
             ])
         })
@@ -3773,7 +4038,7 @@ fn render_router(f: &mut ratatui::Frame, area: Rect, app: &App) {
     f.render_widget(
         List::new(items).block(
             Block::default()
-                .title(list_title)
+                .title(list_title.as_str())
                 .borders(Borders::ALL)
                 .border_style(list_border),
         ),

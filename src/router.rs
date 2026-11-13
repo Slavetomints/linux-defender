@@ -48,8 +48,51 @@ pub const ROUTER_STEPS: &[RouterStepDef] = &[
     },
 ];
 
+/// Default commit-confirm rollback timeout in minutes when none is explicitly specified.
+pub const DEFAULT_COMMIT_TIMEOUT_MINUTES: u32 = 5;
+
+/// Progress channel sentinel indicating a router operation completed successfully.
+pub const ROUTER_PROGRESS_DONE_OK: &str = "__ROUTER_DONE_OK__";
+
+/// Progress channel sentinel indicating a router operation completed with an error.
+pub const ROUTER_PROGRESS_DONE_ERROR: &str = "__ROUTER_DONE_ERROR__";
+
+/// Format a remaining duration in seconds as an `mm:ss` countdown string.
+///
+/// # Examples
+/// ```
+/// use linux_defender::router::format_countdown;
+/// assert_eq!(format_countdown(299), "04:59");
+/// assert_eq!(format_countdown(0), "00:00");
+/// ```
+pub fn format_countdown(seconds: u64) -> String {
+    let minutes = seconds / 60;
+    let secs = seconds % 60;
+    format!("{:02}:{:02}", minutes, secs)
+}
+
+/// Check whether a pending confirmation deadline has expired given the current instant.
+pub fn is_pending_expired(now: std::time::Instant, deadline: std::time::Instant) -> bool {
+    now >= deadline
+}
+
+/// Calculate remaining duration before a deadline, returning zero duration if already passed.
+pub fn remaining_time(
+    now: std::time::Instant,
+    deadline: std::time::Instant,
+) -> std::time::Duration {
+    deadline.saturating_duration_since(now)
+}
+
+/// Determine whether a completed router operation should transition into pending-confirmation state.
+///
+/// Only a successful Phase 1 harden run without `--no-confirm` enters pending confirmation.
+pub fn should_enter_pending_state(step_id: &str, no_confirm: bool, success: bool) -> bool {
+    step_id == "harden" && !no_confirm && success
+}
+
 /// Command-line arguments for router mode.
-#[derive(Args, Debug, Default)]
+#[derive(Args, Debug, Default, Clone)]
 #[command(arg_required_else_help = true)]
 pub struct CliArgs {
     /// Run non-destructive forensic audit and capture baseline
@@ -67,6 +110,10 @@ pub struct CliArgs {
     /// Phase 2: Pull SSH from vyos (Console-Only Administration)
     #[arg(long)]
     pub console_lockdown: bool,
+
+    /// Confirm and save pending commit-confirm changes
+    #[arg(long)]
+    pub confirm: bool,
 
     /// Interactive configuration wizard
     #[arg(long)]
@@ -267,11 +314,13 @@ pub fn run_script(
     }
 }
 
-/// Run router commands based on CLI flags.
-pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
+/// Build the list of command-line arguments to pass to the VyOS shell script.
+pub fn build_script_args(args: &CliArgs) -> Vec<String> {
     let mut script_args: Vec<String> = Vec::new();
 
-    if args.audit {
+    if args.confirm {
+        script_args.push("--confirm".into());
+    } else if args.audit {
         script_args.push("--audit".into());
     } else if let Some(ref diff_opt) = args.diff {
         script_args.push("--diff".into());
@@ -298,11 +347,6 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
         script_args.push("--user".into());
         script_args.push(u.clone());
     }
-    let mut env_vars: Vec<(&str, &str)> = Vec::new();
-
-    if let Some(ref p) = args.pass {
-        env_vars.push(("DEFENDER_ADMIN_PASS", p.as_str()));
-    }
     if let Some(ref k) = args.ssh_key {
         script_args.push("--ssh-key".into());
         script_args.push(k.clone());
@@ -319,6 +363,18 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
     }
     if args.dry_run {
         script_args.push("--dry-run".into());
+    }
+
+    script_args
+}
+
+/// Run router commands based on CLI flags.
+pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
+    let script_args = build_script_args(args);
+    let mut env_vars: Vec<(&str, &str)> = Vec::new();
+
+    if let Some(ref p) = args.pass {
+        env_vars.push(("DEFENDER_ADMIN_PASS", p.as_str()));
     }
 
     let str_args: Vec<&str> = script_args.iter().map(|s| s.as_str()).collect();

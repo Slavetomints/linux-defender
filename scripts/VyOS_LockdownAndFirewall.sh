@@ -8,6 +8,7 @@
 #   ./VyOS_LockdownAndFirewall.sh --diff [/etc/linux-defender/baseline/latest.log]
 #   ./VyOS_LockdownAndFirewall.sh --team 5 --harden [--pass <secret>] [--ssh-key '<key>']
 #   ./VyOS_LockdownAndFirewall.sh --console-lockdown
+#   ./VyOS_LockdownAndFirewall.sh --confirm
 #   ./VyOS_LockdownAndFirewall.sh --interactive
 # ==============================================================================
 
@@ -73,6 +74,7 @@ MODES:
   --diff [log_file]       Diff current state against previous baseline
   --harden                Phase 1: Rotate vyos password, harden SSH, apply firewall
   --console-lockdown      Phase 2: Pull SSH from vyos (Console-Only Administration)
+  --confirm               Confirm and save pending commit-confirm changes
   --interactive           Interactive configuration wizard
 
 OPTIONS:
@@ -117,6 +119,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --console-lockdown)
             MODE="console-lockdown"
+            shift
+            ;;
+        --confirm)
+            MODE="confirm"
             shift
             ;;
         --interactive)
@@ -527,6 +533,40 @@ if [ "$MODE" == "console-lockdown" ]; then
 fi
 
 # ==============================================================================
+# MODE: CONFIRM PENDING COMMIT-CONFIRM CHANGES
+# ==============================================================================
+if [ "$MODE" == "confirm" ]; then
+    echo "======================================================================"
+    echo "          VyOS CONFIRM & SAVE PENDING CONFIGURATION"
+    echo "======================================================================"
+    if [ "$DRY_RUN" = true ]; then
+        log_ok "Dry run enabled. Exiting before configuration confirmation."
+        builtin exit 0
+    fi
+
+    log_info "Entering VyOS configuration mode to confirm changes..."
+    configure
+
+    log_info "Confirming commit..."
+    if ! confirm; then
+        vyos_exit_cfg
+        log_error "Failed to confirm VyOS configuration. Commit-confirm timer may have expired or no commit pending."
+        builtin exit 1
+    fi
+
+    log_info "Saving configuration..."
+    if ! save; then
+        vyos_exit_cfg
+        log_error "Failed to save VyOS configuration."
+        builtin exit 1
+    fi
+
+    vyos_exit_cfg
+    log_ok "VyOS configuration confirmed and saved permanently."
+    builtin exit 0
+fi
+
+# ==============================================================================
 # MODE: PHASE 1 HARDENING & SSH SECURING
 # ==============================================================================
 if [ "$MODE" == "harden" ]; then
@@ -661,20 +701,25 @@ if [ "$MODE" == "harden" ]; then
         log_ok "Configuration committed and saved permanently."
     else
         log_info "Step 7: Applying configuration with ${COMMIT_TIMEOUT}-minute failsafe rollback..."
-        commit-confirm "$COMMIT_TIMEOUT"
+        if ! printf 'y\n' | commit-confirm "$COMMIT_TIMEOUT"; then
+            vyos_exit_cfg
+            log_error "commit-confirm failed! Rollback will not be initiated."
+            builtin exit 1
+        fi
         echo ""
         log_ok "Changes applied with commit-confirm ${COMMIT_TIMEOUT}!"
         echo "----------------------------------------------------------------------"
-        echo -e "${YELLOW}[!] CRITICAL VERIFICATION STEP:${RESET}"
-        echo "    1. Open a NEW separate terminal window."
-        echo "    2. Verify SSH login with the NEW password:"
+        echo -e "${YELLOW}[!] COMMIT PENDING CONFIRMATION:${RESET}"
+        echo "    The changes are active but NOT permanent."
+        echo "    Rollback timer: ${COMMIT_TIMEOUT} minutes remaining."
+        echo ""
+        echo "    1. Open a separate terminal window to verify access."
+        echo "    2. Verify SSH login with the new password:"
         echo "       ssh ${ADMIN_USER}@172.17.0.1"
-        echo "    3. If login succeeds, return to this session and run:"
-        echo "       confirm"
-        echo "       save"
-        echo "       exit"
-        echo "    4. If login fails or you lose access, DO NOTHING!"
-        echo "       VyOS will automatically roll back after ${COMMIT_TIMEOUT} minutes."
+        echo "    3. Confirm and save changes from the Router tab in the TUI,"
+        echo "       or run: router --confirm"
+        echo "    4. If login fails or access is lost, DO NOTHING!"
+        echo "       VyOS will automatically roll back all changes after ${COMMIT_TIMEOUT} minutes."
         echo "----------------------------------------------------------------------"
         vyos_exit_cfg
     fi

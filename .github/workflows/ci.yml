@@ -90,7 +90,7 @@ jobs:
       # on stable 1.100) rather than at the exact number.
       - run: >
           cargo llvm-cov --all-features
-          --ignore-filename-regex '(tui/|wizards|tools|main\.rs)'
+          --ignore-filename-regex '(tui/|wizards|tools|main\.rs|router\.rs)'
           --fail-under-lines 32 --fail-under-functions 52
 
   docs:

@@ -212,7 +212,7 @@ pub fn run_script(
     let stderr_handle = child.stderr.take().map(|stderr| {
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
-            for line in reader.lines().map_while(Result::ok) {
+            for line in reader.lines().map_while(std::result::Result::ok) {
                 ctx_err.progress(&format!("[err] {}", line));
                 if let Some(ref f) = log_file_err
                     && let Ok(mut file) = f.lock()
@@ -225,7 +225,7 @@ pub fn run_script(
 
     if let Some(stdout) = child.stdout.take() {
         let reader = BufReader::new(stdout);
-        for line in reader.lines().map_while(Result::ok) {
+        for line in reader.lines().map_while(std::result::Result::ok) {
             ctx.progress(&line);
             if let Some(ref f) = log_file
                 && let Ok(mut file) = f.lock()

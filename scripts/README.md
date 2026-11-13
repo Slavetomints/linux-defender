@@ -20,7 +20,7 @@ Installs the Splunk Universal Forwarder and configures it to forward logs to a t
 
 ## VyOS_LockdownAndFirewall.sh
 
-Consolidated CCDC VyOS defense, hardening, and forensic audit script (VyOS 1.4.0 Sagitta default with 1.3 Equuleus fallback).
+Consolidated CCDC VyOS defense, hardening, and forensic audit script (VyOS 1.4.0 Sagitta or newer).
 Features:
 - `--audit`: 12-section non-destructive forensic persistence audit and baseline capture.
 - `--diff <baseline>`: Compares current system state against a previous audit baseline.

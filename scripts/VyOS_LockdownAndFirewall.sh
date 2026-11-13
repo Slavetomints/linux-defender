@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # VyOS_LockdownAndFirewall.sh - Consolidated CCDC VyOS Defense & Audit Engine
-# Target: VyOS 1.4.x (Sagitta) Default / Backwards-compatible with 1.3.x (Equuleus)
+# Target: VyOS 1.4.x (Sagitta) or newer
 #
 # Usage:
 #   ./VyOS_LockdownAndFirewall.sh --audit
@@ -243,21 +243,9 @@ if [ -n "$TEAM" ]; then
     log_info "Team $TEAM Subnets: WAN Router=${WAN_ROUTER_IP}, Core Gateway=${CORE_GATEWAY_IP}, Public Pool=${PUBLIC_POOL}"
 fi
 
-# ─── Version Detection ────────────────────────────────────────────────────────
+# ─── Version Information ──────────────────────────────────────────────────────
 RAW_VER=$(run_op show version 2>/dev/null | grep -i "^Version:" | sed 's/Version:[[:space:]]*//')
 RELEASE_TRAIN=$(run_op show version 2>/dev/null | grep -i "Release train:" | awk '{print $3}')
-
-if [[ "$RAW_VER" =~ 1\.4 ]] || [[ "$RELEASE_TRAIN" =~ sagitta ]] || [[ "$RAW_VER" =~ 1\.5 ]] || [[ "$RELEASE_TRAIN" =~ circinus ]] || [[ "$RELEASE_TRAIN" =~ current ]]; then
-    VYOS_MAJOR="1.4"
-elif [[ "$RAW_VER" =~ 1\.3 ]] || [[ "$RELEASE_TRAIN" =~ equuleus ]]; then
-    VYOS_MAJOR="1.3"
-else
-    if [ -d /opt/vyatta/share/vyatta-cfg/templates/firewall/ipv4 ] || [ -d /usr/share/vyos/templates/firewall/ipv4 ]; then
-        VYOS_MAJOR="1.4"
-    else
-        VYOS_MAJOR="1.3"
-    fi
-fi
 
 # ==============================================================================
 # MODE: DIFF AGAINST BASELINE
@@ -339,7 +327,7 @@ if [ "$MODE" == "audit" ]; then
     echo "  Timestamp : $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
     echo "  Hostname  : $(hostname)"
     echo "  Kernel    : $(uname -a)"
-    echo "  Branch    : VyOS $VYOS_MAJOR [$RAW_VER]"
+    echo "  Branch    : ${RELEASE_TRAIN:-sagitta} [${RAW_VER:-unknown}]"
     echo "======================================================================"
 
     echo -e "\n[+] SECTION 1: System Version & Identity"
@@ -504,32 +492,22 @@ if [ "$MODE" == "console-lockdown" ]; then
     delete system task-scheduler 2>/dev/null || true
 
     log_info "Applying control-plane firewall to block inbound SSH..."
-    if [ "$VYOS_MAJOR" == "1.4" ]; then
-        set firewall ipv4 input filter default-action drop
+    set firewall ipv4 input filter default-action drop
 
-        set firewall ipv4 input filter rule 5 action accept
-        set firewall ipv4 input filter rule 5 description 'Allow loopback'
-        set firewall ipv4 input filter rule 5 inbound-interface name 'lo'
+    set firewall ipv4 input filter rule 5 action accept
+    set firewall ipv4 input filter rule 5 description 'Allow loopback'
+    set firewall ipv4 input filter rule 5 inbound-interface name 'lo'
 
-        set firewall ipv4 input filter rule 10 action accept
-        set firewall ipv4 input filter rule 10 description 'Allow established/related'
-        set firewall ipv4 input filter rule 10 state established
-        set firewall ipv4 input filter rule 10 state related
+    set firewall ipv4 input filter rule 10 action accept
+    set firewall ipv4 input filter rule 10 description 'Allow established/related'
+    set firewall ipv4 input filter rule 10 state established
+    set firewall ipv4 input filter rule 10 state related
 
-        set firewall ipv4 input filter rule 20 action accept
-        set firewall ipv4 input filter rule 20 description 'Allow ICMP'
-        set firewall ipv4 input filter rule 20 protocol icmp
+    set firewall ipv4 input filter rule 20 action accept
+    set firewall ipv4 input filter rule 20 description 'Allow ICMP'
+    set firewall ipv4 input filter rule 20 protocol icmp
 
-        set firewall ipv4 forward filter default-action accept
-    else
-        set firewall name VYOS_LOCAL_IN default-action drop
-        set firewall name VYOS_LOCAL_IN rule 10 action accept
-        set firewall name VYOS_LOCAL_IN rule 10 state established enable
-        set firewall name VYOS_LOCAL_IN rule 10 state related enable
-
-        set firewall name VYOS_LOCAL_IN rule 20 action accept
-        set firewall name VYOS_LOCAL_IN rule 20 protocol icmp
-    fi
+    set firewall ipv4 forward filter default-action accept
 
     commit
     save
@@ -612,15 +590,10 @@ if [ "$MODE" == "harden" ]; then
 
     # Configuration management
     set system config-management commit-revisions 100
-    if [ "$VYOS_MAJOR" == "1.4" ]; then
-        set system config-management commit-confirm action reload
-    fi
+    set system config-management commit-confirm action reload
 
     # Rotate vyos password
     log_info "Step 3: Rotating password for '$ADMIN_USER'..."
-    if [ "$VYOS_MAJOR" != "1.4" ]; then
-        set system login user "$ADMIN_USER" level admin
-    fi
     set system login user "$ADMIN_USER" authentication plaintext-password "$ADMIN_PASS"
 
     if [ -n "$SSH_PUB_KEY" ]; then
@@ -646,50 +619,34 @@ if [ "$MODE" == "harden" ]; then
 
     # Control Plane Firewall
     log_info "Step 6: Configuring Control Plane (INPUT) and Transit (FORWARD) Firewalls..."
-    if [ "$VYOS_MAJOR" == "1.4" ]; then
-        # Control plane filter (Protect router itself)
-        set firewall ipv4 input filter default-action drop
+    # Control plane filter (Protect router itself)
+    set firewall ipv4 input filter default-action drop
 
-        set firewall ipv4 input filter rule 5 action accept
-        set firewall ipv4 input filter rule 5 description 'Allow loopback'
-        set firewall ipv4 input filter rule 5 inbound-interface name 'lo'
+    set firewall ipv4 input filter rule 5 action accept
+    set firewall ipv4 input filter rule 5 description 'Allow loopback'
+    set firewall ipv4 input filter rule 5 inbound-interface name 'lo'
 
-        set firewall ipv4 input filter rule 10 action accept
-        set firewall ipv4 input filter rule 10 description 'Allow established/related'
-        set firewall ipv4 input filter rule 10 state established
-        set firewall ipv4 input filter rule 10 state related
+    set firewall ipv4 input filter rule 10 action accept
+    set firewall ipv4 input filter rule 10 description 'Allow established/related'
+    set firewall ipv4 input filter rule 10 state established
+    set firewall ipv4 input filter rule 10 state related
 
-        set firewall ipv4 input filter rule 20 action accept
-        set firewall ipv4 input filter rule 20 description 'Allow ICMP'
-        set firewall ipv4 input filter rule 20 protocol icmp
+    set firewall ipv4 input filter rule 20 action accept
+    set firewall ipv4 input filter rule 20 description 'Allow ICMP'
+    set firewall ipv4 input filter rule 20 protocol icmp
 
-        set firewall ipv4 input filter rule 30 action accept
-        set firewall ipv4 input filter rule 30 description 'Allow SSH from Workstation subnet'
-        set firewall ipv4 input filter rule 30 protocol tcp
-        set firewall ipv4 input filter rule 30 destination port 22
-        set firewall ipv4 input filter rule 30 source address "$MGMT_SUBNET"
+    set firewall ipv4 input filter rule 30 action accept
+    set firewall ipv4 input filter rule 30 description 'Allow SSH from Workstation subnet'
+    set firewall ipv4 input filter rule 30 protocol tcp
+    set firewall ipv4 input filter rule 30 destination port 22
+    set firewall ipv4 input filter rule 30 source address "$MGMT_SUBNET"
 
-        # Transit filter (Scoring protection)
-        set firewall ipv4 forward filter default-action accept
-        set firewall ipv4 forward filter rule 10 action accept
-        set firewall ipv4 forward filter rule 10 description 'Allow established/related transit'
-        set firewall ipv4 forward filter rule 10 state established
-        set firewall ipv4 forward filter rule 10 state related
-    else
-        # 1.3 iptables syntax
-        set firewall name LOCAL_IN default-action drop
-        set firewall name LOCAL_IN rule 10 action accept
-        set firewall name LOCAL_IN rule 10 state established enable
-        set firewall name LOCAL_IN rule 10 state related enable
-
-        set firewall name LOCAL_IN rule 20 action accept
-        set firewall name LOCAL_IN rule 20 protocol icmp
-
-        set firewall name LOCAL_IN rule 30 action accept
-        set firewall name LOCAL_IN rule 30 protocol tcp
-        set firewall name LOCAL_IN rule 30 destination port 22
-        set firewall name LOCAL_IN rule 30 source address "$MGMT_SUBNET"
-    fi
+    # Transit filter (Scoring protection)
+    set firewall ipv4 forward filter default-action accept
+    set firewall ipv4 forward filter rule 10 action accept
+    set firewall ipv4 forward filter rule 10 description 'Allow established/related transit'
+    set firewall ipv4 forward filter rule 10 state established
+    set firewall ipv4 forward filter rule 10 state related
 
     # 3. Apply changes with commit-confirm
     echo "======================================================================"

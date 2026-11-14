@@ -15,7 +15,7 @@ use std::process::Command;
 use chrono::Utc;
 
 use super::hash;
-use super::paths::ALL_PATHS;
+use super::paths::{ALL_PATHS, without_nested};
 use crate::core::{DefenderContext, DefenderError, Result};
 
 /// Manifest filename written into the backup directory.
@@ -35,6 +35,10 @@ pub fn run_with_paths(
     save_location: &Option<PathBuf>,
     paths: &[&str],
 ) -> Result {
+    // Directories are handled recursively, so a path nested under another
+    // listed path would be hashed and copied twice.
+    let paths = without_nested(paths);
+    let paths = paths.as_slice();
     let save_path = resolve_save_path(save_location);
 
     fs::create_dir_all(&save_path)?;

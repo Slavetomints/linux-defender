@@ -79,9 +79,14 @@ pub fn compute(paths: &[&str]) -> Result<BTreeMap<String, String>> {
 }
 
 /// SHA-256 digest of one file, as lowercase hex.
+///
+/// The file is streamed through the hasher, so memory use stays constant no
+/// matter how large the file is.
 pub fn hash_file(path: &Path) -> Result<String> {
-    let contents = fs::read(path)?;
-    Ok(format!("{:x}", Sha256::digest(&contents)))
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 #[cfg(test)]

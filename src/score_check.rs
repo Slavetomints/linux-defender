@@ -736,7 +736,10 @@ fn check_smtp_send(host: &str, port: u16, from: &str, to: &str) -> (bool, String
     if !banner.starts_with("220") {
         return (
             false,
-            format!("no 220 banner: {}", &banner[..banner.len().min(40)]),
+            format!(
+                "no 220 banner: {}",
+                crate::core::truncate_chars(&banner, 40)
+            ),
         );
     }
     let cmds = [
@@ -751,7 +754,11 @@ fn check_smtp_send(host: &str, port: u16, from: &str, to: &str) -> (bool, String
         if !resp.starts_with(expect) {
             return (
                 false,
-                format!("cmd {:?} → {:?}", cmd.trim(), &resp[..resp.len().min(50)]),
+                format!(
+                    "cmd {:?} → {:?}",
+                    cmd.trim(),
+                    crate::core::truncate_chars(&resp, 50)
+                ),
             );
         }
     }
@@ -849,7 +856,11 @@ fn check_pop3_login(host: &str, port: u16, user: &str) -> (bool, String) {
         if !first.starts_with(expect) {
             return (
                 false,
-                format!("{}: {}", template.trim(), &first[..first.len().min(50)]),
+                format!(
+                    "{}: {}",
+                    template.trim(),
+                    crate::core::truncate_chars(first, 50)
+                ),
             );
         }
     }

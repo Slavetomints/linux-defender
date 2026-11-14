@@ -101,7 +101,7 @@ pub fn analyse(contents: &str) -> Vec<(Severity, String, String)> {
                 Severity::High,
                 format!(
                     "CGI/PHP error — possible code execution: {}",
-                    &line[..line.len().min(120)]
+                    crate::core::truncate_chars(line, 120)
                 ),
                 format!("line: {}", line),
             ));
@@ -110,7 +110,7 @@ pub fn analyse(contents: &str) -> Vec<(Severity, String, String)> {
                 Severity::High,
                 format!(
                     "Permission denied on sensitive path: {}",
-                    &line[..line.len().min(120)]
+                    crate::core::truncate_chars(line, 120)
                 ),
                 format!("line: {}", line),
             ));
@@ -119,14 +119,17 @@ pub fn analyse(contents: &str) -> Vec<(Severity, String, String)> {
                 Severity::High,
                 format!(
                     "Traversal attempt in error log: {}",
-                    &line[..line.len().min(120)]
+                    crate::core::truncate_chars(line, 120)
                 ),
                 format!("line: {}", line),
             ));
         } else if is_waf_triggered(line) {
             findings.push((
                 Severity::Medium,
-                format!("WAF rule triggered: {}", &line[..line.len().min(120)]),
+                format!(
+                    "WAF rule triggered: {}",
+                    crate::core::truncate_chars(line, 120)
+                ),
                 format!("line: {}", line),
             ));
         }

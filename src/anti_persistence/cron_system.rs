@@ -115,7 +115,7 @@ fn scan_crontab_file(ctx: &DefenderContext, path: &Path) {
                     "System crontab backdoor {} in {}: {}",
                     if removed { "REMOVED" } else { "FOUND" },
                     path.display(),
-                    &line[..line.len().min(60)],
+                    crate::core::truncate_chars(line, 60),
                 ),
                 format!(
                     "file: {}\nline: {}\npatterns: {}\nremoved: {}",

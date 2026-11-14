@@ -271,7 +271,7 @@ fn check_service_exec(
                 format!(
                     "Backdoor timer service REMOVED: {} (ExecStart={})",
                     unit_name,
-                    &exec_val[..exec_val.len().min(60)],
+                    crate::core::truncate_chars(exec_val, 60),
                 ),
                 format!(
                     "timer: {}\nservice: {}\nExecStart: {}\nflags: {}\nuntrusted_dir: {}\n\

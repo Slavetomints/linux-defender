@@ -170,7 +170,7 @@ pub fn analyse(contents: &str) -> Vec<(Severity, String, String)> {
                 format!(
                     "Scanner UA from {}: {}",
                     entry.ip,
-                    &entry.ua[..entry.ua.len().min(80)]
+                    crate::core::truncate_chars(&entry.ua, 80)
                 ),
                 format!(
                     "ip: {}\nua: {}\nuri: {}\nstatus: {}",

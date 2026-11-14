@@ -107,7 +107,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
                 let still_present = proof_lines.iter().any(|l| l.contains(job.as_str()));
                 let proof_msg = format!(
                     "══ PROOF: '{}' still_present={} in crontab:{} ══",
-                    &job[..job.len().min(50)],
+                    crate::core::truncate_chars(job, 50),
                     still_present,
                     user
                 );
@@ -122,7 +122,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
                         format!(
                             "Cron backdoor REMOVED for {}: {} ({})",
                             user,
-                            &job[..job.len().min(60)],
+                            crate::core::truncate_chars(job, 60),
                             if rewrite_ok && !still_present {
                                 "removed"
                             } else {
@@ -161,7 +161,11 @@ pub fn run(ctx: &DefenderContext) -> Result {
                 Finding::new(
                     Severity::Info,
                     "cron",
-                    format!("Cron job for {}: {}", user, &job[..job.len().min(60)]),
+                    format!(
+                        "Cron job for {}: {}",
+                        user,
+                        crate::core::truncate_chars(job, 60)
+                    ),
                     format!("user: {}\njob: {}", user, job),
                 )
                 .with_context("user", user.to_string())

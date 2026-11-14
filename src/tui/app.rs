@@ -1029,11 +1029,7 @@ impl App {
                 let (progress_sink_tx, progress_sink_rx) = mpsc::channel::<String>();
                 std::thread::spawn(move || while progress_sink_rx.recv().is_ok() {});
                 ctx.progress_tx = Some(progress_sink_tx);
-                if is_ap {
-                    let _ = crate::anti_persistence::run_module(id_str, &ctx);
-                } else {
-                    let _ = crate::monitoring::run_module(id_str, &ctx);
-                }
+                run_scan_module(id_str, is_ap, &ctx);
                 let _ = done_tx.send(id_str);
             });
         }
@@ -1075,11 +1071,7 @@ impl App {
 
             for (id, is_ap) in selected {
                 let _ = progress_tx.send(id.to_string());
-                if is_ap {
-                    let _ = crate::anti_persistence::run_module(id, &ctx);
-                } else {
-                    let _ = crate::monitoring::run_module(id, &ctx);
-                }
+                run_scan_module(id, is_ap, &ctx);
             }
             let _ = progress_tx.send(String::new()); // signal done
         });
@@ -1372,6 +1364,12 @@ pub fn run() -> anyhow::Result<()> {
 
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // Only a panic on the UI thread ends the program. Worker-thread panics
+        // are contained by `run_scan_module` and reported as findings; tearing
+        // the terminal down (or printing) for them would wreck a live UI.
+        if std::thread::current().name() != Some("main") {
+            return;
+        }
         let _ = disable_raw_mode();
         let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
         original_hook(info);
@@ -1384,6 +1382,31 @@ pub fn run() -> anyhow::Result<()> {
     terminal.show_cursor().ok();
 
     result
+}
+
+/// Run one scan module on a worker thread, containing any panic.
+///
+/// Scan modules parse attacker-shaped input (logs, crontabs, unit files). If
+/// one panics, the worker must still reach its "done" signal, otherwise the
+/// scan stays marked as running forever and an auto-scan module never runs
+/// again. The crash is surfaced as a finding instead.
+fn run_scan_module(id: &'static str, is_anti_persistence: bool, ctx: &DefenderContext) {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if is_anti_persistence {
+            crate::anti_persistence::run_module(id, ctx)
+        } else {
+            crate::monitoring::run_module(id, ctx)
+        }
+    }));
+    if outcome.is_err() {
+        ctx.emit(Finding::new(
+            Severity::Medium,
+            "scan",
+            format!("Module {} crashed while scanning and was skipped", id),
+            "The module panicked on its input. Its results for this run are incomplete; \
+             treat that as suspicious and inspect the data it reads by hand.",
+        ));
+    }
 }
 
 /// Inner event loop — runs after the terminal is already in raw/alternate-screen mode.
@@ -2324,7 +2347,7 @@ fn render_scan(f: &mut ratatui::Frame, area: Rect, app: &App) {
                     Style::default()
                 };
                 let module_prefix =
-                    format!("{:<10}", &finding.module[..finding.module.len().min(10)]);
+                    format!("{:<10}", crate::core::truncate_chars(finding.module, 10));
                 let line = Line::from(vec![
                     Span::styled(
                         format!("[{}]", finding.severity.label()),

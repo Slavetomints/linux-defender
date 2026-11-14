@@ -607,12 +607,11 @@ fn logical_lines(contents: &str) -> Vec<String> {
 
 /// Strip a case-insensitive prefix from a string, returning the rest.
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    if s.len() < prefix.len() {
-        return None;
-    }
-    let (head, tail) = s.split_at(prefix.len());
+    // `get` returns None instead of panicking when `prefix.len()` falls inside
+    // a multi-byte character or past the end of `s`.
+    let head = s.get(..prefix.len())?;
     if head.eq_ignore_ascii_case(prefix) {
-        Some(tail)
+        s.get(prefix.len()..)
     } else {
         None
     }

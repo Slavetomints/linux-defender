@@ -92,7 +92,10 @@ pub fn classify_line(line: &str) -> Option<RecentEvent> {
     if line.contains("useradd") || line.contains("adduser") {
         return Some(RecentEvent {
             severity: Severity::High,
-            summary: format!("Account created: {}", &line[..line.len().min(150)]),
+            summary: format!(
+                "Account created: {}",
+                crate::core::truncate_chars(line, 150)
+            ),
             detail: format!("line: {}", line),
         });
     }
@@ -100,7 +103,10 @@ pub fn classify_line(line: &str) -> Option<RecentEvent> {
     if line.contains("userdel") {
         return Some(RecentEvent {
             severity: Severity::High,
-            summary: format!("Account deleted: {}", &line[..line.len().min(150)]),
+            summary: format!(
+                "Account deleted: {}",
+                crate::core::truncate_chars(line, 150)
+            ),
             detail: format!("line: {}", line),
         });
     }
@@ -108,7 +114,10 @@ pub fn classify_line(line: &str) -> Option<RecentEvent> {
     if line.contains("password changed") || (line.contains("passwd") && line.contains("changed")) {
         return Some(RecentEvent {
             severity: Severity::Medium,
-            summary: format!("Password changed: {}", &line[..line.len().min(150)]),
+            summary: format!(
+                "Password changed: {}",
+                crate::core::truncate_chars(line, 150)
+            ),
             detail: format!("line: {}", line),
         });
     }
@@ -116,7 +125,7 @@ pub fn classify_line(line: &str) -> Option<RecentEvent> {
     if line.contains("sudo:") && line.contains("COMMAND=") {
         return Some(RecentEvent {
             severity: Severity::Medium,
-            summary: format!("sudo command: {}", &line[..line.len().min(150)]),
+            summary: format!("sudo command: {}", crate::core::truncate_chars(line, 150)),
             detail: format!("line: {}", line),
         });
     }
@@ -124,7 +133,7 @@ pub fn classify_line(line: &str) -> Option<RecentEvent> {
     if line.contains("su:") && (line.contains("session opened") || line.contains("Successful su")) {
         return Some(RecentEvent {
             severity: Severity::Medium,
-            summary: format!("su session: {}", &line[..line.len().min(150)]),
+            summary: format!("su session: {}", crate::core::truncate_chars(line, 150)),
             detail: format!("line: {}", line),
         });
     }
@@ -132,7 +141,7 @@ pub fn classify_line(line: &str) -> Option<RecentEvent> {
     if line.contains("Accepted") && (line.contains("password") || line.contains("publickey")) {
         return Some(RecentEvent {
             severity: Severity::Info,
-            summary: format!("SSH login: {}", &line[..line.len().min(150)]),
+            summary: format!("SSH login: {}", crate::core::truncate_chars(line, 150)),
             detail: format!("line: {}", line),
         });
     }

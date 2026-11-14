@@ -29,6 +29,10 @@ PROFILES=""
 TCP_PORTS=()
 UDP_PORTS=()
 
+# Inbound SSH stays open unless the operator explicitly opts in to blocking it
+# during Option 2. SSH is a scored service and usually the only remote access.
+BLOCK_SSH="no"
+
 # ============================================================
 # HELPER FUNCTIONS
 # ============================================================
@@ -353,9 +357,14 @@ apply_iptables() {
     iptables -A INPUT -m conntrack \
         --ctstate ESTABLISHED,RELATED -j ACCEPT
 
-    # Explicitly block new inbound SSH on TCP 22.
-    iptables -A INPUT -p tcp \
-        --dport 22 -j DROP
+    # Inbound SSH on TCP 22: allowed by default, dropped only on opt-in.
+    if [[ "$BLOCK_SSH" == "yes" ]]; then
+        iptables -A INPUT -p tcp \
+            --dport 22 -j DROP
+    else
+        iptables -A INPUT -p tcp \
+            --dport 22 -j ACCEPT
+    fi
 
     # Allow selected TCP ports.
     for port in "${TCP_PORTS[@]}"; do
@@ -399,13 +408,21 @@ apply_firewalld() {
     for zone in "${zones[@]}"; do
         info "Configuring zone: $zone"
 
-        # Remove standard SSH service allowance.
-        firewall-cmd --zone="$zone" \
-            --remove-service=ssh 2>/dev/null || true
+        if [[ "$BLOCK_SSH" == "yes" ]]; then
+            # Remove standard SSH service allowance.
+            firewall-cmd --zone="$zone" \
+                --remove-service=ssh 2>/dev/null || true
 
-        # Remove explicit TCP 22 allowance.
-        firewall-cmd --zone="$zone" \
-            --remove-port=22/tcp 2>/dev/null || true
+            # Remove explicit TCP 22 allowance.
+            firewall-cmd --zone="$zone" \
+                --remove-port=22/tcp 2>/dev/null || true
+        else
+            # Keep inbound SSH reachable and clear any earlier drop rule.
+            firewall-cmd --zone="$zone" --add-service=ssh
+            firewall-cmd --zone="$zone" \
+                --remove-rich-rule='rule family="ipv4" port port="22" protocol="tcp" drop' \
+                2>/dev/null || true
+        fi
 
         # Allow required TCP ports.
         for port in "${TCP_PORTS[@]}"; do
@@ -419,13 +436,15 @@ apply_firewalld() {
                 --add-port="$port/udp"
         done
 
-        # Block IPv4 SSH explicitly.
-        firewall-cmd --zone="$zone" \
-            --add-rich-rule='rule family="ipv4" port port="22" protocol="tcp" drop'
+        # Block IPv4 SSH explicitly, only when the operator opted in.
+        if [[ "$BLOCK_SSH" == "yes" ]]; then
+            firewall-cmd --zone="$zone" \
+                --add-rich-rule='rule family="ipv4" port port="22" protocol="tcp" drop'
+        fi
     done
 
     info "firewalld runtime rules updated."
-    warn "Existing non-SSH allowances remain unchanged."
+    warn "Existing allowances for other services remain unchanged."
 }
 
 # ============================================================
@@ -446,6 +465,17 @@ apply_hardening() {
 
     choose_profiles || return
 
+    # Blocking SSH is opt-in. Anything other than an explicit yes keeps it open.
+    local ssh_choice
+    BLOCK_SSH="no"
+    warn "Blocking inbound SSH drops scored SSH checks and new remote sessions."
+    read_input ssh_choice "Block inbound SSH on TCP 22? [y/N]: "
+    case "${ssh_choice,,}" in
+        y|yes)
+            BLOCK_SSH="yes"
+            ;;
+    esac
+
     heading "FW01 IPv4 FIREWALL HARDENING PLAN"
 
     echo "Hostname : $(hostname)"
@@ -458,7 +488,11 @@ apply_hardening() {
     echo "Planned controls:"
     echo " - Allow loopback traffic"
     echo " - Allow established/related connections"
-    echo " - Block inbound SSH (TCP 22)"
+    if [[ "$BLOCK_SSH" == "yes" ]]; then
+        echo " - Block inbound SSH (TCP 22)"
+    else
+        echo " - Keep inbound SSH (TCP 22) allowed"
+    fi
     echo " - Allow required service ports"
     echo " - Restrict unnecessary inbound IPv4 traffic"
     echo " - Preserve outbound firewall policy"
@@ -466,7 +500,9 @@ apply_hardening() {
     echo "IPv6 is outside the scope of this script."
     echo
     warn "Active IPv4 firewall rules will change."
-    warn "Use direct VM console access."
+    if [[ "$BLOCK_SSH" == "yes" ]]; then
+        warn "Inbound SSH will be blocked. Use direct VM console access."
+    fi
     echo
 
     local confirm

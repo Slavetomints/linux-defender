@@ -36,7 +36,8 @@ const KEEP_USERS_FILE: &str = "/etc/linux-defender/keep-users";
 struct FileSpec {
     /// Filesystem path to the file.
     path: &'static str,
-    /// Required permission bits (e.g. `0o644`).
+    /// Most permissive mode allowed (e.g. `0o644`). Stricter modes are left
+    /// alone: Rocky ships /etc/shadow as 0000, which is tighter than 0640.
     expected_mode: u32,
 }
 
@@ -263,16 +264,19 @@ fn fix_file_permissions(ctx: &DefenderContext) -> Result {
             }
         };
 
-        let actual = meta.permissions().mode() & 0o777;
-        if actual == spec.expected_mode {
+        let actual = meta.permissions().mode() & 0o7777;
+        let Some(target) = tightened_mode(actual, spec.expected_mode) else {
             ctx.emit(Finding::new(
                 Severity::Info,
                 "user_perms",
-                format!("{} permissions are correct ({:04o})", spec.path, actual),
+                format!(
+                    "{} permissions are fine ({:04o}, at most {:04o})",
+                    spec.path, actual, spec.expected_mode
+                ),
                 format!("path: {}\nmode: {:04o}", spec.path, actual),
             ));
             continue;
-        }
+        };
 
         // Log evidence (mode bits) before fixing.
         ctx.log_evidence_line(
@@ -283,7 +287,7 @@ fn fix_file_permissions(ctx: &DefenderContext) -> Result {
             ),
         );
 
-        let chmod_arg = format!("{:04o}", spec.expected_mode);
+        let chmod_arg = format!("{:04o}", target);
         let fixed = ctx.run_remediation(&["chmod", &chmod_arg, spec.path]);
 
         ctx.emit(
@@ -307,13 +311,13 @@ fn fix_file_permissions(ctx: &DefenderContext) -> Result {
                 Verdict::Remove,
                 format!(
                     "{} had overly permissive mode {:04o}. \
-                     chmod {:04o} has been applied.",
-                    spec.path, actual, spec.expected_mode
+                     chmod {:04o} has been applied (only bits were removed).",
+                    spec.path, actual, target
                 ),
             )
             .with_action(Action::Manual(format!(
                 "chmod {:04o} {}",
-                spec.expected_mode, spec.path
+                target, spec.path
             ))),
         );
     }
@@ -374,6 +378,15 @@ fn is_nologin_shell(shell: &str) -> bool {
     )
 }
 
+/// The mode to chmod a file to, or `None` when `actual` already grants no
+/// more than `allowed`. Only ever removes bits: the result is the overlap of
+/// the two, so a stricter file is never loosened.
+fn tightened_mode(actual: u32, allowed: u32) -> Option<u32> {
+    let actual = actual & 0o7777;
+    let allowed = allowed & 0o777;
+    (actual & !allowed != 0).then_some(actual & allowed)
+}
+
 /// Return `true` when the lower 9 permission bits of `mode` match `expected`.
 #[cfg(test)]
 fn mode_matches(mode: u32, expected: u32) -> bool {
@@ -399,6 +412,19 @@ mod tests {
         assert!(!is_nologin_shell("/bin/sh"));
         assert!(!is_nologin_shell("/usr/bin/zsh"));
         assert!(!is_nologin_shell(""));
+    }
+
+    #[test]
+    fn stricter_modes_are_never_loosened() {
+        // Rocky's /etc/shadow.
+        assert_eq!(tightened_mode(0o000, 0o640), None);
+        assert_eq!(tightened_mode(0o600, 0o640), None);
+        assert_eq!(tightened_mode(0o640, 0o640), None);
+        assert_eq!(tightened_mode(0o644, 0o640), Some(0o640));
+        assert_eq!(tightened_mode(0o666, 0o640), Some(0o640));
+        assert_eq!(tightened_mode(0o602, 0o640), Some(0o600));
+        // setuid/setgid bits are stripped too.
+        assert_eq!(tightened_mode(0o4440, 0o440), Some(0o440));
     }
 
     #[test]

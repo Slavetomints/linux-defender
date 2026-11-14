@@ -221,11 +221,12 @@ fn fix_debian_apt_sources(ctx: &DefenderContext) {
 
 // ── Web root purge ────────────────────────────────────────────────────────────
 
-/// Delete every entry inside `root` so the next extract starts from a clean slate.
+/// Empty `root` so the next extract starts from a clean slate.
 ///
-/// The directory itself is kept (web server vhost still points at it).  Any
-/// entry that cannot be removed is logged and skipped rather than aborting —
-/// a partial purge is still far better than leaving attacker-planted files.
+/// The directory itself is kept (web server vhost still points at it). Its
+/// contents are moved into the quarantine rather than deleted, so a failed
+/// rebuild, or anything else that lived in the web root, can be put back.
+/// An entry that cannot be moved is logged and skipped rather than aborting.
 pub fn purge_web_root(root: &Path, ctx: &DefenderContext) -> Result<()> {
     if !root.exists() {
         fs::create_dir_all(root)?;
@@ -233,33 +234,69 @@ pub fn purge_web_root(root: &Path, ctx: &DefenderContext) -> Result<()> {
         return Ok(());
     }
 
-    ctx.progress(&format!("[+] Purging {}...", root.display()));
-    let mut removed = 0usize;
-    let mut failed = 0usize;
-
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        let ok = if path.is_dir() {
-            fs::remove_dir_all(&path).is_ok()
-        } else {
-            fs::remove_file(&path).is_ok()
-        };
-        if ok {
-            removed += 1;
-        } else {
-            ctx.progress(&format!("[!] Could not remove {}", path.display()));
-            failed += 1;
-        }
-    }
-
     ctx.progress(&format!(
-        "[✓] Purged {} entries ({} failed) from {}",
-        removed,
-        failed,
+        "[+] Moving the contents of {} to quarantine...",
+        root.display()
+    ));
+    let (saved, failed) = crate::core::context::quarantine_dir_contents(root)?;
+    for (path, e) in &failed {
+        ctx.progress(&format!("[!] Could not move {}: {e}", path.display()));
+    }
+    ctx.progress(&format!(
+        "[✓] Previous web root saved to {} ({} entr(ies) could not be moved). \
+         Put it back with: cp -a '{}/.' '{}/'",
+        saved.display(),
+        failed.len(),
+        saved.display(),
         root.display()
     ));
     Ok(())
+}
+
+/// Error unless the archive at `zip_path` opens and contains `relative`
+/// (resolved under the archive's `upload/` prefix when it has one).
+///
+/// Run this before [`purge_web_root`]: a truncated download, an HTML error
+/// page saved as a zip, or a release that nests the real archive inside
+/// another one must fail while the old site is still in place.
+pub fn require_archive_entry(zip_path: &Path, relative: &str) -> Result<()> {
+    let prefix = detect_upload_prefix(zip_path)?.unwrap_or_default();
+    let wanted = format!("{prefix}{relative}");
+    let file = fs::File::open(zip_path)?;
+    let mut archive = ZipArchive::new(file).map_err(|e| {
+        DefenderError::Other(format!(
+            "{} is not a usable zip ({e}); nothing was purged",
+            zip_path.display()
+        ))
+    })?;
+
+    let mut nested_zips = Vec::new();
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| DefenderError::Other(format!("bad zip entry {i}: {e}")))?;
+        let Ok(name) = entry.name() else { continue };
+        if name == wanted {
+            return Ok(());
+        }
+        if name.ends_with(".zip") {
+            nested_zips.push(name.to_string());
+        }
+    }
+
+    let hint = if nested_zips.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " The archive contains {}; the real release may be nested inside it — \
+             extract that and pass it with the --*-url option.",
+            nested_zips.join(", ")
+        )
+    };
+    Err(DefenderError::Other(format!(
+        "{} has no {wanted}; refusing to purge the web root.{hint}",
+        zip_path.display()
+    )))
 }
 
 // ── Zip extraction ────────────────────────────────────────────────────────────
@@ -973,6 +1010,39 @@ mod tests {
             zw.write_all(body.as_bytes()).unwrap();
         }
         zw.finish().unwrap();
+    }
+
+    #[test]
+    fn archive_check_finds_installer_under_upload_prefix_or_flat() {
+        let dir = TempDir::new().unwrap();
+        let oc = dir.path().join("oc.zip");
+        make_zip(
+            &oc,
+            &[("opencart-4/upload/install/cli_install.php", "<?php")],
+        );
+        assert!(require_archive_entry(&oc, "install/cli_install.php").is_ok());
+
+        let ps = dir.path().join("ps.zip");
+        make_zip(
+            &ps,
+            &[("install/index_cli.php", "<?php"), ("index.php", "")],
+        );
+        assert!(require_archive_entry(&ps, "install/index_cli.php").is_ok());
+    }
+
+    #[test]
+    fn archive_check_rejects_nested_or_broken_archives_before_any_purge() {
+        let dir = TempDir::new().unwrap();
+        let nested = dir.path().join("nested.zip");
+        make_zip(&nested, &[("prestashop.zip", "PK..."), ("index.php", "")]);
+        let err = require_archive_entry(&nested, "install/index_cli.php")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("prestashop.zip"), "{err}");
+
+        let html = dir.path().join("html.zip");
+        fs::write(&html, "<html>login required</html>").unwrap();
+        assert!(require_archive_entry(&html, "install/index_cli.php").is_err());
     }
 
     fn ctx() -> DefenderContext {

@@ -36,7 +36,7 @@ use super::distro::Distro;
 use super::webserver::{
     download_file, ensure_mysql, ensure_php_apache, ensure_ssl, ensure_webserver, extract_zip,
     find_php, fix_permissions, open_http_firewall, purge_web_root, reload_webserver,
-    resolve_web_root, verify_site, verify_site_insecure,
+    require_archive_entry, resolve_web_root, verify_site, verify_site_insecure,
 };
 
 /// Credentials collected by the TUI dialog (or the CLI prompts) before install.
@@ -140,7 +140,11 @@ pub fn run(
     // ── 1. Download ───────────────────────────────────────────────────────────
     download_file(url, Path::new(TMP_ZIP), &distro, ctx)?;
 
-    // ── 1b. Purge web root — full clean slate, no attacker files survive ──────
+    // Fail here, with the old site still in place, if the archive is not a
+    // release we can install from.
+    require_archive_entry(Path::new(TMP_ZIP), "install/cli_install.php")?;
+
+    // ── 1b. Purge web root — previous contents go to quarantine ──────────────
     purge_web_root(&root, ctx)?;
 
     // ── 2. Extract upload/ subtree to web root ────────────────────────────────

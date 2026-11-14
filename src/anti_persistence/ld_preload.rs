@@ -5,7 +5,6 @@
 //! rootkit footholds available. The file is absent on a stock install, so any
 //! content at all is worth an operator's attention.
 
-use std::env;
 use std::fs;
 use std::path::Path;
 
@@ -129,18 +128,19 @@ fn check_preload_file(ctx: &DefenderContext) -> Result {
     Ok(())
 }
 
-/// Check whether `$LD_PRELOAD` is set in the current process environment.
+/// Check where `$LD_PRELOAD` is set: shell startup files and the
+/// environment of running processes. The defender's own environment says
+/// nothing (sudo drops LD_PRELOAD), so it is not consulted.
 fn check_environment(ctx: &DefenderContext) {
-    match env::var("LD_PRELOAD") {
-        Ok(value) if !value.trim().is_empty() => {
-            ctx.emit(Finding::new(
-                Severity::High,
-                "ld_preload",
-                format!("$LD_PRELOAD is set in this shell: {}", value),
-                "Run `unset LD_PRELOAD` and trace where it was exported from.",
-            ));
-        }
-        _ => ctx.log_msg("[✓] $LD_PRELOAD is not set"),
+    let found = crate::core::scan::report_variable(
+        ctx,
+        "ld_preload",
+        "LD_PRELOAD",
+        "LD_PRELOAD loads a library into every program started from that \
+         environment; it is the classic userland rootkit hook.",
+    );
+    if found == 0 {
+        ctx.log_msg("[✓] LD_PRELOAD is not set in startup files or running processes");
     }
 }
 

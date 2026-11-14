@@ -16,7 +16,7 @@ pub mod utils;
 
 pub use actions::execute as execute_action;
 pub use box_type::{BoxType, ServiceConfig, detect_box_type, is_scored_unit};
-pub use context::DefenderContext;
+pub use context::{DefenderContext, LOG_DIR, log_path, open_private_append, redact_shadow_line};
 pub use error::{DefenderError, Result};
 pub use finding::{Action, Finding, Severity, Verdict};
 pub use utils::{

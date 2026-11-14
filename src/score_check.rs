@@ -18,14 +18,13 @@
 //! - [`CheckKind::Dns`] — `dig` query, check for an ANSWER section
 
 use std::collections::VecDeque;
-use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Path where score-check results are logged for post-mortem debugging.
-pub const SCORE_LOG: &str = "/tmp/defender-score.log";
+pub const SCORE_LOG: &str = "/var/log/linux-defender/score.log";
 
 /// Which external HTTP client is available on this machine.
 enum ExtHttpClient {
@@ -396,7 +395,7 @@ fn log_check_result(svc: &ServiceCheck, up: bool, latency_ms: u64, detail: &str)
         name = svc.name,
         port = svc.port,
     );
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(SCORE_LOG) {
+    if let Ok(mut f) = crate::core::open_private_append(&crate::core::log_path("score.log")) {
         let _ = f.write_all(line.as_bytes());
     }
 }

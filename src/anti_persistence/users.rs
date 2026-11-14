@@ -94,7 +94,9 @@ fn emit_uid0_finding(ctx: &DefenderContext, acct: &Account) {
             .lines()
             .find(|l| l.split(':').next() == Some(&acct.name))
     {
-        ctx.log_evidence_line("/etc/shadow", shadow_line);
+        // Whether a password is set matters for IR; the hash itself must not
+        // end up in a report.
+        ctx.log_evidence_line("/etc/shadow", &crate::core::redact_shadow_line(shadow_line));
     }
 
     // 3. Remove the account.  ctx.run_remediation() uses .output() internally,

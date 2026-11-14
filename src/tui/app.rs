@@ -1028,7 +1028,7 @@ impl App {
             let is_ap = *is_ap;
 
             std::thread::spawn(move || {
-                let report = PathBuf::from("/tmp/defender-autoscan.log");
+                let report = crate::core::log_path("autoscan.log");
                 let mut ctx = DefenderContext::new(report, false);
                 ctx.finding_tx = Some(finding_tx);
                 let (progress_sink_tx, progress_sink_rx) = mpsc::channel::<String>();
@@ -1067,7 +1067,7 @@ impl App {
         let progress_tx = self.scan_progress_tx.clone();
 
         std::thread::spawn(move || {
-            let report = PathBuf::from("/tmp/defender-scan.log");
+            let report = crate::core::log_path("scan.log");
             let mut ctx = DefenderContext::new(report, false);
             ctx.finding_tx = Some(finding_tx);
             let (progress_sink_tx, progress_sink_rx) = mpsc::channel::<String>();
@@ -1095,7 +1095,7 @@ impl App {
         let progress_tx = self.hardening_progress_tx.clone();
 
         std::thread::spawn(move || {
-            let report = PathBuf::from("/tmp/defender-hardening.log");
+            let report = crate::core::log_path("hardening.log");
             let mut ctx = DefenderContext::new(report, false).with_progress(progress_tx.clone());
             ctx.finding_tx = Some(finding_tx);
 
@@ -1129,7 +1129,7 @@ impl App {
 
         std::thread::spawn(move || {
             let _ = progress_tx.send(format!("Running {}…", module_id));
-            let report = PathBuf::from("/tmp/defender-monitor.log");
+            let report = crate::core::log_path("monitor.log");
             let mut ctx = DefenderContext::new(report, false).with_progress(progress_tx.clone());
             ctx.finding_tx = Some(finding_tx);
             match crate::monitoring::run_module(module_id, &ctx) {
@@ -1162,7 +1162,7 @@ impl App {
 
         std::thread::spawn(move || {
             let _ = progress_tx.send(format!("Starting: {}…", label));
-            let report = PathBuf::from("/tmp/defender-backup.log");
+            let report = crate::core::log_path("backup.log");
             let ctx = DefenderContext::new(report, false).with_progress(progress_tx.clone());
             let mut args = crate::backups::CliArgs {
                 all: false,
@@ -1217,7 +1217,7 @@ impl App {
 
         std::thread::spawn(move || {
             let _ = progress_tx.send(format!("Restoring: {}…", label));
-            let report = PathBuf::from("/tmp/defender-restore.log");
+            let report = crate::core::log_path("restore.log");
             let ctx = DefenderContext::new(report, false).with_progress(progress_tx.clone());
             let mut args = crate::service_restore::CliArgs {
                 ssh: false,

@@ -8,14 +8,77 @@
 //! [`emit`](DefenderContext::emit) send structured [`Finding`]s to the UI
 //! thread rather than printing to stdout.
 
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, SystemTime};
 
 use super::Result;
 use super::finding::{Finding, Severity};
+
+/// Root-only directory for reports, evidence and score logs written by the TUI.
+///
+/// These used to live at fixed names in `/tmp`, world-readable, where any
+/// local user could read the evidence or pre-create the file to make every
+/// write fail.
+pub const LOG_DIR: &str = "/var/log/linux-defender";
+
+/// Path for a log file called `name` inside [`LOG_DIR`], creating the
+/// directory `0700` if needed.
+pub fn log_path(name: &str) -> PathBuf {
+    let dir = Path::new(LOG_DIR);
+    let _ = std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir);
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    dir.join(name)
+}
+
+/// Open `path` for appending, creating it `0600` and refusing to follow a
+/// symlink at the final component.
+pub fn open_private_append(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+/// Files whose contents must never be written into a report.
+fn is_secret_file(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let stem = name.trim_end_matches('-');
+    matches!(stem, "shadow" | "gshadow" | "krb5.keytab" | "master.passwd")
+        || name.ends_with(".keytab")
+        || name.ends_with(".key")
+        || (name.starts_with("ssh_host_") && name.ends_with("_key"))
+        || matches!(
+            name.as_str(),
+            "id_rsa" | "id_ecdsa" | "id_ed25519" | "id_dsa" | "splunk.secret"
+        )
+}
+
+/// Replace the password hash field of an `/etc/shadow` line with a marker
+/// that says whether a usable hash was set, without revealing it.
+pub fn redact_shadow_line(line: &str) -> String {
+    let mut fields: Vec<&str> = line.split(':').collect();
+    if fields.len() < 2 {
+        return line.to_string();
+    }
+    fields[1] = match fields[1] {
+        "" => "<empty>",
+        h if h.starts_with('!') || h.starts_with('*') => "<locked>",
+        _ => "<hash redacted>",
+    };
+    fields.join(":")
+}
 
 /// State shared by every check in a single run.
 #[derive(Clone)]
@@ -114,10 +177,7 @@ impl DefenderContext {
 
     /// Append a line to the run's report file.
     pub fn log(&self, message: &str) -> Result {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.report_file)?;
+        let mut file = open_private_append(&self.report_file)?;
         writeln!(file, "{}", message)?;
         Ok(())
     }
@@ -143,6 +203,24 @@ impl DefenderContext {
         let banner = format!("══ EVIDENCE: {} ══", path.display());
         self.log_msg(&banner);
         let _ = self.log(&banner);
+
+        // Never copy credential material into a report. A red team routinely
+        // sets chattr +i on /etc/shadow, which sends that file through here.
+        if is_secret_file(path) {
+            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            let digest = crate::backups::hash::hash_file(path)
+                .unwrap_or_else(|e| format!("unavailable ({e})"));
+            for msg in [
+                format!("  size: {size} bytes"),
+                format!("  sha256: {digest}"),
+                "  (contents withheld: file holds credentials or key material)".to_string(),
+                "══ END EVIDENCE ══".to_string(),
+            ] {
+                self.log_msg(&msg);
+                let _ = self.log(&msg);
+            }
+            return;
+        }
 
         match std::fs::read(path) {
             Err(e) => {
@@ -528,5 +606,63 @@ impl DefenderContext {
             return format!("{} (after competition start — suspicious)", base);
         }
         base
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_files_are_recognised() {
+        for p in [
+            "/etc/shadow",
+            "/etc/shadow-",
+            "/etc/gshadow",
+            "/etc/krb5.keytab",
+            "/etc/ssh/ssh_host_ed25519_key",
+            "/root/.ssh/id_rsa",
+            "/etc/ssl/private/site.key",
+        ] {
+            assert!(is_secret_file(Path::new(p)), "{p} should be withheld");
+        }
+        for p in [
+            "/etc/passwd",
+            "/etc/ssh/sshd_config",
+            "/etc/ssh/ssh_host_rsa_key.pub",
+        ] {
+            assert!(!is_secret_file(Path::new(p)), "{p} should be logged");
+        }
+    }
+
+    #[test]
+    fn shadow_lines_lose_their_hash() {
+        assert_eq!(
+            redact_shadow_line("toor:$6$salt$hash:19000:0:99999:7:::"),
+            "toor:<hash redacted>:19000:0:99999:7:::"
+        );
+        assert_eq!(
+            redact_shadow_line("svc:!:19000::::::"),
+            "svc:<locked>:19000::::::"
+        );
+        assert_eq!(
+            redact_shadow_line("x::19000::::::"),
+            "x:<empty>:19000::::::"
+        );
+    }
+
+    #[test]
+    fn private_append_creates_0600_and_refuses_symlinks() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log = dir.path().join("report.log");
+        open_private_append(&log).unwrap();
+        let mode = std::fs::metadata(&log).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        let target = dir.path().join("target");
+        std::fs::write(&target, "").unwrap();
+        let link = dir.path().join("link.log");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(open_private_append(&link).is_err());
     }
 }

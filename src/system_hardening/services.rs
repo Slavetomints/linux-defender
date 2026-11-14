@@ -9,7 +9,7 @@
 //! All box types share a baseline: ssh/sshd, cron/crond, atd, nftables/ufw/iptables/firewalld,
 //! rsyslog/syslog, auditd, fail2ban, apparmor, dbus/dbus-broker, getty (console
 //! login), time sync, hypervisor guest agents, container runtimes, AD helpers,
-//! storage/boot plumbing, and all systemd-* units. Anything that would take the
+//! storage/boot plumbing, and vendor-installed systemd-* units. Anything that would take the
 //! console, the clock, or the VM tooling away from the operator stays enabled.
 //!
 //! Box-specific additions:
@@ -20,6 +20,7 @@
 //! | Splunk   | splunk, SplunkForwarder |
 //! | General  | mysql/mariadb/postgresql, named/bind9 |
 
+use std::path::Path;
 use std::process::Command;
 
 use crate::core::{
@@ -189,10 +190,34 @@ pub fn allow_list(box_type: BoxType) -> &'static [&'static str] {
     }
 }
 
+/// Where packages install unit files.
+const VENDOR_UNIT_DIRS: &[&str] = &["/usr/lib/systemd/system", "/lib/systemd/system"];
+
+/// Where local or runtime unit files live; a copy here shadows the vendor one.
+const OVERRIDE_UNIT_DIRS: &[&str] = &["/etc/systemd/system", "/run/systemd/system"];
+
+/// True for a `systemd-*` unit whose file exists in a vendor directory and is
+/// not shadowed by a same-named file in an override directory.
+fn is_vendor_systemd_unit(name: &str, vendor_dirs: &[&str], override_dirs: &[&str]) -> bool {
+    if !name.starts_with("systemd-") || name.contains('/') {
+        return false;
+    }
+    // Templates (`systemd-fsck@`) and their instances (`systemd-fsck@sda1`)
+    // both live in the template file `systemd-fsck@.service`.
+    let file = match name.split_once('@') {
+        Some((template, _)) => format!("{template}@.service"),
+        None => format!("{name}.service"),
+    };
+    let in_dir = |d: &&str| Path::new(d).join(&file).exists();
+    vendor_dirs.iter().any(in_dir) && !override_dirs.iter().any(in_dir)
+}
+
 /// Return `true` when `service_name` is allowed on `box_type`.
 pub fn is_allowed(service_name: &str, box_type: BoxType) -> bool {
-    // Core systemd units are always kept on every box.
-    if service_name.starts_with("systemd-") {
+    // Core systemd units are kept on every box, but only genuine ones: the
+    // unit file must be the vendor copy. A `systemd-update.service` an
+    // attacker dropped in /etc/systemd/system gets no free pass.
+    if is_vendor_systemd_unit(service_name, VENDOR_UNIT_DIRS, OVERRIDE_UNIT_DIRS) {
         return true;
     }
     // Scored services and their dependencies (Splunkd, mariadb, NetworkManager,
@@ -616,11 +641,30 @@ mod tests {
     }
 
     #[test]
-    fn systemd_prefix_always_allowed() {
-        assert!(is_allowed("systemd-journald", BoxType::Web));
-        assert!(is_allowed("systemd-networkd", BoxType::Mail));
-        assert!(is_allowed("systemd-resolved", BoxType::Splunk));
-        assert!(is_allowed("systemd-logind", BoxType::General));
+    fn systemd_units_are_allowed_only_when_they_are_vendor_files() {
+        let vendor = tempfile::TempDir::new().unwrap();
+        let local = tempfile::TempDir::new().unwrap();
+        for f in [
+            "systemd-journald.service",
+            "systemd-fsck@.service",
+            "systemd-resolved.service",
+        ] {
+            std::fs::write(vendor.path().join(f), "").unwrap();
+        }
+        // An attacker unit with a systemd- name, and a local copy shadowing a
+        // vendor unit.
+        std::fs::write(local.path().join("systemd-update.service"), "").unwrap();
+        std::fs::write(local.path().join("systemd-resolved.service"), "").unwrap();
+        let v = [vendor.path().to_str().unwrap()];
+        let o = [local.path().to_str().unwrap()];
+
+        assert!(is_vendor_systemd_unit("systemd-journald", &v, &o));
+        assert!(is_vendor_systemd_unit("systemd-fsck@", &v, &o));
+        assert!(is_vendor_systemd_unit("systemd-fsck@dev-sda1", &v, &o));
+        assert!(!is_vendor_systemd_unit("systemd-update", &v, &o));
+        assert!(!is_vendor_systemd_unit("systemd-resolved", &v, &o));
+        assert!(!is_vendor_systemd_unit("journald", &v, &o));
+        assert!(!is_vendor_systemd_unit("systemd-../../tmp/x", &v, &o));
     }
 
     #[test]

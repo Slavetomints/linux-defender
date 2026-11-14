@@ -61,14 +61,14 @@ fn check_hidden_intercept_files(ctx: &DefenderContext) {
             ctx.log_evidence_file(&path);
             try_clear_immutable(&path);
 
-            let (removed, msg_count) = if path.is_dir() {
-                let count = fs::read_dir(&path)
+            let msg_count = if path.is_dir() {
+                fs::read_dir(&path)
                     .map(|d| d.filter_map(|e| e.ok()).count())
-                    .unwrap_or(0);
-                (fs::remove_dir_all(&path).is_ok(), count)
+                    .unwrap_or(0)
             } else {
-                (ctx.remove_path_logged(&path), 0)
+                0
             };
+            let removed = ctx.remove_path_logged(&path);
 
             let detail = if path.is_dir() || msg_count > 0 {
                 format!(

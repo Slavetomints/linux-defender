@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::core::scan::{effective_line, read_text_file, suspicious_matches};
+use crate::core::scan::{effective_line, has_strong_reason, read_text_file, suspicious_matches};
 use crate::core::{Action, DefenderContext, Finding, Result, Severity, Verdict, collect_accounts};
 
 /// Files sourced for all users.
@@ -78,6 +78,10 @@ pub fn run(ctx: &DefenderContext) -> Result {
     }
 
     for hit in &hits {
+        if !has_strong_reason(&hit.reasons) {
+            report_weak_hit(ctx, hit);
+            continue;
+        }
         // Log the suspicious line as evidence before emitting the finding.
         ctx.log_msg(&format!(
             "[!] Suspicious line in {}: {}  [{}]",
@@ -203,6 +207,10 @@ fn scan_skel(ctx: &DefenderContext) -> usize {
         let hits = inspect_file(&path);
         for hit in hits {
             count += 1;
+            if !has_strong_reason(&hit.reasons) {
+                report_weak_hit(ctx, &hit);
+                continue;
+            }
             let fname = hit
                 .file
                 .file_name()
@@ -248,6 +256,37 @@ fn scan_skel(ctx: &DefenderContext) -> usize {
         }
     }
     count
+}
+
+/// Report a line whose matches are all weak (an `export ... curl` helper, a
+/// `python3 -c` one-liner) without editing the file.
+fn report_weak_hit(ctx: &DefenderContext, hit: &Hit) {
+    ctx.emit(
+        Finding::new(
+            Severity::Medium,
+            "startup_scripts",
+            format!(
+                "Review line in {}: {}",
+                hit.file.display(),
+                crate::core::truncate_chars(&hit.line, 60)
+            ),
+            format!(
+                "file: {}\nline: {}\nreasons: {}\nremoved: false",
+                hit.file.display(),
+                hit.line,
+                hit.reasons.join(", ")
+            ),
+        )
+        .with_path(hit.file.clone())
+        .with_verdict(
+            Verdict::Investigate,
+            format!(
+                "Matched only [{}], which also appears in legitimate shell config, so the \
+                 line was left in place. Delete it by hand if it is not expected.",
+                hit.reasons.join(", ")
+            ),
+        ),
+    );
 }
 
 /// Dangerous lines in one startup file, if it can be read.

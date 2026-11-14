@@ -11,7 +11,8 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::core::scan::{
-    effective_line, read_text_file, references_untrusted_dir, suspicious_matches,
+    effective_line, has_strong_reason, invokes_netcat, read_text_file, references_untrusted_dir,
+    references_volatile_dir, suspicious_matches,
 };
 use crate::core::{
     DefenderContext, DefenderError, Finding, Result, Severity, Verdict, require_root,
@@ -21,7 +22,6 @@ use crate::core::{
 /// Additional patterns that are specifically relevant in cron contexts but are
 /// not included in the shared suspicious-pattern set.
 const CRON_EXTRA: &[(&str, &str)] = &[
-    ("nc -", "netcat connection"),
     ("nohup", "background execution detached from terminal"),
     ("chmod +x", "make-executable (stage two of a dropper)"),
 ];
@@ -93,6 +93,10 @@ fn scan_crontab_file(ctx: &DefenderContext, path: &Path) {
 
         let reasons = matched_patterns(line);
         if reasons.is_empty() {
+            continue;
+        }
+        if !has_strong_reason(&reasons) {
+            report_weak_line(ctx, path, line, &reasons);
             continue;
         }
 
@@ -186,6 +190,13 @@ fn scan_cron_d_file(ctx: &DefenderContext, path: &Path) {
         .collect();
 
     if hits.is_empty() {
+        return;
+    }
+    // A whole cron.d file is quarantined only on strong evidence.
+    if !hits.iter().any(|(_, r)| has_strong_reason(r)) {
+        for (line, reasons) in &hits {
+            report_weak_line(ctx, path, line, reasons);
+        }
         return;
     }
 
@@ -350,6 +361,15 @@ fn scan_periodic_dir(ctx: &DefenderContext, dir: &Path) {
         if suspicious_lines.is_empty() {
             continue;
         }
+        if !suspicious_lines
+            .iter()
+            .any(|l| has_strong_reason(&matched_patterns(l)))
+        {
+            for line in &suspicious_lines {
+                report_weak_line(ctx, &path, line, &matched_patterns(line));
+            }
+            continue;
+        }
 
         let reasons: Vec<String> = suspicious_lines
             .iter()
@@ -426,11 +446,18 @@ fn matched_patterns(line: &str) -> Vec<String> {
         .map(str::to_string)
         .collect();
 
-    if references_untrusted_dir(line) {
+    if references_volatile_dir(line) {
         let r = "execution from world-writable directory";
         if !reasons.iter().any(|s| s == r) {
             reasons.push(r.to_string());
         }
+    } else if references_untrusted_dir(line) {
+        reasons.push("execution from a home directory".to_string());
+    }
+
+    // Token match, not the old "nc -" substring that also hit `rsync -a`.
+    if invokes_netcat(line) {
+        reasons.push("netcat connection".to_string());
     }
 
     let lowered = line.to_lowercase();
@@ -451,6 +478,37 @@ fn matched_patterns(line: &str) -> Vec<String> {
     }
 
     reasons
+}
+
+/// Report a line whose matches are all weak (see
+/// [`crate::core::scan::WEAK_REASONS`]) without touching the file.
+fn report_weak_line(ctx: &DefenderContext, path: &Path, line: &str, reasons: &[String]) {
+    ctx.emit(
+        Finding::new(
+            Severity::Medium,
+            "cron_system",
+            format!(
+                "Review cron entry in {}: {}",
+                path.display(),
+                crate::core::truncate_chars(line, 60)
+            ),
+            format!(
+                "file: {}\nline: {}\npatterns: {}\nremoved: false",
+                path.display(),
+                line,
+                reasons.join(", ")
+            ),
+        )
+        .with_path(path.to_path_buf())
+        .with_verdict(
+            Verdict::Investigate,
+            format!(
+                "Matched only [{}], which also shows up in legitimate jobs, so the entry \
+                 was left in place. Remove it by hand if it is not expected.",
+                reasons.join(", ")
+            ),
+        ),
+    );
 }
 
 /// True if any whitespace-delimited token in `line` looks like a path with a
@@ -559,6 +617,20 @@ mod tests {
             .filter(|s| s.as_str() == "execution from world-writable directory")
             .count();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn rsync_is_not_mistaken_for_netcat() {
+        let r = matched_patterns("0 4 * * * root rsync -a /srv /mnt/backup");
+        assert!(r.is_empty(), "rsync flagged: {r:?}");
+    }
+
+    #[test]
+    fn certbot_cron_is_not_a_removal_candidate() {
+        let r = matched_patterns(
+            "0 */12 * * * root test -x /usr/bin/certbot && perl -e 'sleep int(rand(43200))' && certbot -q renew",
+        );
+        assert!(!has_strong_reason(&r), "{r:?}");
     }
 
     #[test]

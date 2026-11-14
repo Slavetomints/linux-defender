@@ -863,7 +863,7 @@ pub fn ensure_mysql(
 
 /// Run `sql` as the MariaDB root user, passing the statements on stdin so
 /// passwords never appear in the process list.
-fn run_mysql_root(sql: &str) -> Result<std::process::Output> {
+pub(crate) fn run_mysql_root(sql: &str) -> Result<std::process::Output> {
     use std::io::Write;
     let mut child = Command::new("mysql")
         .args(["-u", "root", "--batch"])
@@ -883,7 +883,7 @@ fn run_mysql_root(sql: &str) -> Result<std::process::Output> {
 /// Reject database and user names that are not plain identifiers. They are
 /// interpolated into SQL, so anything beyond letters, digits, `_`, `-` and
 /// `.` is refused rather than escaped.
-fn validate_sql_identifier(value: &str, what: &str) -> Result<()> {
+pub(crate) fn validate_sql_identifier(value: &str, what: &str) -> Result<()> {
     let ok = !value.is_empty()
         && value.len() <= 64
         && value
@@ -917,8 +917,10 @@ fn sql_string_literal(value: &str) -> String {
 /// SQL that creates `db_name` and gives `db_user` (identified by `db_pass`)
 /// full rights on it. Identifiers must already be validated. A `root` user is
 /// left alone: only the database is created.
-fn app_database_sql(db_name: &str, db_user: &str, db_pass: &str) -> String {
-    let mut sql = format!("CREATE DATABASE IF NOT EXISTS `{db_name}`;\n");
+pub(crate) fn app_database_sql(db_name: &str, db_user: &str, db_pass: &str) -> String {
+    let mut sql = format!(
+        "CREATE DATABASE IF NOT EXISTS `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n"
+    );
     if db_user != "root" {
         let user = format!("{}@'localhost'", sql_string_literal(db_user));
         let pass = sql_string_literal(db_pass);
@@ -1218,7 +1220,7 @@ mod tests {
     #[test]
     fn database_sql_escapes_passwords_and_never_touches_root() {
         let sql = app_database_sql("opencart", "oc_user", "p'w\\d");
-        assert!(sql.contains("CREATE DATABASE IF NOT EXISTS `opencart`;"));
+        assert!(sql.contains("CREATE DATABASE IF NOT EXISTS `opencart` CHARACTER SET utf8mb4"));
         assert!(sql.contains("IDENTIFIED BY 'p\\'w\\\\d'"));
         assert!(sql.contains("GRANT ALL PRIVILEGES ON `opencart`.* TO 'oc_user'@'localhost';"));
         assert!(!sql.contains("'root'"));

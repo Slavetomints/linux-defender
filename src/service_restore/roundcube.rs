@@ -16,6 +16,7 @@ use std::process::Command;
 use crate::core::{DefenderContext, DefenderError, Result, prompt_yes};
 
 use super::distro::{Distro, enable_and_restart, restore_config_from_backup};
+use super::webserver::{app_database_sql, run_mysql_root, validate_sql_identifier};
 
 /// Return the Roundcube package set for `distro`.
 fn roundcube_packages(distro: Distro) -> &'static [&'static str] {
@@ -64,10 +65,19 @@ pub fn run(ctx: &DefenderContext) -> Result {
         pkgs.join(" "),
         distro.name()
     ));
-    let output = distro
-        .install_cmd(pkgs)
+    // Reinstall, not install: install is a no-op for packages that are
+    // already present, which leaves tampered roundcube files in place.
+    // `dnf reinstall` refuses packages that are missing, so fall back.
+    let mut output = distro
+        .reinstall_cmd(pkgs)
         .output()
         .map_err(|e| DefenderError::Command(format!("package manager: {e}")))?;
+    if !output.status.success() {
+        output = distro
+            .install_cmd(pkgs)
+            .output()
+            .map_err(|e| DefenderError::Command(format!("package manager: {e}")))?;
+    }
 
     if !output.status.success() {
         return Err(DefenderError::Command(format!(
@@ -142,20 +152,30 @@ pub fn run(ctx: &DefenderContext) -> Result {
             let dbuser = grab("dbuser");
             let dbpass = grab("dbpass");
             let dbname = grab("dbname");
-            if !dbname.is_empty() {
-                let setup = format!(
-                    "CREATE DATABASE IF NOT EXISTS `{dbname}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\
-                     CREATE USER IF NOT EXISTS '{dbuser}'@'localhost' IDENTIFIED BY '{dbpass}';\
-                     GRANT ALL PRIVILEGES ON `{dbname}`.* TO '{dbuser}'@'localhost';\
-                     FLUSH PRIVILEGES;"
-                );
-                let _ = Command::new("mysql").args(["-e", &setup]).output();
-                // Initialize schema (idempotent — errors if tables exist, which is fine).
+            // These values come from a file on a possibly compromised box:
+            // validate the identifiers, escape the password, and never hand
+            // them to a shell.
+            let ids_ok = validate_sql_identifier(&dbname, "roundcube database name").is_ok()
+                && validate_sql_identifier(&dbuser, "roundcube database user").is_ok();
+            if !ids_ok {
+                ctx.progress(&format!(
+                    "[!] {db_conf} has an unusable dbname/dbuser; database NOT initialised"
+                ));
+            } else {
+                match run_mysql_root(&app_database_sql(&dbname, &dbuser, &dbpass)) {
+                    Ok(o) if o.status.success() => {}
+                    Ok(o) => ctx.progress(&format!(
+                        "[!] roundcube database setup failed: {}",
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    )),
+                    Err(e) => ctx.progress(&format!("[!] roundcube database setup failed: {e}")),
+                }
+                // Initialize schema (errors if tables exist, which is fine).
                 let schema = "/usr/share/roundcube/SQL/mysql.initial.sql";
-                if std::path::Path::new(schema).exists() {
-                    let _ = Command::new("sh")
-                        .arg("-c")
-                        .arg(format!("mysql {dbname} < {schema}"))
+                if let Ok(schema_file) = std::fs::File::open(schema) {
+                    let _ = Command::new("mysql")
+                        .args(["-u", "root", "--", &dbname])
+                        .stdin(schema_file)
                         .output();
                 }
                 ctx.progress(&format!("[✓] Database '{dbname}' ready"));

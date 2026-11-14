@@ -250,40 +250,22 @@ fn wipe_local(ctx: &DefenderContext) -> Result {
     ctx.debug(&format!("wiping {LOCAL_DIR}"));
     ctx.progress(&format!("[+] Clearing {LOCAL_DIR}..."));
 
-    let mut wiped = 0usize;
-    let mut failed = 0usize;
-    for entry in fs::read_dir(local)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        let result = if path.is_dir() {
-            fs::remove_dir_all(&path).map_err(|e| e.to_string())
-        } else {
-            fs::remove_file(&path).map_err(|e| e.to_string())
-        };
-
-        match result {
-            Ok(()) => {
-                ctx.debug(&format!("removed {}", path.display()));
-                wiped += 1;
-            }
-            Err(e) => {
-                ctx.progress(&format!(
-                    "[!] could not remove {}: {e} (chattr +i?)",
-                    path.display()
-                ));
-                failed += 1;
-            }
-        }
-    }
-
-    if failed > 0 {
+    // Moved, not deleted: the local layer holds the admin's real config too
+    // (inputs, auth, indexes), so it has to be recoverable.
+    let (saved, failed) = crate::core::context::quarantine_dir_contents(local)?;
+    for (path, e) in &failed {
         ctx.progress(&format!(
-            "[!] Removed {wiped} entries from {LOCAL_DIR}; {failed} could not be removed"
+            "[!] could not move {}: {e} (chattr +i?)",
+            path.display()
         ));
-    } else {
-        ctx.progress(&format!("[✓] Removed {wiped} entries from {LOCAL_DIR}"));
     }
+    ctx.progress(&format!(
+        "[✓] Moved the contents of {LOCAL_DIR} to {} ({} could not be moved). \
+         Put them back with: cp -a '{}/.' '{LOCAL_DIR}/'",
+        saved.display(),
+        failed.len(),
+        saved.display()
+    ));
     Ok(())
 }
 

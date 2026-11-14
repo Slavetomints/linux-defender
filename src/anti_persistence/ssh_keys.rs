@@ -5,7 +5,6 @@
 //! comment, not the base64 body — so the operator can see what a key claims to
 //! be before deciding.
 
-use std::fs;
 use std::path::PathBuf;
 
 use crate::core::{
@@ -43,7 +42,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
             continue;
         }
 
-        let contents = fs::read_to_string(&keyfile).unwrap_or_default();
+        let contents = crate::core::scan::read_text_file(&keyfile).unwrap_or_default();
         let keys = parse_authorized_keys(&contents);
         if keys.is_empty() {
             continue;

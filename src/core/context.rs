@@ -348,7 +348,9 @@ impl DefenderContext {
             return;
         }
 
-        match std::fs::read(path) {
+        // Bounded, non-blocking, regular files only: evidence paths are
+        // attacker-controlled and may be FIFOs or huge.
+        match crate::core::scan::read_regular_file(path, 1024 * 1024) {
             Err(e) => {
                 let msg = format!("  (could not read: {})", e);
                 self.log_msg(&msg);

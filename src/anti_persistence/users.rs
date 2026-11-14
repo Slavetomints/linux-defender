@@ -351,7 +351,7 @@ fn has_nopasswd_sudo(name: &str) -> bool {
 
 /// Return true if `name` appears in the sudoers file at `path` with a NOPASSWD rule.
 fn check_sudoers_file(path: &str, name: &str) -> bool {
-    let Ok(contents) = fs::read_to_string(path) else {
+    let Some(contents) = crate::core::scan::read_text_file(Path::new(path)) else {
         return false;
     };
     contents
@@ -374,7 +374,7 @@ fn read_sudoers_d() -> Vec<String> {
 /// Number of public keys in `home/.ssh/authorized_keys`.
 fn count_ssh_keys(home: &std::path::Path) -> usize {
     let path = home.join(".ssh").join("authorized_keys");
-    let Ok(contents) = fs::read_to_string(path) else {
+    let Some(contents) = crate::core::scan::read_text_file(&path) else {
         return 0;
     };
     contents

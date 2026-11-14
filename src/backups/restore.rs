@@ -2,8 +2,10 @@
 //!
 //! Reads the `H@shes.txt` manifest that every backup pass writes, then
 //! copies each backed-up file back to its original location on the live
-//! system. Every copy is gated on [`DefenderContext::run_remediation`] so
-//! the operator approves (or skips) each overwrite.
+//! system. When run from a terminal the operator confirms the restore once,
+//! up front; every copy is then logged through
+//! [`DefenderContext::run_remediation`]. A backup copy whose SHA-256 no longer
+//! matches the manifest is skipped rather than restored.
 //!
 //! # Workflow
 //!
@@ -16,10 +18,11 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::all::HASH_FILE;
-use crate::core::{DefenderContext, DefenderError, Result};
+use super::hash::hash_file;
+use crate::core::{DefenderContext, DefenderError, Result, prompt_yes};
 
 /// Marker value recorded for directory entries in the manifest.
 const MARKER_DIR: &str = "<dir>";
@@ -53,10 +56,44 @@ pub fn bak_name_for(path: &str) -> String {
     format!("{}.bak", path.replace('/', "_"))
 }
 
+/// Find the backup copy of `orig_path` inside `backup_dir`.
+///
+/// The backup pass stores each top-level path as one entry: a file becomes
+/// `<name>.bak`, a directory becomes a `<name>.bak/` tree holding its contents.
+/// The manifest, however, lists every file individually. So walk up from
+/// `orig_path` to the nearest ancestor that has a `.bak` entry and resolve the
+/// rest of the path inside it. Paths listed with a trailing slash produced a
+/// `<name>_.bak` entry, which is tried as well.
+pub fn locate_backup_copy(backup_dir: &Path, orig_path: &str) -> Option<PathBuf> {
+    let orig = Path::new(orig_path);
+    for ancestor in orig.ancestors() {
+        let ancestor_str = ancestor.to_string_lossy();
+        if ancestor_str.is_empty() || ancestor_str == "/" {
+            break;
+        }
+        let rest = orig.strip_prefix(ancestor).ok()?;
+        for name in [
+            bak_name_for(&ancestor_str),
+            bak_name_for(&format!("{ancestor_str}/")),
+        ] {
+            let bak = backup_dir.join(name);
+            let candidate = if rest.as_os_str().is_empty() {
+                bak
+            } else {
+                bak.join(rest)
+            };
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 /// Restore files from `backup_dir` back to their original locations.
 ///
-/// Requires `backup_dir` to contain a `H@shes.txt` manifest.  Each file
-/// restore is individually prompted via [`DefenderContext::run_remediation`].
+/// Requires `backup_dir` to contain a `H@shes.txt` manifest. Interactive runs
+/// ask for one confirmation before anything is overwritten.
 pub fn run(ctx: &DefenderContext, backup_dir: &Path) -> Result {
     if !backup_dir.exists() {
         return Err(DefenderError::Other(format!(
@@ -82,9 +119,24 @@ pub fn run(ctx: &DefenderContext, backup_dir: &Path) -> Result {
         entries.len()
     ));
 
+    let file_count = entries
+        .values()
+        .filter(|d| *d != MARKER_DIR && *d != MARKER_OTHER)
+        .count();
+    if ctx.interactive()
+        && !prompt_yes(&format!(
+            "[?] Overwrite up to {file_count} live file(s) with the copies in {}? (y/N)",
+            backup_dir.display()
+        ))?
+    {
+        ctx.log_msg("[-] Restore cancelled");
+        return Ok(());
+    }
+
     let mut restored = 0usize;
     let mut skipped = 0usize;
     let mut missing = 0usize;
+    let mut tampered = 0usize;
 
     for (orig_path, digest) in &entries {
         // Skip directory and non-file placeholders.
@@ -92,27 +144,33 @@ pub fn run(ctx: &DefenderContext, backup_dir: &Path) -> Result {
             continue;
         }
 
-        let bak_file = backup_dir.join(bak_name_for(orig_path));
+        let Some(src) = locate_backup_copy(backup_dir, orig_path) else {
+            ctx.log_msg(&format!(
+                "[!] Backup copy not found for {orig_path}, skipping"
+            ));
+            missing += 1;
+            continue;
+        };
 
-        // The backup may have stored the top-level path (a directory) as a
-        // single `.bak` entry; if the bak is itself a directory, look for the
-        // specific file inside it.
-        let src = if bak_file.is_file() {
-            bak_file
-        } else {
-            // Try stripping the leading '/' and looking relative to backup_dir.
-            let rel = orig_path.trim_start_matches('/');
-            let alt = backup_dir.join(rel);
-            if alt.is_file() {
-                alt
-            } else {
+        // The backup directory sits on the same box the attacker is on. Only
+        // restore a copy that still matches what the manifest recorded.
+        match hash_file(&src) {
+            Ok(actual) if actual == *digest => {}
+            Ok(_) => {
                 ctx.log_msg(&format!(
-                    "[!] Backup copy not found for {orig_path}, skipping"
+                    "[!] Backup copy of {orig_path} does not match the manifest hash, skipping (possible tampering)"
                 ));
-                missing += 1;
+                tampered += 1;
                 continue;
             }
-        };
+            Err(e) => {
+                ctx.log_msg(&format!(
+                    "[!] Could not read backup copy of {orig_path}: {e}, skipping"
+                ));
+                skipped += 1;
+                continue;
+            }
+        }
 
         let dst = Path::new(orig_path);
         let src_str = src.to_string_lossy();
@@ -141,7 +199,7 @@ pub fn run(ctx: &DefenderContext, backup_dir: &Path) -> Result {
     }
 
     ctx.log_msg(&format!(
-        "[✓] Restore complete: {restored} restored, {skipped} skipped, {missing} backup copies missing"
+        "[✓] Restore complete: {restored} restored, {skipped} skipped, {missing} backup copies missing, {tampered} failed hash check"
     ));
 
     Ok(())
@@ -191,6 +249,66 @@ mod tests {
             bak_name_for("/var/www/html/index.php"),
             "_var_www_html_index.php.bak"
         );
+    }
+
+    /// Files inside a backed-up directory resolve inside that directory's
+    /// `.bak` tree, including the trailing-slash naming variant.
+    #[test]
+    fn locates_files_inside_directory_backups() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let b = dir.path();
+        fs::create_dir_all(b.join("_etc_pam.d.bak")).unwrap();
+        fs::write(b.join("_etc_pam.d.bak/sshd"), "x").unwrap();
+        fs::create_dir_all(b.join("_etc_nginx_conf.d_.bak/sub")).unwrap();
+        fs::write(b.join("_etc_nginx_conf.d_.bak/sub/a.conf"), "x").unwrap();
+        fs::write(b.join("_etc_hosts.bak"), "x").unwrap();
+
+        assert_eq!(
+            locate_backup_copy(b, "/etc/pam.d/sshd"),
+            Some(b.join("_etc_pam.d.bak/sshd"))
+        );
+        assert_eq!(
+            locate_backup_copy(b, "/etc/nginx/conf.d/sub/a.conf"),
+            Some(b.join("_etc_nginx_conf.d_.bak/sub/a.conf"))
+        );
+        assert_eq!(
+            locate_backup_copy(b, "/etc/hosts"),
+            Some(b.join("_etc_hosts.bak"))
+        );
+        assert_eq!(locate_backup_copy(b, "/etc/missing/file"), None);
+    }
+
+    /// A full backup followed by a restore puts a deleted nested file back,
+    /// and refuses a backup copy that was modified after the backup.
+    #[test]
+    fn round_trip_restores_nested_files_and_rejects_tampered_copies() {
+        let src = tempfile::TempDir::new().unwrap();
+        let save = tempfile::TempDir::new().unwrap();
+        let tree = src.path().join("conf");
+        fs::create_dir_all(tree.join("sub")).unwrap();
+        let good = tree.join("sub/good.conf");
+        let bad = tree.join("bad.conf");
+        fs::write(&good, "good").unwrap();
+        fs::write(&bad, "original").unwrap();
+
+        // Report goes to a file, and a progress channel makes the context
+        // non-interactive so the confirmation prompt is skipped.
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let ctx = crate::core::DefenderContext::new(save.path().join("report.txt"), false)
+            .with_progress(tx);
+        let tree_str = tree.to_string_lossy().to_string();
+        let save_loc = Some(save.path().to_path_buf());
+        super::super::all::run_with_paths(&ctx, &save_loc, &[tree_str.as_str()]).unwrap();
+
+        fs::remove_file(&good).unwrap();
+        fs::write(&bad, "attacker edit").unwrap();
+        let bak_bad = locate_backup_copy(save.path(), &bad.to_string_lossy()).unwrap();
+        fs::write(&bak_bad, "poisoned backup").unwrap();
+
+        run(&ctx, save.path()).unwrap();
+
+        assert_eq!(fs::read_to_string(&good).unwrap(), "good");
+        assert_eq!(fs::read_to_string(&bad).unwrap(), "attacker edit");
     }
 
     /// `run` returns an error when the backup directory does not exist.

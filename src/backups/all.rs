@@ -88,12 +88,14 @@ pub fn run_with_paths(
 
         let dest = save_path.join(format!("{}.bak", path.replace('/', "_")));
 
+        // -a keeps owner, group, mode, timestamps and symlinks, so a later
+        // restore puts files back with the ownership the service expects.
         let output = Command::new("cp")
-            .arg("-r")
+            .arg("-a")
             .arg(path)
             .arg(&dest)
             .output()
-            .map_err(|e| DefenderError::Command(format!("cp -r {}: {}", path, e)))?;
+            .map_err(|e| DefenderError::Command(format!("cp -a {}: {}", path, e)))?;
 
         if output.status.success() {
             writeln!(log, "[+] Backed up {}", path)?;

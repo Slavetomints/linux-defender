@@ -1100,10 +1100,13 @@ impl App {
 
         let finding_tx = self.hardening_finding_tx.clone();
         let progress_tx = self.hardening_progress_tx.clone();
+        let box_type = self.box_type;
 
         std::thread::spawn(move || {
             let report = crate::core::log_path("hardening.log");
-            let mut ctx = DefenderContext::new(report, false).with_progress(progress_tx.clone());
+            let mut ctx = DefenderContext::new(report, false)
+                .with_progress(progress_tx.clone())
+                .with_box_type(box_type);
             ctx.finding_tx = Some(finding_tx);
 
             let args = crate::system_hardening::CliArgs {

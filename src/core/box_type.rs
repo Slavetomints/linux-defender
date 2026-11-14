@@ -182,7 +182,11 @@ pub fn is_scored_unit(unit: &str) -> bool {
 
 /// Probe the filesystem to guess what kind of box this is.
 pub fn detect_box_type() -> BoxType {
-    if Path::new("/opt/splunk").exists() || Path::new("/opt/splunkforwarder").exists() {
+    // Only Splunk Enterprise makes this the Splunk box. The universal
+    // forwarder (/opt/splunkforwarder) gets installed on every box we want
+    // logs from, and treating those as Splunk boxes picks the wrong firewall
+    // profile and service allow-list.
+    if Path::new("/opt/splunk/bin/splunk").exists() || Path::new("/opt/splunk/etc").is_dir() {
         return BoxType::Splunk;
     }
     let has_postfix = Path::new("/usr/sbin/postfix").exists() || Path::new("/etc/postfix").exists();

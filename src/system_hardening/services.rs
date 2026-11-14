@@ -24,7 +24,7 @@ use std::process::Command;
 
 use crate::core::{
     Action, BoxType, DefenderContext, DefenderError, Finding, Result, Severity, Verdict,
-    detect_box_type, is_scored_unit, require_root,
+    is_scored_unit, require_root,
 };
 
 /// Services that must never be disabled regardless of box type.
@@ -232,7 +232,9 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
     ctx.log_msg("[+] Hardening enabled services...");
 
-    let box_type = detect_box_type();
+    // Use the box type the operator confirmed in the TUI when there is one;
+    // detection alone can be wrong (a forwarder on a web box, say).
+    let box_type = ctx.box_type();
     ctx.log_msg(&format!(
         "[+] Detected box type: {} — using {} allow-list",
         box_type.label(),

@@ -36,43 +36,66 @@ const SYSCTL_CONF_PATH: &str = "/etc/sysctl.d/99-defender-hardening.conf";
 
 /// Apply or update a single `key value` directive in an sshd_config-format string.
 ///
-/// If a line matching `key` already exists (commented out or active), it is
-/// replaced with the new directive. If no such line exists, the directive is
-/// appended. Duplicate occurrences after the first are silently dropped.
+/// sshd uses the FIRST value it reads for a keyword, and `Include` pulls
+/// drop-ins in wherever it appears. So every global occurrence of `key`
+/// (active or commented, matched case-insensitively) is removed and the
+/// directive is placed at the top of the global section: after the leading
+/// comment header, before any `Include` and before the first `Match` block.
+/// `Match` blocks are left untouched, and a directive never lands inside one.
 pub(crate) fn apply_ssh_setting(contents: &str, key: &str, value: &str) -> String {
     let directive = format!("{} {}", key, value);
-    let mut found = false;
-    let mut output = String::new();
+    let lines: Vec<&str> = contents.lines().collect();
 
-    for line in contents.lines() {
-        let trimmed = line.trim();
-        let stripped = trimmed.trim_start_matches('#').trim();
-        // Match both active and commented-out versions of this directive.
-        // Check that the next character after the key is a delimiter (space, =, or EOL)
-        // so we don't match "PermitRootLoginWithCert" when seeking "PermitRootLogin".
-        if let Some(rest) = stripped.strip_prefix(key) {
-            let is_this_key =
-                rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace() || c == '=');
-            if is_this_key {
-                if !found {
-                    output.push_str(&directive);
-                    output.push('\n');
-                    found = true;
-                }
-                // Drop duplicate occurrences.
-                continue;
-            }
+    let match_start = lines
+        .iter()
+        .position(|l| ssh_keyword(l.trim()).is_some_and(|k| k.eq_ignore_ascii_case("match")))
+        .unwrap_or(lines.len());
+
+    let is_this_key = |line: &str| {
+        let stripped = line.trim().trim_start_matches('#').trim();
+        ssh_keyword(stripped).is_some_and(|k| k.eq_ignore_ascii_case(key))
+    };
+
+    let global: Vec<&str> = lines[..match_start]
+        .iter()
+        .copied()
+        .filter(|l| !is_this_key(l))
+        .collect();
+    let insert_at = global
+        .iter()
+        .position(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with('#')
+        })
+        .unwrap_or(global.len());
+
+    let mut output = String::new();
+    for (i, line) in global.iter().enumerate() {
+        if i == insert_at {
+            output.push_str(&directive);
+            output.push('\n');
         }
         output.push_str(line);
         output.push('\n');
     }
-
-    if !found {
+    if insert_at == global.len() {
         output.push_str(&directive);
         output.push('\n');
     }
-
+    for line in &lines[match_start..] {
+        output.push_str(line);
+        output.push('\n');
+    }
     output
+}
+
+/// The keyword of an sshd_config line (`Key value` or `Key=value`), if any.
+fn ssh_keyword(line: &str) -> Option<&str> {
+    let end = line
+        .find(|c: char| c.is_whitespace() || c == '=')
+        .unwrap_or(line.len());
+    let kw = &line[..end];
+    (!kw.is_empty() && kw.chars().all(|c| c.is_ascii_alphanumeric())).then_some(kw)
 }
 
 /// Apply all SSH hardening settings from [`SSH_SETTINGS`] to a config string.
@@ -82,6 +105,61 @@ pub(crate) fn apply_all_ssh_settings(contents: &str) -> String {
         result = apply_ssh_setting(&result, key, value);
     }
     result
+}
+
+/// Write `contents` next to `path`, check it with `sshd -t`, save the original
+/// to quarantine, then atomically replace `path`. Nothing changes on failure.
+fn install_validated_sshd_config(
+    path: &Path,
+    contents: &str,
+    ctx: &DefenderContext,
+) -> std::result::Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = path.with_extension("linux-defender.tmp");
+    let mode = std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o777)
+        .unwrap_or(0o600);
+    std::fs::write(&tmp, contents).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
+
+    let sshd = ["/usr/sbin/sshd", "/usr/bin/sshd", "/sbin/sshd"]
+        .into_iter()
+        .find(|p| Path::new(p).exists())
+        .unwrap_or("sshd");
+    let check = std::process::Command::new(sshd)
+        .arg("-t")
+        .arg("-f")
+        .arg(&tmp)
+        .output();
+    let verdict = match check {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => Err(format!(
+            "sshd -t rejected it: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => Err(format!("could not run {sshd} -t to validate it: {e}")),
+    };
+    if let Err(e) = verdict {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    match crate::core::context::quarantine_copy(path) {
+        Ok(saved) => ctx.log_msg(&format!(
+            "[+] Original sshd_config saved to {}",
+            saved.display()
+        )),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("could not back up the original: {e}"));
+        }
+    }
+
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("replace {}: {e}", path.display())
+    })
 }
 
 /// Harden `/etc/ssh/sshd_config` and reload the SSH daemon.
@@ -113,8 +191,16 @@ fn harden_sshd(ctx: &DefenderContext) {
 
     ctx.log_evidence_line(SSHD_CONFIG_PATH, "(writing hardened config)");
 
-    if let Err(e) = std::fs::write(path, &hardened) {
-        ctx.log_msg(&format!("[!] Failed to write {}: {}", SSHD_CONFIG_PATH, e));
+    // Validate before installing: a config sshd rejects means no SSH at all
+    // on the next restart, and SSH is scored.
+    if let Err(e) = install_validated_sshd_config(path, &hardened, ctx) {
+        ctx.log_msg(&format!("[!] sshd_config NOT changed: {e}"));
+        ctx.emit(Finding::new(
+            Severity::Medium,
+            "configs",
+            "sshd_config hardening skipped — the hardened config did not validate",
+            format!("{e}\nThe original file was left in place."),
+        ));
         return;
     }
     ctx.log_msg(&format!("[+] Wrote hardened {}", SSHD_CONFIG_PATH));
@@ -331,6 +417,42 @@ AllowAgentForwarding yes\n";
     fn apply_ssh_setting_on_empty_config() {
         let result = apply_ssh_setting("", "PermitRootLogin", "no");
         assert!(result.contains("PermitRootLogin no"));
+    }
+
+    #[test]
+    fn settings_go_above_include_so_drop_ins_cannot_override_them() {
+        let config = "# header\nInclude /etc/ssh/sshd_config.d/*.conf\nPort 22\n";
+        let result = apply_all_ssh_settings(config);
+        let pos = |needle: &str| result.find(needle).unwrap();
+        assert!(pos("PermitRootLogin no") < pos("Include"));
+        assert!(pos("# header") < pos("PermitRootLogin no"));
+    }
+
+    #[test]
+    fn settings_never_land_inside_a_trailing_match_block() {
+        let config = "Port 22\nMatch User backup\n    PermitRootLogin yes\n    X11Forwarding yes\n";
+        let result = apply_all_ssh_settings(config);
+        let match_at = result.find("Match User backup").unwrap();
+        assert!(result.find("PermitRootLogin no").unwrap() < match_at);
+        assert!(result.find("X11Forwarding no").unwrap() < match_at);
+        // The Match block itself is preserved as written.
+        assert!(result[match_at..].contains("    PermitRootLogin yes"));
+    }
+
+    #[test]
+    fn keys_match_case_insensitively_and_with_equals() {
+        let config = "permitrootlogin yes\nMaxAuthTries=6\n";
+        let result = apply_all_ssh_settings(config);
+        assert!(!result.contains("permitrootlogin yes"));
+        assert!(!result.contains("MaxAuthTries=6"));
+        assert!(result.contains("PermitRootLogin no"));
+        assert!(result.contains("MaxAuthTries 3"));
+    }
+
+    #[test]
+    fn applying_all_settings_is_idempotent() {
+        let once = apply_all_ssh_settings(SAMPLE_SSHD_CONFIG);
+        assert_eq!(apply_all_ssh_settings(&once), once);
     }
 
     #[test]

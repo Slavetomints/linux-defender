@@ -1,6 +1,6 @@
 [package]
 name = "linux-defender"
-version = "1.0.5"
+version = "1.0.6"
 edition = "2024"
 # Verified in CI by .github/workflows/msrv.yml. Edition 2024 sets a hard floor
 # of 1.85; 1.86 is the oldest version the dependency tree builds and tests on.
@@ -61,6 +61,10 @@ path = "tests/system_hardening.rs"
 [[test]]
 name = "service_restore"
 path = "tests/service_restore.rs"
+
+[[test]]
+name = "router"
+path = "tests/router.rs"
 
 # Drives the built binary end to end; covers src/main.rs.
 [[test]]

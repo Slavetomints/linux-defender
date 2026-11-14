@@ -17,7 +17,7 @@ pub fn sys_arg(box_type: BoxType) -> &'static str {
         BoxType::Web => "webserver",
         BoxType::Mail => "mail",
         BoxType::Splunk => "splunk",
-        BoxType::General => "wrkstn",
+        BoxType::General | BoxType::Router => "wrkstn",
     }
 }
 

@@ -428,8 +428,74 @@ fn detect_upload_prefix(zip_path: &Path) -> Result<Option<String>> {
 
 /// Set ownership and permissions on a web root.
 ///
-/// Directories get `755`, regular files get `644`.
-pub fn fix_permissions(root: &Path, distro: &Distro, ctx: &DefenderContext) -> Result<()> {
+/// The tree ends up `root:<web user>` with directories `755` and files `644`,
+/// so the web server can read everything but a compromised PHP process cannot
+/// rewrite the application. Only the `writable` subdirectories (relative to
+/// `root`: caches, uploads) are handed to the web user.
+///
+/// Symlinks are never followed. Modes are set first, while the freshly
+/// extracted tree is still root-owned, so the web user cannot swap a file for
+/// a link to `/etc/shadow` between the walk and the chmod.
+pub fn fix_permissions(
+    root: &Path,
+    distro: &Distro,
+    writable: &[&str],
+    ctx: &DefenderContext,
+) -> Result<()> {
+    let web_user = web_server_user(distro);
+    let root_str = root
+        .to_str()
+        .ok_or_else(|| DefenderError::Other("web root path is not valid UTF-8".into()))?;
+
+    // 1. Modes, skipping symlinks (set_permissions would follow them).
+    for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+        let kind = entry.file_type();
+        if kind.is_symlink() {
+            continue;
+        }
+        let mode = if kind.is_dir() { 0o755 } else { 0o644 };
+        let _ = fs::set_permissions(entry.path(), fs::Permissions::from_mode(mode));
+    }
+
+    // 2. root:<web user> everywhere; -h acts on links themselves.
+    report_chown(
+        ctx,
+        Command::new("chown")
+            .args(["-R", "-h", &format!("root:{web_user}"), "--", root_str])
+            .output(),
+        &format!("root:{web_user}"),
+    );
+
+    // 3. The few directories the application must write to.
+    let mut granted = 0usize;
+    for rel in writable {
+        let dir = root.join(rel);
+        let Ok(meta) = fs::symlink_metadata(&dir) else {
+            continue;
+        };
+        if !meta.is_dir() || !dir.starts_with(root) {
+            continue;
+        }
+        let ok = Command::new("chown")
+            .args(["-R", "-h", &format!("{web_user}:{web_user}"), "--"])
+            .arg(&dir)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o775));
+        if ok {
+            granted += 1;
+        }
+    }
+
+    ctx.progress(&format!(
+        "[✓] Permissions set (root:{web_user}, dirs 755, files 644; {granted} writable dir(s) owned by {web_user})"
+    ));
+    Ok(())
+}
+
+/// The account the web server runs as on `distro`.
+fn web_server_user(distro: &Distro) -> &'static str {
     let candidates: &[&str] = match distro {
         Distro::Debian => &["www-data"],
         Distro::Rhel => &["apache", "www-data"],
@@ -437,8 +503,7 @@ pub fn fix_permissions(root: &Path, distro: &Distro, ctx: &DefenderContext) -> R
         Distro::Suse => &["wwwrun", "www-data"],
         Distro::Alpine => &["www-data", "nginx"],
     };
-
-    let web_user = candidates
+    candidates
         .iter()
         .find(|&&u| {
             Command::new("id")
@@ -448,37 +513,19 @@ pub fn fix_permissions(root: &Path, distro: &Distro, ctx: &DefenderContext) -> R
                 .unwrap_or(false)
         })
         .copied()
-        .unwrap_or("www-data");
+        .unwrap_or("www-data")
+}
 
-    let root_str = root
-        .to_str()
-        .ok_or_else(|| DefenderError::Other("web root path is not valid UTF-8".into()))?;
-
-    let output = Command::new("chown")
-        .args(["-R", &format!("{web_user}:{web_user}"), root_str])
-        .output()
-        .map_err(|e| DefenderError::Command(format!("chown: {e}")))?;
-
-    if output.status.success() {
-        ctx.progress(&format!("[✓] Ownership set to {web_user}:{web_user}"));
-    } else {
-        ctx.progress(&format!(
+/// Log the outcome of a chown run.
+fn report_chown(ctx: &DefenderContext, out: io::Result<std::process::Output>, owner: &str) {
+    match out {
+        Ok(o) if o.status.success() => ctx.progress(&format!("[✓] Ownership set to {owner}")),
+        Ok(o) => ctx.progress(&format!(
             "[!] chown failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => ctx.progress(&format!("[!] chown failed: {e}")),
     }
-
-    for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
-        let mode = if entry.file_type().is_dir() {
-            0o755
-        } else {
-            0o644
-        };
-        let _ = fs::set_permissions(entry.path(), fs::Permissions::from_mode(mode));
-    }
-
-    ctx.progress("[✓] Permissions set (dirs 755, files 644)");
-    Ok(())
 }
 
 // ── Web-server detection and reload ──────────────────────────────────────────
@@ -1121,6 +1168,26 @@ mod tests {
         assert!(validate_sql_identifier("", "db").is_err());
         assert!(validate_sql_identifier("a`; DROP DATABASE x; --", "db").is_err());
         assert!(validate_sql_identifier("o'c", "db").is_err());
+    }
+
+    #[test]
+    fn fix_permissions_never_follows_symlinks_out_of_the_web_root() {
+        let dir = TempDir::new().unwrap();
+        let outside = dir.path().join("shadow");
+        fs::write(&outside, "secret").unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).unwrap();
+        let root = dir.path().join("html");
+        fs::create_dir_all(root.join("image/cache")).unwrap();
+        fs::write(root.join("index.php"), "<?php").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("evil")).unwrap();
+
+        // chown fails without root; the mode pass is what matters here.
+        fix_permissions(&root, &Distro::Debian, &["image/cache"], &ctx()).unwrap();
+
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&outside), 0o600, "symlink target was chmod-ed");
+        assert_eq!(mode(&root.join("index.php")), 0o644);
+        assert_eq!(mode(&root.join("image/cache")), 0o775);
     }
 
     fn ctx() -> DefenderContext {

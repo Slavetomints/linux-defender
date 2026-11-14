@@ -229,7 +229,7 @@ pub fn run(
 
     // ── 7. Permissions and web server ─────────────────────────────────────────
     ctx.progress("[+] Fixing ownership and permissions...");
-    fix_permissions(&root, &distro, ctx)?;
+    fix_permissions(&root, &distro, WRITABLE_DIRS, ctx)?;
 
     ctx.progress("[+] Reloading web server...");
     reload_webserver(ctx)?;

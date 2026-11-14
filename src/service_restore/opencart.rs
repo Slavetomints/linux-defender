@@ -330,7 +330,9 @@ pub fn run(
     }
 
     ctx.progress("[+] Fixing ownership and permissions...");
-    fix_permissions(&root, &distro, ctx)?;
+    // image/ holds uploads and the resized-image cache; storage lives outside
+    // the web root (see move_storage) with its own ownership.
+    fix_permissions(&root, &distro, &["image", "system/storage"], ctx)?;
 
     ctx.progress("[+] Reloading web server...");
     reload_webserver(ctx)?;

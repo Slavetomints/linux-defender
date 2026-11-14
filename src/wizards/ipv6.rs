@@ -451,6 +451,71 @@ impl Ipv6Wizard {
 
 // ── Stack-specific helpers ────────────────────────────────────────────────────
 
+/// Name of the connection bound to `device` in `nmcli -t -f NAME,DEVICE
+/// connection show` output. Colons inside names are escaped as `\:` by nmcli.
+fn connection_for_device(nmcli_output: &str, device: &str) -> Option<String> {
+    nmcli_output.lines().find_map(|line| {
+        // Split on the last unescaped ':'.
+        let bytes = line.as_bytes();
+        let split = (0..bytes.len())
+            .rev()
+            .find(|&i| bytes[i] == b':' && (i == 0 || bytes[i - 1] != b'\\'))?;
+        let (name, dev) = (&line[..split], &line[split + 1..]);
+        (dev == device && !name.is_empty()).then(|| name.replace("\\:", ":"))
+    })
+}
+
+/// Replace any existing `iface <iface> inet6 ...` stanza in an
+/// `/etc/network/interfaces` file with `stanza`, so re-running the wizard does
+/// not pile up duplicate (conflicting) definitions.
+fn replace_inet6_stanza(existing: &str, iface: &str, stanza: &str) -> String {
+    let starts_stanza = |l: &str| {
+        let t = l.trim_start();
+        [
+            "iface ",
+            "auto ",
+            "allow-",
+            "mapping ",
+            "source ",
+            "source-directory ",
+        ]
+        .iter()
+        .any(|k| t.starts_with(k))
+    };
+    let is_ours = |l: &str| {
+        let mut toks = l.split_whitespace();
+        toks.next() == Some("iface") && toks.next() == Some(iface) && toks.next() == Some("inet6")
+    };
+    let mut out = String::new();
+    let mut skipping = false;
+    for line in existing.lines() {
+        if starts_stanza(line) {
+            skipping = is_ours(line);
+        }
+        if !skipping {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    while out.ends_with("\n\n") {
+        out.pop();
+    }
+    out.push_str(stanza);
+    out
+}
+
+/// Drop existing IPv6 keys from an ifcfg file before new ones are appended.
+fn strip_ifcfg_ipv6(existing: &str) -> String {
+    existing
+        .lines()
+        .filter(|l| {
+            let key = l.split('=').next().unwrap_or("").trim();
+            !matches!(key, "IPV6INIT" | "IPV6ADDR" | "IPV6_DEFAULTGW")
+        })
+        .map(|l| format!("{l}\n"))
+        .collect()
+}
+
 /// Apply the IPv6 config using `nmcli` (NetworkManager).
 fn apply_nmcli(
     iface: &str,
@@ -460,12 +525,25 @@ fn apply_nmcli(
     dns: &str,
     log: &Arc<Mutex<Vec<String>>>,
 ) {
+    // NetworkManager connections are rarely named after the device ("Wired
+    // connection 1", "System eth0"); `connection modify eth0` then fails.
+    let devices = super::cmd_output(&["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show"]);
+    let Some(conn) = connection_for_device(&devices, iface) else {
+        log.lock().unwrap().push(format!(
+            "  ERROR: no NetworkManager connection is bound to {iface}; \
+             check `nmcli connection show` and set it up there"
+        ));
+        return;
+    };
+    log.lock()
+        .unwrap()
+        .push(format!("  Using connection '{conn}' for {iface}"));
     let cidr = format!("{}/{}", addr, prefix);
     let mut args = vec![
         "nmcli",
         "connection",
         "modify",
-        iface,
+        conn.as_str(),
         "ipv6.method",
         "manual",
         "ipv6.addresses",
@@ -478,7 +556,7 @@ fn apply_nmcli(
         args.extend_from_slice(&["ipv6.dns", dns]);
     }
     super::run_cmd_to_log(&args, log);
-    super::run_cmd_to_log(&["nmcli", "connection", "up", iface], log);
+    super::run_cmd_to_log(&["nmcli", "connection", "up", conn.as_str()], log);
 }
 
 /// Apply the IPv6 config by writing a netplan YAML file and running `netplan apply`.
@@ -537,9 +615,19 @@ fn apply_interfaces(
 
     log.lock()
         .unwrap()
-        .push("→ Appending to /etc/network/interfaces…".into());
+        .push("→ Updating /etc/network/interfaces…".into());
     let existing = std::fs::read_to_string("/etc/network/interfaces").unwrap_or_default();
-    match std::fs::write("/etc/network/interfaces", existing + &stanza) {
+    if let Ok(saved) =
+        crate::core::context::quarantine_copy(std::path::Path::new("/etc/network/interfaces"))
+    {
+        log.lock()
+            .unwrap()
+            .push(format!("  ✓ Previous file saved to {}", saved.display()));
+    }
+    match std::fs::write(
+        "/etc/network/interfaces",
+        replace_inet6_stanza(&existing, iface, &stanza),
+    ) {
         Ok(_) => log.lock().unwrap().push("  ✓ Written".into()),
         Err(e) => {
             log.lock().unwrap().push(format!("  ERROR: {}", e));
@@ -577,10 +665,10 @@ fn apply_sysconfig(
     log: &Arc<Mutex<Vec<String>>>,
 ) {
     let path = format!("/etc/sysconfig/network-scripts/ifcfg-{}", iface);
-    let mut conf = format!(
-        "IPV6INIT=yes\nIPV6ADDR={}/{}\nIPV6_DEFAULTGW={}\n",
-        addr, prefix, gw
-    );
+    let mut conf = format!("IPV6INIT=yes\nIPV6ADDR={}/{}\n", addr, prefix);
+    if !gw.is_empty() {
+        conf.push_str(&format!("IPV6_DEFAULTGW={}\n", gw));
+    }
     if !dns.is_empty() {
         conf.push_str(&format!("DNS2={}\n", dns));
     }
@@ -589,7 +677,7 @@ fn apply_sysconfig(
         .unwrap()
         .push(format!("→ Appending IPv6 settings to {}…", path));
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    match std::fs::write(&path, existing + "\n" + &conf) {
+    match std::fs::write(&path, strip_ifcfg_ipv6(&existing) + &conf) {
         Ok(_) => log.lock().unwrap().push("  ✓ Written".into()),
         Err(e) => {
             log.lock().unwrap().push(format!("  ERROR: {}", e));
@@ -638,5 +726,42 @@ fn detect_net_stack() -> NetStack {
         NetStack::Interfaces
     } else {
         NetStack::Sysconfig
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_the_connection_bound_to_a_device() {
+        let out = "Wired connection 1:eth0\nlo:lo\nVPN\\: corp:\n";
+        assert_eq!(
+            connection_for_device(out, "eth0").as_deref(),
+            Some("Wired connection 1")
+        );
+        assert_eq!(connection_for_device(out, "eth1"), None);
+        let escaped = "my\\:conn:ens18\n";
+        assert_eq!(
+            connection_for_device(escaped, "ens18").as_deref(),
+            Some("my:conn")
+        );
+    }
+
+    #[test]
+    fn rerunning_replaces_the_inet6_stanza_instead_of_duplicating_it() {
+        let base = "auto eth0\niface eth0 inet dhcp\n";
+        let stanza = "\niface eth0 inet6 static\n    address 2001:db8::5\n    netmask 64\n";
+        let once = replace_inet6_stanza(base, "eth0", stanza);
+        let twice = replace_inet6_stanza(&once, "eth0", stanza);
+        assert_eq!(once, twice);
+        assert_eq!(twice.matches("inet6 static").count(), 1);
+        assert!(twice.contains("iface eth0 inet dhcp"));
+    }
+
+    #[test]
+    fn ifcfg_ipv6_keys_are_replaced_not_appended() {
+        let existing = "DEVICE=eth0\nIPV6INIT=yes\nIPV6ADDR=2001:db8::1/64\nONBOOT=yes\n";
+        assert_eq!(strip_ifcfg_ipv6(existing), "DEVICE=eth0\nONBOOT=yes\n");
     }
 }

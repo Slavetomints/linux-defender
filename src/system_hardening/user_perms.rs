@@ -2,24 +2,35 @@
 //!
 //! Three categories of action, each prompted before execution:
 //!
-//! 1. **Lock unused accounts** — any UID ≥ 1000 account with a login shell that
-//!    is not in the `ESSENTIAL_USERS` list is locked with `passwd -l`.
+//! 1. **Lock unused accounts** — a UID ≥ 1000 account with a login shell can be
+//!    locked with `passwd -l`, one account at a time and only on an explicit
+//!    yes from the operator. The invoking user (`SUDO_USER`), anyone currently
+//!    logged in, `ESSENTIAL_USERS`, and names listed in
+//!    `/etc/linux-defender/keep-users` are never offered. Without a terminal
+//!    to prompt on (the TUI), candidates are reported and nothing is locked.
 //! 2. **Fix sensitive file permissions** — `/etc/passwd` (644), `/etc/shadow`
 //!    (640), and `/etc/sudoers` (440) are `chmod`-ed to their correct values if
 //!    they are too permissive.
 //! 3. **Restrictive umask** — deploys `/etc/profile.d/99-hardening.sh` with
 //!    `umask 027` if not already present with that content.
 
+use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::process::Command;
 
 use crate::core::{
-    Action, DefenderContext, DefenderError, Finding, Result, Severity, Verdict, require_root,
+    Action, DefenderContext, DefenderError, Finding, Result, Severity, Verdict, prompt_yes,
+    require_root,
 };
 
 /// Accounts that must never be locked, regardless of their UID or shell.
 const ESSENTIAL_USERS: &[&str] = &["root", "sysadmin"];
+
+/// Operator-maintained list of accounts to keep, one name per line. Lines
+/// starting with `#` are comments.
+const KEEP_USERS_FILE: &str = "/etc/linux-defender/keep-users";
 
 /// Expected octal mode (lower 9 permission bits) for sensitive files.
 struct FileSpec {
@@ -75,12 +86,59 @@ pub fn run(ctx: &DefenderContext) -> Result {
     Ok(())
 }
 
-/// Lock every UID ≥ 1000 account that has a login shell and is not in
-/// [`ESSENTIAL_USERS`].
+/// Parse the keep-users file format: one account name per line, `#` comments.
+fn parse_keep_users(contents: &str) -> Vec<String> {
+    contents
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// First whitespace-separated field of each `who` line: the logged-in users.
+fn parse_who_users(who_output: &str) -> Vec<String> {
+    who_output
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Accounts that must not be locked on this run: the static essentials, the
+/// user who invoked us through sudo, everyone with a live session, and the
+/// operator's keep list. Locking any of these risks locking the team out.
+fn protected_users() -> HashSet<String> {
+    let mut protected: HashSet<String> = ESSENTIAL_USERS.iter().map(|s| s.to_string()).collect();
+
+    for var in ["SUDO_USER", "LOGNAME", "USER"] {
+        if let Ok(name) = std::env::var(var)
+            && !name.trim().is_empty()
+        {
+            protected.insert(name.trim().to_string());
+        }
+    }
+
+    if let Ok(out) = Command::new("who").output() {
+        protected.extend(parse_who_users(&String::from_utf8_lossy(&out.stdout)));
+    }
+
+    if let Ok(contents) = fs::read_to_string(KEEP_USERS_FILE) {
+        protected.extend(parse_keep_users(&contents));
+    }
+
+    protected
+}
+
+/// Offer to lock each UID ≥ 1000 account that has a login shell and is not
+/// protected (see [`protected_users`]). Nothing is locked without an explicit
+/// per-account yes; when no prompt is possible the candidates are only
+/// reported.
 fn lock_unused_accounts(ctx: &DefenderContext) -> Result {
-    ctx.log_msg("[+] Locking unused login accounts...");
+    ctx.log_msg("[+] Reviewing login accounts...");
 
     let contents = fs::read_to_string("/etc/passwd")?;
+    let protected = protected_users();
 
     for line in contents.lines() {
         let fields: Vec<&str> = line.split(':').collect();
@@ -109,13 +167,54 @@ fn lock_unused_accounts(ctx: &DefenderContext) -> Result {
             ));
             continue;
         }
-        if ESSENTIAL_USERS.contains(&name) {
-            ctx.debug(&format!("Skipping essential account: {}", name));
+        if protected.contains(name) {
+            ctx.log_msg(&format!(
+                "[+] Keeping '{}' (invoking user, logged in, essential, or in {})",
+                name, KEEP_USERS_FILE
+            ));
             continue;
         }
 
         // Log evidence before acting.
         ctx.log_evidence_line("/etc/passwd", line);
+
+        // Opt-in per account. `passwd -l` breaks password logins for scored
+        // SSH/mail users and does nothing against key auth, so it is never
+        // applied blind.
+        let approved = ctx.interactive()
+            && prompt_yes(&format!(
+                "[?] Lock account '{}' (uid={}, shell={})? Scored logins for this user will fail. (y/N)",
+                name, uid, shell
+            ))?;
+
+        if !approved {
+            ctx.emit(
+                Finding::new(
+                    Severity::Medium,
+                    "user_perms",
+                    format!(
+                        "Account '{}' (uid={}) has a login shell — not locked",
+                        name, uid
+                    ),
+                    format!("shell: {}\nlocked: false", shell),
+                )
+                .with_context("user", name)
+                .with_context("uid", uid.to_string())
+                .with_context("shell", shell)
+                .with_context("locked", "false")
+                .with_verdict(
+                    Verdict::Investigate,
+                    format!(
+                        "Account '{}' has UID ≥ 1000 with an interactive shell. \
+                         If it is not a team or scored account, lock it with \
+                         `passwd -l {}`. Add accounts to keep to {}.",
+                        name, name, KEEP_USERS_FILE
+                    ),
+                )
+                .with_action(Action::Manual(format!("passwd -l {}", name))),
+            );
+            continue;
+        }
 
         let locked = ctx.run_remediation(&["passwd", "-l", name]);
 
@@ -138,7 +237,7 @@ fn lock_unused_accounts(ctx: &DefenderContext) -> Result {
                     name, name
                 ),
             )
-            .with_action(Action::Manual(format!("passwd -l {}", name))),
+            .with_action(Action::Manual(format!("passwd -u {}", name))),
         );
     }
 
@@ -321,6 +420,29 @@ mod tests {
         // The upper bits (file type etc.) must not affect the comparison.
         assert!(mode_matches(0o040644, 0o644));
         assert!(mode_matches(0o020640, 0o640));
+    }
+
+    #[test]
+    fn keep_users_file_skips_comments_and_blanks() {
+        let parsed = parse_keep_users("# team accounts\nalice\n\n  bob  \n#carol\n");
+        assert_eq!(parsed, vec!["alice".to_string(), "bob".to_string()]);
+    }
+
+    #[test]
+    fn who_output_yields_logged_in_users() {
+        let out = "alice    pts/0        2026-11-13 09:00 (10.0.0.5)\nroot     tty1         2026-11-13 08:00\n";
+        assert_eq!(
+            parse_who_users(out),
+            vec!["alice".to_string(), "root".to_string()]
+        );
+    }
+
+    #[test]
+    fn protected_users_always_include_essentials() {
+        let protected = protected_users();
+        for user in ESSENTIAL_USERS {
+            assert!(protected.contains(*user));
+        }
     }
 
     #[test]

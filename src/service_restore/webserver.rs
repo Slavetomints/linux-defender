@@ -685,15 +685,15 @@ pub fn ensure_php_apache(distro: &Distro, ctx: &DefenderContext) -> Result<()> {
 
 // ── Database bootstrapping ───────────────────────────────────────────────────
 
-/// Ensure MariaDB is installed, running, and has `db_name` created.
+/// Ensure MariaDB is installed, running, has `db_name`, and that `db_user`
+/// can log in with `db_pass` and use it.
 ///
-/// On a fresh install the root account has no password, so we set it to
-/// `db_pass` and create the target database in one step. If root already has
-/// a password (re-run scenario), we skip the ALTER USER and just ensure the
-/// database exists.
+/// The MariaDB root password is left untouched (it used to be overwritten with
+/// the store's password, breaking anything else that used root).
 pub fn ensure_mysql(
     distro: &Distro,
     db_name: &str,
+    db_user: &str,
     db_pass: &str,
     ctx: &DefenderContext,
 ) -> Result<()> {
@@ -725,41 +725,97 @@ pub fn ensure_mysql(
 
     enable_and_restart("mariadb", ctx)?;
 
-    // Fresh install: root has no password — set it and create the database.
-    let setup_sql = format!(
-        "ALTER USER 'root'@'localhost' IDENTIFIED BY '{db_pass}'; \
-         CREATE DATABASE IF NOT EXISTS `{db_name}`; \
-         FLUSH PRIVILEGES;"
-    );
-    let fresh = Command::new("mysql")
-        .args(["-u", "root", "--connect-expired-password", "-e", &setup_sql])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    validate_sql_identifier(db_name, "database name")?;
+    validate_sql_identifier(db_user, "database user")?;
 
-    if fresh {
+    // Connect as root over the unix socket (MariaDB's default root auth on
+    // Debian/Ubuntu, and passwordless on a fresh RHEL install). The root
+    // password is never changed: other services may depend on it.
+    let sql = app_database_sql(db_name, db_user, db_pass);
+    let output = run_mysql_root(&sql)?;
+    if output.status.success() {
         ctx.progress(&format!(
-            "[✓] MariaDB configured, database '{db_name}' ready"
+            "[✓] Database '{db_name}' ready, '{db_user}'@'localhost' granted access"
         ));
         return Ok(());
     }
 
-    // Re-run: root already has a password — just ensure the database exists.
-    let create_sql = format!("CREATE DATABASE IF NOT EXISTS `{db_name}`;");
-    let output = Command::new("mysql")
-        .args(["-u", "root", &format!("-p{db_pass}"), "-e", &create_sql])
-        .output()
-        .map_err(|e| DefenderError::Command(format!("mysql: {e}")))?;
-
-    if output.status.success() {
-        ctx.progress(&format!("[✓] Database '{db_name}' ready"));
-        return Ok(());
-    }
-
     Err(DefenderError::Command(format!(
-        "Could not create database: {}",
+        "could not set up database '{db_name}' as MariaDB root over the local socket: {}. \
+         If root needs a password, put it in /root/.my.cnf ([client] password=...) and retry.",
         String::from_utf8_lossy(&output.stderr).trim()
     )))
+}
+
+/// Run `sql` as the MariaDB root user, passing the statements on stdin so
+/// passwords never appear in the process list.
+fn run_mysql_root(sql: &str) -> Result<std::process::Output> {
+    use std::io::Write;
+    let mut child = Command::new("mysql")
+        .args(["-u", "root", "--batch"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| DefenderError::Command(format!("mysql: {e}")))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(sql.as_bytes())?;
+    }
+    child
+        .wait_with_output()
+        .map_err(|e| DefenderError::Command(format!("mysql: {e}")))
+}
+
+/// Reject database and user names that are not plain identifiers. They are
+/// interpolated into SQL, so anything beyond letters, digits, `_`, `-` and
+/// `.` is refused rather than escaped.
+fn validate_sql_identifier(value: &str, what: &str) -> Result<()> {
+    let ok = !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+    if ok {
+        Ok(())
+    } else {
+        Err(DefenderError::Other(format!(
+            "{what} {value:?} must be 1-64 characters of letters, digits, '_', '-' or '.'"
+        )))
+    }
+}
+
+/// Escape `value` for use inside a single-quoted MariaDB string literal.
+fn sql_string_literal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '\0' => out.push_str("\\0"),
+            _ => out.push(c),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// SQL that creates `db_name` and gives `db_user` (identified by `db_pass`)
+/// full rights on it. Identifiers must already be validated. A `root` user is
+/// left alone: only the database is created.
+fn app_database_sql(db_name: &str, db_user: &str, db_pass: &str) -> String {
+    let mut sql = format!("CREATE DATABASE IF NOT EXISTS `{db_name}`;\n");
+    if db_user != "root" {
+        let user = format!("{}@'localhost'", sql_string_literal(db_user));
+        let pass = sql_string_literal(db_pass);
+        sql.push_str(&format!(
+            "CREATE USER IF NOT EXISTS {user} IDENTIFIED BY {pass};\n\
+             ALTER USER {user} IDENTIFIED BY {pass};\n\
+             GRANT ALL PRIVILEGES ON `{db_name}`.* TO {user};\n"
+        ));
+    }
+    sql.push_str("FLUSH PRIVILEGES;\n");
+    sql
 }
 
 // ── Site verification ─────────────────────────────────────────────────────────
@@ -1043,6 +1099,28 @@ mod tests {
         let html = dir.path().join("html.zip");
         fs::write(&html, "<html>login required</html>").unwrap();
         assert!(require_archive_entry(&html, "install/index_cli.php").is_err());
+    }
+
+    #[test]
+    fn database_sql_escapes_passwords_and_never_touches_root() {
+        let sql = app_database_sql("opencart", "oc_user", "p'w\\d");
+        assert!(sql.contains("CREATE DATABASE IF NOT EXISTS `opencart`;"));
+        assert!(sql.contains("IDENTIFIED BY 'p\\'w\\\\d'"));
+        assert!(sql.contains("GRANT ALL PRIVILEGES ON `opencart`.* TO 'oc_user'@'localhost';"));
+        assert!(!sql.contains("'root'"));
+
+        let root_only = app_database_sql("shop", "root", "x");
+        assert!(!root_only.contains("CREATE USER"));
+        assert!(!root_only.contains("ALTER USER"));
+    }
+
+    #[test]
+    fn sql_identifiers_are_validated() {
+        assert!(validate_sql_identifier("opencart", "db").is_ok());
+        assert!(validate_sql_identifier("oc_user-1.x", "db").is_ok());
+        assert!(validate_sql_identifier("", "db").is_err());
+        assert!(validate_sql_identifier("a`; DROP DATABASE x; --", "db").is_err());
+        assert!(validate_sql_identifier("o'c", "db").is_err());
     }
 
     fn ctx() -> DefenderContext {

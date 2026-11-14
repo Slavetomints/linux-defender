@@ -215,7 +215,7 @@ pub fn run(
     let admin_email = &creds.admin_email;
 
     // ── 5b. Ensure database is ready ─────────────────────────────────────────
-    ensure_mysql(&distro, db_name, db_pass, ctx)?;
+    ensure_mysql(&distro, db_name, db_user, db_pass, ctx)?;
 
     // ── 6. Run CLI installer ──────────────────────────────────────────────────
     // Truncate config.php before running so the post-install empty-check is

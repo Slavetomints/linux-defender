@@ -153,6 +153,69 @@ pub fn install_package(distro: &Distro, packages: &[&str], ctx: &DefenderContext
     Ok(())
 }
 
+/// Official network apt sources for a Debian or Ubuntu release, or `None`
+/// when the distribution or codename is unknown.
+fn network_sources(id: &str, codename: &str) -> Option<Vec<String>> {
+    if codename.is_empty() || !codename.chars().all(|c| c.is_ascii_lowercase()) {
+        return None;
+    }
+    match id {
+        "debian" => Some(vec![
+            format!(
+                "deb http://deb.debian.org/debian {codename} main contrib non-free non-free-firmware"
+            ),
+            format!(
+                "deb http://deb.debian.org/debian-security {codename}-security main contrib non-free non-free-firmware"
+            ),
+            format!(
+                "deb http://deb.debian.org/debian {codename}-updates main contrib non-free non-free-firmware"
+            ),
+        ]),
+        "ubuntu" => Some(vec![
+            format!(
+                "deb http://archive.ubuntu.com/ubuntu {codename} main restricted universe multiverse"
+            ),
+            format!(
+                "deb http://archive.ubuntu.com/ubuntu {codename}-updates main restricted universe multiverse"
+            ),
+            format!(
+                "deb http://security.ubuntu.com/ubuntu {codename}-security main restricted universe multiverse"
+            ),
+        ]),
+        _ => None,
+    }
+}
+
+/// True when any `.list` or deb822 `.sources` file in `dir` has an active,
+/// non-cdrom source.
+fn sources_d_has_network(dir: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        let path = e.path();
+        let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return false;
+        };
+        let active = text.lines().map(str::trim).filter(|l| !l.starts_with('#'));
+        match ext {
+            "list" => active
+                .clone()
+                .any(|l| l.starts_with("deb ") && !l.starts_with("deb cdrom:")),
+            "sources" => {
+                let lines: Vec<&str> = active.collect();
+                let enabled = !lines.iter().any(|l| l.eq_ignore_ascii_case("enabled: no"));
+                enabled
+                    && lines.iter().any(|l| {
+                        l.starts_with("URIs:") && (l.contains("http://") || l.contains("https://"))
+                    })
+            }
+            _ => false,
+        }
+    })
+}
+
 /// Ensure `/etc/apt/sources.list` has at least one working network source.
 ///
 /// VMs installed from DVD often ship with only a `deb cdrom:` line. With no
@@ -187,27 +250,31 @@ fn fix_debian_apt_sources(ctx: &DefenderContext) {
         })
         .collect();
 
-    // Check whether any active (non-comment) network deb lines remain.
+    // Check whether any active (non-comment) network source remains, here or
+    // in sources.list.d (Ubuntu 24.04 keeps its mirrors in ubuntu.sources).
     let has_network = fixed.iter().any(|l| {
         let t = l.trim_start();
         t.starts_with("deb ") && !t.starts_with("deb cdrom:")
-    });
+    }) || sources_d_has_network("/etc/apt/sources.list.d");
 
     if !has_network {
-        // No network sources — add standard Debian 12 Bookworm mirrors.
-        fixed.push(String::new());
-        fixed.push("# Added by linux-defender (cdrom source was the only source)".into());
-        fixed.push(
-            "deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware"
-                .into(),
-        );
-        fixed.push(
-            "deb http://deb.debian.org/debian-security bookworm-security main contrib non-free"
-                .into(),
-        );
-        fixed
-            .push("deb http://deb.debian.org/debian bookworm-updates main contrib non-free".into());
-        ctx.progress("[+] Added Debian 12 Bookworm network apt sources");
+        let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+        let id = super::distro::os_release_field(&os_release, "ID").unwrap_or("");
+        let codename = super::distro::os_release_field(&os_release, "VERSION_CODENAME")
+            .or_else(|| super::distro::os_release_field(&os_release, "UBUNTU_CODENAME"))
+            .unwrap_or("");
+        match network_sources(id, codename) {
+            Some(lines) => {
+                fixed.push(String::new());
+                fixed.push("# Added by linux-defender (cdrom source was the only source)".into());
+                fixed.extend(lines);
+                ctx.progress(&format!("[+] Added {id} {codename} network apt sources"));
+            }
+            None => ctx.progress(&format!(
+                "[!] cdrom was the only apt source and no mirror is known for ID={id:?} \
+                 VERSION_CODENAME={codename:?}; add a network source by hand"
+            )),
+        }
     }
 
     let _ = std::fs::write(sources, fixed.join("\n") + "\n");
@@ -1188,6 +1255,40 @@ mod tests {
         assert_eq!(mode(&outside), 0o600, "symlink target was chmod-ed");
         assert_eq!(mode(&root.join("index.php")), 0o644);
         assert_eq!(mode(&root.join("image/cache")), 0o775);
+    }
+
+    #[test]
+    fn apt_sources_match_the_distribution() {
+        let ubuntu = network_sources("ubuntu", "noble").unwrap().join("\n");
+        assert!(ubuntu.contains("archive.ubuntu.com/ubuntu noble main"));
+        assert!(ubuntu.contains("noble-security"));
+        assert!(!ubuntu.contains("debian"));
+
+        let debian = network_sources("debian", "trixie").unwrap().join("\n");
+        assert!(debian.contains("deb.debian.org/debian trixie main"));
+        assert!(!debian.contains("bookworm"));
+
+        assert!(network_sources("rocky", "blue").is_none());
+        assert!(network_sources("ubuntu", "").is_none());
+    }
+
+    #[test]
+    fn deb822_sources_count_as_network_sources() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("ubuntu.sources"),
+            "Types: deb\nURIs: http://archive.ubuntu.com/ubuntu/\nSuites: noble\n",
+        )
+        .unwrap();
+        assert!(sources_d_has_network(dir.path().to_str().unwrap()));
+
+        let off = TempDir::new().unwrap();
+        fs::write(
+            off.path().join("x.sources"),
+            "Types: deb\nURIs: http://x/\nEnabled: no\n",
+        )
+        .unwrap();
+        assert!(!sources_d_has_network(off.path().to_str().unwrap()));
     }
 
     fn ctx() -> DefenderContext {

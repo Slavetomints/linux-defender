@@ -582,6 +582,22 @@ impl SplunkForwarderWizard {
                     *done.lock().unwrap() = true;
                     return;
                 }
+                // Re-check right before installing: this runs as root.
+                match vet_package(std::path::Path::new(&pkg_path)) {
+                    Ok(sha) => push!(format!(
+                        "  ✓ package is root-owned and not writable by others (sha256 {})",
+                        sha
+                    )),
+                    Err(why) => {
+                        push!(format!(
+                            "  ERROR: refusing to install {}: {}",
+                            pkg_path, why
+                        ));
+                        push!("    Copy it somewhere root-only, chown root:root, chmod 644.");
+                        *done.lock().unwrap() = true;
+                        return;
+                    }
+                }
                 if pkg_path.ends_with(".deb") {
                     super::run_cmd_to_log(&["dpkg", "-i", &pkg_path], &lc);
                 } else if pkg_path.ends_with(".rpm") {
@@ -750,6 +766,33 @@ fn build_inputs_conf(bt: SplunkBoxType) -> String {
     out
 }
 
+/// Check that `path` is safe to install as root: a regular file (not a
+/// symlink), owned by root, and not writable by group or others. Returns its
+/// SHA-256 so the operator can compare it with Splunk's published hash.
+pub fn vet_package(path: &std::path::Path) -> Result<String, String> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    vet_metadata(meta.file_type().is_file(), meta.uid(), meta.mode())?;
+    crate::backups::hash::hash_file(path).map_err(|e| e.to_string())
+}
+
+/// The ownership and mode rules behind [`vet_package`].
+fn vet_metadata(is_regular_file: bool, uid: u32, mode: u32) -> Result<(), String> {
+    if !is_regular_file {
+        return Err("not a regular file (symlink or special file)".into());
+    }
+    if uid != 0 {
+        return Err(format!("owned by uid {uid}, not root"));
+    }
+    if mode & 0o022 != 0 {
+        return Err(format!(
+            "mode {:o} is writable by group or others",
+            mode & 0o777
+        ));
+    }
+    Ok(())
+}
+
 /// Search common locations for Splunk `.tgz`, `.deb`, and `.rpm` packages.
 fn find_packages() -> Vec<String> {
     let search_dirs = ["/tmp", "/root", "/var/cache/apt/archives"];
@@ -761,6 +804,10 @@ fn find_packages() -> Vec<String> {
                 if (name.starts_with("splunk") || name.starts_with("splunkforwarder"))
                     && (name.ends_with(".deb") || name.ends_with(".rpm"))
                     && let Ok(path) = entry.path().canonicalize()
+                    // Anyone with a shell can drop splunk*.deb into /tmp;
+                    // only offer packages an unprivileged user cannot own or
+                    // modify.
+                    && vet_package(&path).is_ok()
                 {
                     found.push(path.to_string_lossy().into_owned());
                 }
@@ -769,4 +816,19 @@ fn find_packages() -> Vec<String> {
     }
     found.sort();
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_root_owned_unwritable_packages_pass() {
+        assert!(vet_metadata(true, 0, 0o100644).is_ok());
+        assert!(vet_metadata(true, 0, 0o100600).is_ok());
+        assert!(vet_metadata(true, 33, 0o100644).is_err());
+        assert!(vet_metadata(true, 0, 0o100666).is_err());
+        assert!(vet_metadata(true, 0, 0o100664).is_err());
+        assert!(vet_metadata(false, 0, 0o120777).is_err());
+    }
 }

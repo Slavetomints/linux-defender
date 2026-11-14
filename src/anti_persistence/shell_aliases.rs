@@ -231,8 +231,26 @@ fn alias_auto_removable(severity: Severity, command_part: &str) -> bool {
                     .iter()
                     .any(|pat| command_part.to_lowercase().contains(pat))
         }
-        _ => true,
+        // A common command aliased to something with no suspicious content
+        // is worth a look, not an edit to someone's dotfiles.
+        Severity::Medium | Severity::Info => false,
+        Severity::Critical => true,
     }
+}
+
+/// True when an alias body just runs `name` again with option flags, e.g.
+/// `'ls --color=auto'` or `"grep -E --color=auto"`. Pipes, other arguments,
+/// command separators or redirections make it something else.
+fn is_same_command_with_options(name: &str, command_part: &str) -> bool {
+    let body = command_part
+        .trim()
+        .trim_matches(|c| c == '\'' || c == '"')
+        .trim();
+    if body.contains(['|', ';', '&', '>', '<', '`', '$']) {
+        return false;
+    }
+    let mut toks = body.split_whitespace();
+    toks.next() == Some(name) && toks.all(|t| t.starts_with('-'))
 }
 
 /// Decide the severity and reason for an alias line, or `None` if benign.
@@ -270,7 +288,9 @@ fn classify_alias(name: &str, line: &str, command_part: &str) -> (Option<Severit
     }
 
     // Medium: alias overrides a common tool with apparently-clean content.
-    if is_common_command(name) {
+    // Re-running the same command with options (`ls --color=auto`, `rm -i`)
+    // is what distributions ship and is not an override.
+    if is_common_command(name) && !is_same_command_with_options(name, command_part) {
         return (
             Some(Severity::Medium),
             format!("alias overrides common command '{}': {}", name, line),
@@ -426,7 +446,29 @@ mod tests {
     #[test]
     fn ls_with_clean_content_is_medium() {
         let (sev, _) = classify_alias("ls", "alias ls='ls --color=auto'", "'ls --color=auto'");
+        assert_eq!(sev, None);
+    }
+
+    #[test]
+    fn stock_distribution_aliases_are_benign() {
+        for (name, body) in [
+            ("ls", "'ls --color=auto'"),
+            ("grep", "'grep --color=auto'"),
+            ("rm", "'rm -i'"),
+            ("cp", "\"cp -i\""),
+        ] {
+            let line = format!("alias {name}={body}");
+            assert_eq!(classify_alias(name, &line, body).0, None, "{line}");
+        }
+    }
+
+    #[test]
+    fn clean_overrides_are_reported_but_never_auto_removed() {
+        let body = "'ps aux | grep -v kworkerd'";
+        let (sev, _) = classify_alias("ps", &format!("alias ps={body}"), body);
         assert_eq!(sev, Some(Severity::Medium));
+        assert!(!alias_auto_removable(Severity::Medium, body));
+        assert!(alias_auto_removable(Severity::Critical, "'sudo -E bash'"));
     }
 
     #[test]

@@ -79,7 +79,7 @@ impl Action {
     /// Human-readable description of what executing this action does.
     pub fn description(&self) -> String {
         match self {
-            Action::Delete(p) => format!("Delete {}", p.display()),
+            Action::Delete(p) => format!("Quarantine {}", p.display()),
             Action::RemoveImmutable(p) => format!("chattr -i {}", p.display()),
             Action::RestartService(s) => format!("systemctl restart {}", s),
             Action::Manual(s) => format!("Manual: {}", s),

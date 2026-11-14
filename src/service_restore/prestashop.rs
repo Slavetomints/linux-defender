@@ -77,7 +77,7 @@ const PRESTASHOP_DEFAULT_URL: &str =
     "https://github.com/PrestaShop/PrestaShop/releases/download/9.0.0/prestashop_9.0.0.zip";
 
 /// Temporary zip path used during extraction.
-const TMP_ZIP: &str = "/tmp/defender-prestashop.zip";
+const TMP_ZIP: &str = "/var/lib/linux-defender/downloads/prestashop.zip";
 
 /// Directories that need to be writable during (and after) installation.
 const WRITABLE_DIRS: &[&str] = &[

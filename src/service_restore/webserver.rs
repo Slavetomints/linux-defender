@@ -26,6 +26,47 @@ use super::distro::{Distro, enable_and_restart};
 /// In non-interactive mode (TUI), falls through to an error if neither tool
 /// succeeds rather than prompting to install curl.
 pub fn download_file(url: &str, dest: &Path, distro: &Distro, ctx: &DefenderContext) -> Result<()> {
+    prepare_download_dest(dest)?;
+    download_file_inner(url, dest, distro, ctx)?;
+    match crate::backups::hash::hash_file(dest) {
+        Ok(digest) => ctx.progress(&format!(
+            "[+] SHA-256 of download: {digest} (compare with the vendor's published hash)"
+        )),
+        Err(e) => ctx.progress(&format!("[!] Could not hash download: {e}")),
+    }
+    Ok(())
+}
+
+/// Root-only directory for installers and archives fetched during a restore.
+///
+/// Downloads must not live in `/tmp`: a predictable name in a world-writable
+/// directory lets any local user pre-create the file or a symlink there, and
+/// what lands in it is installed or unpacked as root.
+pub const DOWNLOAD_DIR: &str = "/var/lib/linux-defender/downloads";
+
+/// Create the parent of `dest` as a 0700 directory and clear any stale file.
+fn prepare_download_dest(dest: &Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+        if parent.starts_with(DOWNLOAD_DIR) {
+            fs::set_permissions(DOWNLOAD_DIR, fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    match fs::symlink_metadata(dest) {
+        Ok(_) => fs::remove_file(dest)?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
+/// Fetch `url` to `dest` with wget, then curl, installing wget if neither works.
+fn download_file_inner(
+    url: &str,
+    dest: &Path,
+    distro: &Distro,
+    ctx: &DefenderContext,
+) -> Result<()> {
     ctx.progress(&format!("[+] Downloading {}...", url));
 
     let dest_str = dest

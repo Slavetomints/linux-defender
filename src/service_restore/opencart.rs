@@ -86,7 +86,7 @@ const OPENCART_DEFAULT_URL: &str =
     "https://github.com/opencart/opencart/releases/download/4.1.0.4/opencart-4.1.0.4.zip";
 
 /// Temporary zip path used during extraction.
-const TMP_ZIP: &str = "/tmp/defender-opencart.zip";
+const TMP_ZIP: &str = "/var/lib/linux-defender/downloads/opencart.zip";
 
 /// Where to move the storage directory (outside the web root).
 const STORAGE_DEST: &str = "/var/opencart-storage";

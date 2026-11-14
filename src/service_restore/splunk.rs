@@ -14,7 +14,6 @@
 //! The pinned default URL targets Splunk 10.0.2 (the competition VM version).
 //! Pass `--splunk-url` to override for a different build.
 
-use std::env;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -24,7 +23,7 @@ use crate::core::{
 };
 
 use super::distro::{Distro, restore_config_from_backup};
-use super::webserver::{download_file, verify_site_insecure, verify_tcp_service};
+use super::webserver::{DOWNLOAD_DIR, download_file, verify_site_insecure, verify_tcp_service};
 
 /// Path to the Splunk CLI binary.
 const SPLUNK_BIN: &str = "/opt/splunk/bin/splunk";
@@ -125,7 +124,7 @@ fn fresh_install(
     let download_url = url.unwrap_or(default_url);
     ctx.progress(&format!("[+] Downloading Splunk from {}...", download_url));
 
-    let tmp_path = env::temp_dir().join(format!("splunk-installer.{pkg_ext}"));
+    let tmp_path = Path::new(DOWNLOAD_DIR).join(format!("splunk-installer.{pkg_ext}"));
     download_file(download_url, &tmp_path, &distro, ctx)?;
 
     // Validate the download before handing it to dpkg/rpm — Splunk's CDN can

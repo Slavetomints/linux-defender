@@ -79,7 +79,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
             continue;
         }
 
-        let crontab_path = PathBuf::from(format!("/var/spool/cron/crontabs/{}", user));
+        let crontab_path = crontab_spool_path(&user);
         let mtime_label = crontab_path
             .metadata()
             .ok()
@@ -101,9 +101,14 @@ pub fn run(ctx: &DefenderContext) -> Result {
             }
 
             // Phase 2: clear any immutable flag, then rewrite crontab with only the benign jobs
-            let spool = PathBuf::from(format!("/var/spool/cron/crontabs/{}", user));
-            try_clear_immutable(&spool);
-            let kept: Vec<String> = benign.iter().map(|s| s.to_string()).collect();
+            try_clear_immutable(&crontab_path);
+            // Keep every original line (comments, MAILTO=, PATH=) except the
+            // jobs being removed.
+            let kept: Vec<String> = lines
+                .iter()
+                .filter(|l| !suspicious.iter().any(|j| j.as_str() == l.as_str()))
+                .cloned()
+                .collect();
             let rewrite_ok = write_crontab(&kept, &user).is_ok();
 
             // Phase 3: prove the suspicious jobs are gone
@@ -247,9 +252,33 @@ fn get_crontab_lines(user: &str) -> Result<Vec<String>> {
     Ok(stdout.lines().map(str::to_string).collect())
 }
 
+/// Crontab text for `lines`. Every line, including the last, ends in a
+/// newline: cron rejects a crontab whose final line is unterminated, so
+/// without it the rewrite fails and the backdoor stays.
+fn render_crontab(lines: &[String]) -> String {
+    let mut out = String::new();
+    for line in lines {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// On-disk crontab for `user`: `/var/spool/cron/crontabs/<user>` on Debian
+/// and Ubuntu, `/var/spool/cron/<user>` on RHEL and Rocky.
+fn crontab_spool_path(user: &str) -> PathBuf {
+    let debian = PathBuf::from(format!("/var/spool/cron/crontabs/{user}"));
+    let rhel = PathBuf::from(format!("/var/spool/cron/{user}"));
+    if !debian.exists() && rhel.is_file() {
+        rhel
+    } else {
+        debian
+    }
+}
+
 /// Write `jobs` back to `user`'s crontab via `crontab -`.
 fn write_crontab(jobs: &[String], user: &str) -> Result {
-    let new_cron = jobs.join("\n");
+    let new_cron = render_crontab(jobs);
 
     let mut child = Command::new("crontab")
         .args(["-", "-u", user])
@@ -303,6 +332,15 @@ mod tests {
                 .any(|p| p.contains("fetches remote content"))
         );
         assert!(patterns.iter().any(|p| p.contains("shell")));
+    }
+
+    #[test]
+    fn rendered_crontab_always_ends_with_a_newline() {
+        assert_eq!(render_crontab(&[]), "");
+        assert_eq!(
+            render_crontab(&["MAILTO=root".into(), "0 3 * * * /usr/bin/backup".into()]),
+            "MAILTO=root\n0 3 * * * /usr/bin/backup\n"
+        );
     }
 
     #[test]

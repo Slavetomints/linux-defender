@@ -7,7 +7,10 @@
 //! # Allow-lists
 //!
 //! All box types share a baseline: ssh/sshd, cron/crond, atd, nftables/ufw/iptables/firewalld,
-//! rsyslog/syslog, auditd, fail2ban, apparmor, dbus, and all systemd-* units.
+//! rsyslog/syslog, auditd, fail2ban, apparmor, dbus/dbus-broker, getty (console
+//! login), time sync, hypervisor guest agents, container runtimes, AD helpers,
+//! storage/boot plumbing, and all systemd-* units. Anything that would take the
+//! console, the clock, or the VM tooling away from the operator stays enabled.
 //!
 //! Box-specific additions:
 //! | Box type | Additional allowed services |
@@ -51,8 +54,84 @@ const BASELINE_ALLOW: &[&str] = &[
     // mandatory access control
     "apparmor",
     "selinux",
-    // dbus (required by many systemd units)
+    // dbus (required by many systemd units); Rocky/Fedora ship dbus-broker
     "dbus",
+    "dbus-broker",
+    "dbus-daemon",
+    "polkit",
+    // console and serial logins: the fallback when SSH is lost
+    "getty",
+    "serial-getty",
+    "autovt",
+    "console-getty",
+    "container-getty",
+    // SSH host key generation (RHEL family)
+    "sshd-keygen",
+    // time sync: clock skew breaks Kerberos/AD auth and TLS
+    "chronyd",
+    "chrony",
+    "ntpd",
+    "ntp",
+    "ntpsec",
+    // hypervisor guest agents: the competition boxes are VMs
+    "vmtoolsd",
+    "open-vm-tools",
+    "vgauthd",
+    "qemu-guest-agent",
+    "vboxadd",
+    "vboxadd-service",
+    "hv-kvp-daemon",
+    "hv-vss-daemon",
+    "hv-fcopy-daemon",
+    "xe-linux-distribution",
+    "cloud-init",
+    "cloud-init-local",
+    "cloud-config",
+    "cloud-final",
+    // container runtimes: scored services may live in containers
+    "docker",
+    "containerd",
+    "podman",
+    "podman-restart",
+    "crio",
+    // caches and queues commonly backing the web store or webmail
+    "redis",
+    "redis-server",
+    "memcached",
+    "valkey",
+    // AD / directory helpers (home dir creation, realm join, name caching)
+    "oddjobd",
+    "realmd",
+    "nscd",
+    // storage and boot plumbing
+    "lvm2-monitor",
+    "lvm2-lvmpolld",
+    "multipathd",
+    "mdmonitor",
+    "blk-availability",
+    "dm-event",
+    "iscsid",
+    "open-iscsi",
+    "irqbalance",
+    "kdump",
+    "tuned",
+    "rngd",
+    "haveged",
+    "selinux-autorelabel-mark",
+    "e2scrub_reap",
+    "grub-common",
+    "kmod-static-nodes",
+    "keyboard-setup",
+    "console-setup",
+    "setvtrgb",
+    "ifupdown-pre",
+    "networkd-dispatcher",
+    "networkmanager-dispatcher",
+    "networkmanager-wait-online",
+    "nis-domainname",
+    "import-state",
+    "loadmodules",
+    "microcode",
 ];
 
 /// Services allowed on a Web box.
@@ -121,12 +200,19 @@ pub fn is_allowed(service_name: &str, box_type: BoxType) -> bool {
     if is_scored_unit(service_name) {
         return true;
     }
+    // `systemctl list-unit-files` reports templates as `getty@` and instances
+    // as `getty@tty1`; match both on the template name. Compare lowercased so
+    // `NetworkManager-dispatcher` matches its entry.
+    let lower = service_name.to_ascii_lowercase();
+    let base = lower.split('@').next().unwrap_or(&lower);
     // Baseline services that must never be disabled regardless of box type.
-    if BASELINE_ALLOW.contains(&service_name) {
+    if BASELINE_ALLOW.contains(&base) {
         return true;
     }
     // Box-specific services.
-    allow_list(box_type).contains(&service_name)
+    allow_list(box_type)
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(base))
 }
 
 /// Disable services that are not on the allow-list for this box's type.
@@ -422,6 +508,34 @@ mod tests {
         assert!(!is_allowed("nc", BoxType::Mail));
         assert!(!is_allowed("rsyncd", BoxType::Splunk));
         assert!(!is_allowed("cups", BoxType::General));
+    }
+
+    #[test]
+    fn console_dbus_time_and_vm_services_are_never_disabled() {
+        for svc in [
+            "getty@",
+            "getty@tty1",
+            "serial-getty@",
+            "dbus-broker",
+            "chronyd",
+            "vmtoolsd",
+            "qemu-guest-agent",
+            "docker",
+            "containerd",
+            "redis-server",
+            "memcached",
+            "oddjobd",
+            "NetworkManager-dispatcher",
+            "sshd-keygen@",
+            "lvm2-monitor",
+        ] {
+            for box_type in BoxType::ALL {
+                assert!(
+                    is_allowed(svc, *box_type),
+                    "{svc} must be allowed on {box_type:?}"
+                );
+            }
+        }
     }
 
     #[test]

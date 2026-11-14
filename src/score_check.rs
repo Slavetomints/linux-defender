@@ -20,6 +20,7 @@
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::path::Path;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -1008,6 +1009,8 @@ pub fn mail_check_pass() -> &'static str {
         if let Ok(text) = std::fs::read_to_string(MAIL_CHECK_CONF) {
             let trimmed = text.trim().to_string();
             if !trimmed.is_empty() {
+                // Older versions wrote this file 0644; tighten it on read.
+                let _ = restrict_secret_file(Path::new(MAIL_CHECK_CONF));
                 return trimmed;
             }
         }
@@ -1015,20 +1018,55 @@ pub fn mail_check_pass() -> &'static str {
         let pass = gen_random_hex(16);
         // Persist it so future runs (and the next `ensure_mail_test_account` call)
         // use the same password.
-        let _ = std::fs::create_dir_all("/etc/linux-defender");
-        let _ = std::fs::write(MAIL_CHECK_CONF, &pass);
+        let _ = write_secret_file(Path::new(MAIL_CHECK_CONF), &pass);
         pass
     })
 }
 
 /// Read `n` bytes from `/dev/urandom` and return them as a lowercase hex string.
 fn gen_random_hex(n: usize) -> String {
-    use std::fs::File;
+    use std::io::Read;
     let mut buf = vec![0u8; n];
-    if let Ok(mut f) = File::open("/dev/urandom") {
-        let _ = std::io::Read::read(&mut f, &mut buf);
+    // read_exact: a short read must not leave part of the password as zeros.
+    let filled = std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .is_ok();
+    if !filled {
+        // SAFETY: buf is valid for n bytes; getrandom writes at most n bytes.
+        let got = unsafe { libc::getrandom(buf.as_mut_ptr().cast(), n, 0) };
+        assert!(
+            usize::try_from(got).is_ok_and(|g| g == n),
+            "no source of randomness for the mail check password"
+        );
     }
     buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Write `contents` to `path` readable by root only (0600, parent 0700).
+fn write_secret_file(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    if let Some(parent) = path.parent() {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    restrict_secret_file(path)?;
+    f.write_all(contents.as_bytes())
+}
+
+/// Force `path` to mode 0600 (an existing file keeps its old mode otherwise).
+fn restrict_secret_file(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
 /// Scored services for a mail box.
@@ -1125,6 +1163,29 @@ pub const GENERAL_CHECKS: &[ServiceCheck] = &[ServiceCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secret_file_is_root_only_even_when_it_existed_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("sub/mail-check.conf");
+        write_secret_file(&path, "abc").unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_secret_file(&path, "def").unwrap();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "def");
+    }
+
+    #[test]
+    fn random_hex_is_full_length_and_not_all_zero() {
+        let h = gen_random_hex(16);
+        assert_eq!(h.len(), 32);
+        assert_ne!(h, "0".repeat(32));
+    }
 
     #[test]
     fn every_builtin_check_names_real_units_not_its_label() {

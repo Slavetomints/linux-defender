@@ -630,6 +630,9 @@ impl RestoreCredDialog {
     }
 }
 
+/// How long the second `r` press that confirms nftbuild may take.
+const NFTBUILD_CONFIRM_WINDOW: Duration = Duration::from_secs(5);
+
 /// What one background poll of services, sessions and the auth log found.
 struct PollResult {
     /// Service histories with this poll's results appended.
@@ -666,6 +669,9 @@ pub struct App {
     pub action_feedback: Option<String>,
     /// Generated nftables config from nftbuild (not yet applied).
     pub nft_config: Option<String>,
+    /// When `r` was first pressed on nftbuild; a second press within
+    /// [`NFTBUILD_CONFIRM_WINDOW`] applies the rules.
+    nftbuild_confirm_at: Option<Instant>,
     /// Status message shown in the Tools tab during downloads.
     pub download_status: Option<String>,
     /// Receives the result string from a background download thread.
@@ -809,6 +815,7 @@ impl App {
             show_finding_detail: false,
             action_feedback: None,
             nft_config,
+            nftbuild_confirm_at: None,
             download_status: None,
             download_result_rx,
             nftbuild_result_rx,
@@ -1908,6 +1915,22 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                         use crate::tui::tools_view::SelectedTool;
                         match SelectedTool::from_cursor(app.tools_cursor) {
                             SelectedTool::Binary(_) => {
+                                // nftbuild applies rules immediately and can cut
+                                // scored services off: require a second press.
+                                let confirmed = app
+                                    .nftbuild_confirm_at
+                                    .is_some_and(|t| t.elapsed() <= NFTBUILD_CONFIRM_WINDOW);
+                                if !confirmed {
+                                    app.nftbuild_confirm_at = Some(Instant::now());
+                                    app.action_feedback = Some(format!(
+                                        "nftbuild APPLIES {} firewall rules NOW and may drop scored \
+                                         services. Press r again within {}s to confirm.",
+                                        app.box_type.label(),
+                                        NFTBUILD_CONFIRM_WINDOW.as_secs()
+                                    ));
+                                    continue;
+                                }
+                                app.nftbuild_confirm_at = None;
                                 // Run nftbuild in background — avoids blocking the TUI event loop
                                 let box_type = app.box_type;
                                 let opts = crate::tools::nftbuild::RunOptions::default();

@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -468,13 +469,39 @@ fn parse_who_line(line: &str, now_secs: u64, authorized_users: &[String]) -> Opt
     })
 }
 
-/// Shell out to `date -d` to parse a login datetime into a Unix timestamp.
+/// Parse a `who` login time (`2026-11-13 09:00`, local time) into a Unix
+/// timestamp. Done in-process: this runs for every session every poll.
 fn login_timestamp_secs(datetime: &str) -> Option<u64> {
-    let out = Command::new("date")
-        .args(["-d", datetime, "+%s"])
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    use chrono::{Local, NaiveDateTime, TimeZone};
+    let naive = NaiveDateTime::parse_from_str(datetime, "%Y-%m-%d %H:%M").ok()?;
+    let ts = Local.from_local_datetime(&naive).earliest()?.timestamp();
+    u64::try_from(ts).ok()
+}
+
+/// How much of the end of the auth log [`poll_auth_events`] reads.
+const AUTH_TAIL_BYTES: u64 = 256 * 1024;
+
+/// The last `max` bytes of `path` as text, starting at a line boundary.
+fn read_tail(path: &Path, max: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let (mut file, meta) = crate::core::scan::open_nonblocking(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let start = meta.len().saturating_sub(max);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::new();
+    file.take(max).read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    if start == 0 {
+        return Some(text);
+    }
+    // Drop the partial first line.
+    Some(
+        text.split_once('\n')
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_default(),
+    )
 }
 
 /// Read the last N relevant auth log lines from auth.log or secure.
@@ -485,7 +512,9 @@ pub fn poll_auth_events() -> Vec<String> {
         .copied();
     let Some(path) = log_path else { return vec![] };
 
-    let Ok(contents) = std::fs::read_to_string(path) else {
+    // Only the tail matters (we show the last 10 matches); reading a
+    // multi-megabyte auth log every 5 seconds is what made the UI stall.
+    let Some(contents) = read_tail(Path::new(path), AUTH_TAIL_BYTES) else {
         return vec![];
     };
 
@@ -524,5 +553,33 @@ fn format_duration(secs: u64) -> String {
         format!("{}m{}s", secs / 60, secs % 60)
     } else {
         format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+#[cfg(test)]
+mod poll_tests {
+    use super::*;
+
+    #[test]
+    fn who_timestamps_parse_without_spawning_date() {
+        let ts = login_timestamp_secs("2026-11-13 09:00").unwrap();
+        assert!(ts > 1_700_000_000);
+        assert!(login_timestamp_secs("garbage").is_none());
+    }
+
+    #[test]
+    fn tail_reads_only_the_end_starting_on_a_line() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log = dir.path().join("auth.log");
+        let mut text = String::new();
+        for i in 0..1000 {
+            text.push_str(&format!("line {i} Failed password\n"));
+        }
+        std::fs::write(&log, &text).unwrap();
+        let tail = read_tail(&log, 100).unwrap();
+        assert!(tail.len() <= 100);
+        assert!(tail.starts_with("line "));
+        assert!(tail.ends_with("line 999 Failed password\n"));
+        assert_eq!(read_tail(&log, 1 << 20).unwrap(), text);
     }
 }

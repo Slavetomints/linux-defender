@@ -204,6 +204,7 @@ pub struct CheckResult {
 }
 
 /// Running history for one service: the last 20 results.
+#[derive(Clone)]
 pub struct ServiceHistory {
     /// The check definition.
     pub check: ServiceCheck,

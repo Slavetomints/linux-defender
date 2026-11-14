@@ -630,6 +630,16 @@ impl RestoreCredDialog {
     }
 }
 
+/// What one background poll of services, sessions and the auth log found.
+struct PollResult {
+    /// Service histories with this poll's results appended.
+    services: Vec<ServiceHistory>,
+    /// Current logged-in sessions.
+    sessions: Vec<SessionInfo>,
+    /// Latest relevant auth log lines.
+    auth_events: Vec<String>,
+}
+
 pub struct App {
     pub box_type: BoxType,
     pub tab: Tab,
@@ -640,6 +650,8 @@ pub struct App {
     pub finding_tx: Sender<Finding>,
     pub finding_rx: Receiver<Finding>,
     pub last_service_check: Instant,
+    /// Results of the in-flight background poll, if one is running.
+    poll_rx: Option<Receiver<PollResult>>,
     // Scan tab state
     pub scan_running: bool,
     pub scan_progress: String,
@@ -785,6 +797,7 @@ impl App {
             finding_tx,
             finding_rx,
             last_service_check: Instant::now(),
+            poll_rx: None,
             scan_running: false,
             scan_progress: String::new(),
             scan_progress_rx,
@@ -970,35 +983,63 @@ impl App {
         if self.auto_scan_enabled {
             self.tick_auto_scan();
         }
-        if self.last_service_check.elapsed() >= Duration::from_secs(5) {
-            poll_all(&mut self.services);
-            self.sessions = poll_sessions(&self.authorized_users);
-            self.auth_events = poll_auth_events();
+        // Service checks block for seconds when services are down, which is
+        // exactly when the operator needs the UI. They run on a background
+        // thread; the UI applies the results when they arrive.
+        if let Some(rx) = &self.poll_rx {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.poll_rx = None;
+                    self.services = result.services;
+                    self.sessions = result.sessions;
+                    self.auth_events = result.auth_events;
+                    self.run_watchdog();
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => self.poll_rx = None,
+            }
+        } else if self.last_service_check.elapsed() >= Duration::from_secs(5) {
             self.last_service_check = Instant::now();
-            // Watchdog: automatically restart scored services that have gone down.
-            if self.watchdog_enabled {
-                let down: Vec<crate::score_check::ServiceCheck> = self
-                    .services
-                    .iter()
-                    .filter(|h| !h.is_up())
-                    .map(|h| h.check.clone())
-                    .collect();
-                for check in down {
-                    let name = check.name;
-                    let count = self.watchdog_restart_count.get(name).copied().unwrap_or(0);
-                    if count < 3 {
-                        *self.watchdog_restart_count.entry(name).or_insert(0) += 1;
-                        // `name` is a display label; restart the systemd
-                        // unit(s) that actually provide the service.
-                        self.action_feedback = Some(format!(
-                            "Watchdog: {} is down — restarting {}…",
-                            name,
-                            check.units.join("/")
-                        ));
-                        std::thread::spawn(move || {
-                            let _ = crate::score_check::restart_service_units(&check);
-                        });
-                    }
+            let mut services = self.services.clone();
+            let authorized = self.authorized_users.clone();
+            let (tx, rx) = mpsc::channel();
+            self.poll_rx = Some(rx);
+            std::thread::spawn(move || {
+                poll_all(&mut services);
+                let _ = tx.send(PollResult {
+                    services,
+                    sessions: poll_sessions(&authorized),
+                    auth_events: poll_auth_events(),
+                });
+            });
+        }
+    }
+
+    /// Restart scored services that the latest poll found down (at most three
+    /// attempts each), when the watchdog is enabled.
+    fn run_watchdog(&mut self) {
+        if self.watchdog_enabled {
+            let down: Vec<crate::score_check::ServiceCheck> = self
+                .services
+                .iter()
+                .filter(|h| !h.is_up())
+                .map(|h| h.check.clone())
+                .collect();
+            for check in down {
+                let name = check.name;
+                let count = self.watchdog_restart_count.get(name).copied().unwrap_or(0);
+                if count < 3 {
+                    *self.watchdog_restart_count.entry(name).or_insert(0) += 1;
+                    // `name` is a display label; restart the systemd
+                    // unit(s) that actually provide the service.
+                    self.action_feedback = Some(format!(
+                        "Watchdog: {} is down — restarting {}…",
+                        name,
+                        check.units.join("/")
+                    ));
+                    std::thread::spawn(move || {
+                        let _ = crate::score_check::restart_service_units(&check);
+                    });
                 }
             }
         }

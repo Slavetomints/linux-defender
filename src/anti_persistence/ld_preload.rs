@@ -75,9 +75,11 @@ fn check_preload_file(ctx: &DefenderContext) -> Result {
                         all_ok = false;
                     }
                 }
-                if !ctx.remove_line_from_file_logged(path, entry) {
-                    all_ok = false;
-                }
+            }
+            // Every line of ld.so.preload is a preload and the file does not
+            // exist on a stock system, so quarantine the whole file.
+            if !ctx.remove_path_logged(path) {
+                all_ok = false;
             }
             removed = all_ok;
         }

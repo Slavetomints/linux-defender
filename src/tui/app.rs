@@ -973,22 +973,27 @@ impl App {
             self.last_service_check = Instant::now();
             // Watchdog: automatically restart scored services that have gone down.
             if self.watchdog_enabled {
-                let down: Vec<&'static str> = self
+                let down: Vec<crate::score_check::ServiceCheck> = self
                     .services
                     .iter()
-                    .filter_map(|h| if !h.is_up() { Some(h.check.name) } else { None })
+                    .filter(|h| !h.is_up())
+                    .map(|h| h.check.clone())
                     .collect();
-                for name in down {
+                for check in down {
+                    let name = check.name;
                     let count = self.watchdog_restart_count.get(name).copied().unwrap_or(0);
                     if count < 3 {
                         *self.watchdog_restart_count.entry(name).or_insert(0) += 1;
-                        let name_owned = name.to_string();
+                        // `name` is a display label; restart the systemd
+                        // unit(s) that actually provide the service.
+                        self.action_feedback = Some(format!(
+                            "Watchdog: {} is down — restarting {}…",
+                            name,
+                            check.units.join("/")
+                        ));
                         std::thread::spawn(move || {
-                            let _ = std::process::Command::new("systemctl")
-                                .args(["restart", &name_owned])
-                                .output();
+                            let _ = crate::score_check::restart_service_units(&check);
                         });
-                        self.action_feedback = Some(format!("Watchdog: restarting {}…", name));
                     }
                 }
             }

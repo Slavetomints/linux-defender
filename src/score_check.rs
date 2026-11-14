@@ -130,6 +130,64 @@ pub struct ServiceCheck {
     pub port: u16,
     /// How to verify the service is working.
     pub kind: CheckKind,
+    /// systemd units that can provide this service, in order of preference.
+    /// `name` is a display label ("Postfix SMTP"), not something systemctl
+    /// understands; the watchdog restarts these instead.
+    pub units: &'static [&'static str],
+}
+
+/// Whether systemd knows a unit called `unit`.
+fn unit_exists(unit: &str) -> bool {
+    std::process::Command::new("systemctl")
+        .args(["list-unit-files", "--no-legend", &format!("{unit}.service")])
+        .output()
+        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// Whether `unit` is enabled to start at boot.
+fn unit_enabled(unit: &str) -> bool {
+    std::process::Command::new("systemctl")
+        .args(["is-enabled", "--quiet", unit])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Pick which of `candidates` to restart, given predicates for "enabled" and
+/// "exists": every enabled candidate, or failing that the first one that
+/// exists. Enabled wins so a box with both apache2 and nginx installed
+/// restarts the one actually serving.
+pub fn choose_restart_units<'a>(
+    candidates: &[&'a str],
+    enabled: impl Fn(&str) -> bool,
+    exists: impl Fn(&str) -> bool,
+) -> Vec<&'a str> {
+    let on: Vec<&str> = candidates.iter().copied().filter(|u| enabled(u)).collect();
+    if !on.is_empty() {
+        return on;
+    }
+    candidates
+        .iter()
+        .copied()
+        .find(|u| exists(u))
+        .into_iter()
+        .collect()
+}
+
+/// Restart the systemd unit(s) behind `check`. Returns the units that were
+/// restarted successfully; empty when none exist on this box.
+pub fn restart_service_units(check: &ServiceCheck) -> Vec<&'static str> {
+    choose_restart_units(check.units, unit_enabled, unit_exists)
+        .into_iter()
+        .filter(|unit| {
+            std::process::Command::new("systemctl")
+                .args(["restart", unit])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        })
+        .collect()
 }
 
 /// Result of a single poll of one service.
@@ -906,6 +964,7 @@ pub fn parse_http_status(response: &str) -> Option<u16> {
 pub const WEB_CHECKS: &[ServiceCheck] = &[
     ServiceCheck {
         name: "HTTP",
+        units: &["apache2", "httpd", "nginx"],
         host: "127.0.0.1",
         port: 80,
         kind: CheckKind::Http {
@@ -915,6 +974,7 @@ pub const WEB_CHECKS: &[ServiceCheck] = &[
     },
     ServiceCheck {
         name: "HTTPS",
+        units: &["apache2", "httpd", "nginx"],
         host: "127.0.0.1",
         port: 443,
         kind: CheckKind::Https {
@@ -924,6 +984,7 @@ pub const WEB_CHECKS: &[ServiceCheck] = &[
     },
     ServiceCheck {
         name: "SSH",
+        units: &["ssh", "sshd"],
         host: "127.0.0.1",
         port: 22,
         kind: CheckKind::Tcp,
@@ -975,6 +1036,7 @@ fn gen_random_hex(n: usize) -> String {
 pub const MAIL_CHECKS: &[ServiceCheck] = &[
     ServiceCheck {
         name: "Postfix SMTP",
+        units: &["postfix"],
         host: "127.0.0.1",
         port: 25,
         kind: CheckKind::SmtpSend {
@@ -984,6 +1046,7 @@ pub const MAIL_CHECKS: &[ServiceCheck] = &[
     },
     ServiceCheck {
         name: "Dovecot IMAP",
+        units: &["dovecot"],
         host: "127.0.0.1",
         port: 143,
         kind: CheckKind::ImapLogin {
@@ -992,6 +1055,7 @@ pub const MAIL_CHECKS: &[ServiceCheck] = &[
     },
     ServiceCheck {
         name: "Dovecot POP3",
+        units: &["dovecot"],
         host: "127.0.0.1",
         port: 110,
         kind: CheckKind::Pop3Login {
@@ -1000,6 +1064,7 @@ pub const MAIL_CHECKS: &[ServiceCheck] = &[
     },
     ServiceCheck {
         name: "Roundcube",
+        units: &["apache2", "httpd", "nginx"],
         host: "127.0.0.1",
         port: 80,
         kind: CheckKind::Http {
@@ -1009,6 +1074,7 @@ pub const MAIL_CHECKS: &[ServiceCheck] = &[
     },
     ServiceCheck {
         name: "SSH",
+        units: &["ssh", "sshd"],
         host: "127.0.0.1",
         port: 22,
         kind: CheckKind::Tcp,
@@ -1019,6 +1085,7 @@ pub const MAIL_CHECKS: &[ServiceCheck] = &[
 pub const SPLUNK_CHECKS: &[ServiceCheck] = &[
     ServiceCheck {
         name: "Splunk Web",
+        units: &["Splunkd", "splunk"],
         host: "127.0.0.1",
         port: 8000,
         // Splunk web is plain HTTP (not HTTPS) on port 8000.
@@ -1031,12 +1098,14 @@ pub const SPLUNK_CHECKS: &[ServiceCheck] = &[
     },
     ServiceCheck {
         name: "Splunk Mgmt",
+        units: &["Splunkd", "splunk"],
         host: "127.0.0.1",
         port: 8089,
         kind: CheckKind::Tcp,
     },
     ServiceCheck {
         name: "SSH",
+        units: &["ssh", "sshd"],
         host: "127.0.0.1",
         port: 22,
         kind: CheckKind::Tcp,
@@ -1046,6 +1115,7 @@ pub const SPLUNK_CHECKS: &[ServiceCheck] = &[
 /// Scored services for a general-purpose box.
 pub const GENERAL_CHECKS: &[ServiceCheck] = &[ServiceCheck {
     name: "SSH",
+    units: &["ssh", "sshd"],
     host: "127.0.0.1",
     port: 22,
     kind: CheckKind::Tcp,
@@ -1056,6 +1126,35 @@ pub const GENERAL_CHECKS: &[ServiceCheck] = &[ServiceCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_builtin_check_names_real_units_not_its_label() {
+        for check in WEB_CHECKS
+            .iter()
+            .chain(MAIL_CHECKS)
+            .chain(SPLUNK_CHECKS)
+            .chain(GENERAL_CHECKS)
+        {
+            assert!(!check.units.is_empty(), "{} has no units", check.name);
+            for unit in check.units {
+                assert!(!unit.contains(' '), "{unit} is not a unit name");
+            }
+        }
+    }
+
+    #[test]
+    fn watchdog_restarts_enabled_units_else_first_existing() {
+        let c = ["apache2", "httpd", "nginx"];
+        assert_eq!(
+            choose_restart_units(&c, |u| u == "nginx", |_| true),
+            vec!["nginx"]
+        );
+        assert_eq!(
+            choose_restart_units(&c, |_| false, |u| u == "httpd" || u == "nginx"),
+            vec!["httpd"]
+        );
+        assert!(choose_restart_units(&c, |_| false, |_| false).is_empty());
+    }
 
     #[test]
     fn parse_http_status_200() {
@@ -1081,6 +1180,7 @@ mod tests {
     fn service_history_starts_empty() {
         let h = ServiceHistory::new(ServiceCheck {
             name: "test",
+            units: &[],
             host: "127.0.0.1",
             port: 9,
             kind: CheckKind::Tcp,
@@ -1095,6 +1195,7 @@ mod tests {
     fn uptime_fraction_all_up() {
         let mut h = ServiceHistory::new(ServiceCheck {
             name: "test",
+            units: &[],
             host: "127.0.0.1",
             port: 9,
             kind: CheckKind::Tcp,
@@ -1114,6 +1215,7 @@ mod tests {
     fn uptime_fraction_half() {
         let mut h = ServiceHistory::new(ServiceCheck {
             name: "test",
+            units: &[],
             host: "127.0.0.1",
             port: 9,
             kind: CheckKind::Tcp,
@@ -1133,6 +1235,7 @@ mod tests {
     fn history_ring_buffer_caps_at_history_len() {
         let mut h = ServiceHistory::new(ServiceCheck {
             name: "test",
+            units: &[],
             host: "127.0.0.1",
             port: 9,
             kind: CheckKind::Tcp,

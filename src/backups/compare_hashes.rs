@@ -44,7 +44,15 @@ pub fn run(ctx: &DefenderContext, save_location: &Option<PathBuf>) -> Result {
     }
 
     let previous = parse_hashes_file(&hash_file_path)?;
-    let current = hash::compute_all()?;
+    // Re-hash exactly what the backups in this directory covered; a manifest
+    // from `--users` compared against every config path is all noise.
+    let roots = super::all::read_roots(&dir.join(super::all::ROOTS_FILE));
+    let current = if roots.is_empty() {
+        hash::compute_all()?
+    } else {
+        let roots: Vec<&str> = roots.iter().map(String::as_str).collect();
+        hash::compute(&roots)?
+    };
 
     ctx.debug(&format!(
         "{} previous entries, {} current entries",

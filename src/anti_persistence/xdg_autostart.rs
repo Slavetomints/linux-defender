@@ -7,7 +7,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::scan::{read_text_files, references_untrusted_dir, suspicious_matches};
-use crate::core::{DefenderContext, Result, collect_accounts, prompt_yes, require_root};
+use crate::core::{
+    Action, DefenderContext, Finding, Result, Severity, Verdict, collect_accounts, prompt_yes,
+    require_root,
+};
 
 /// System-wide autostart directories, applying to every session.
 const SYSTEM_AUTOSTART_DIRS: &[&str] = &["/etc/xdg/autostart", "/usr/share/autostart"];
@@ -49,7 +52,42 @@ pub fn run(ctx: &DefenderContext) -> Result {
     ctx.debug(&format!("Found {} autostart entry(s)", entries.len()));
 
     if entries.is_empty() {
-        println!("[✓] No XDG autostart entries found");
+        ctx.log_msg("[✓] No XDG autostart entries found");
+        return Ok(());
+    }
+
+    // Inside the TUI there is no terminal to print to or prompt on: report
+    // findings and leave removal to the operator.
+    if !ctx.interactive() {
+        for entry in &entries {
+            if entry.reasons.is_empty() {
+                continue;
+            }
+            ctx.emit(
+                Finding::new(
+                    Severity::High,
+                    "xdg_autostart",
+                    format!(
+                        "Suspicious autostart entry {} ({})",
+                        entry.file.display(),
+                        entry.reasons.join(", ")
+                    ),
+                    format!(
+                        "file: {}\nname: {}\nexec: {}\nreasons: {}",
+                        entry.file.display(),
+                        entry.name,
+                        entry.exec,
+                        entry.reasons.join(", ")
+                    ),
+                )
+                .with_path(entry.file.clone())
+                .with_verdict(
+                    Verdict::Investigate,
+                    "This entry runs at every graphical login. Remove it if it is not expected.",
+                )
+                .with_action(Action::Delete(entry.file.clone())),
+            );
+        }
         return Ok(());
     }
 
@@ -72,8 +110,10 @@ pub fn run(ctx: &DefenderContext) -> Result {
         }
 
         if prompt_yes(&format!("[?] Remove {}? (y/N)", entry.file.display()))? {
-            std::fs::remove_file(&entry.file)?;
-            println!("      [+] Removed {}", entry.file.display());
+            // Quarantined, not deleted, like every other removal.
+            if ctx.remove_path_logged(&entry.file) {
+                println!("      [+] Moved {} to quarantine", entry.file.display());
+            }
         }
     }
 

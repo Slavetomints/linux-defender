@@ -98,22 +98,26 @@ const RESTORE_SERVICES: &[(&str, &str)] = &[
 ];
 
 /// Registry of all scan modules: (id, display label, is_anti_persistence, auto-scan interval).
+///
+/// Modules that change the system (quarantine files, rewrite crontabs or rc
+/// files, stop units) are `OnDemand`: they only run when the operator starts a
+/// scan, never from the background auto-scan. See `REMEDIATING_MODULES`.
 const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
     // ── Anti-persistence ─────────────────────────────────────────────────
     (
         "ssh_keys",
         "SSH authorized_keys",
         true,
-        ScanInterval::Continuous,
+        ScanInterval::OnDemand,
     ),
-    ("cron", "Cron jobs", true, ScanInterval::Continuous),
+    ("cron", "Cron jobs", true, ScanInterval::OnDemand),
     ("at_jobs", "AT job queue", true, ScanInterval::OnDemand),
     ("users", "User accounts", true, ScanInterval::OnDemand),
     (
         "webshells",
         "Web shells (PHP/ASP/ASPX/Python/Ruby)",
         true,
-        ScanInterval::Frequent,
+        ScanInterval::OnDemand,
     ),
     ("suid", "SUID binaries", true, ScanInterval::OnDemand),
     (
@@ -122,7 +126,7 @@ const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
         true,
         ScanInterval::OnDemand,
     ),
-    ("systemd", "Systemd services", true, ScanInterval::Frequent),
+    ("systemd", "Systemd services", true, ScanInterval::OnDemand),
     (
         "kernel_modules",
         "Kernel modules",
@@ -133,7 +137,7 @@ const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
         "ld_preload",
         "LD_PRELOAD hijacking",
         true,
-        ScanInterval::Frequent,
+        ScanInterval::OnDemand,
     ),
     (
         "immutable",
@@ -145,7 +149,7 @@ const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
         "startup_scripts",
         "Startup scripts + skel",
         true,
-        ScanInterval::Frequent,
+        ScanInterval::OnDemand,
     ),
     (
         "rc_local",
@@ -191,19 +195,19 @@ const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
         "cron_system",
         "System cron dirs",
         true,
-        ScanInterval::Continuous,
+        ScanInterval::OnDemand,
     ),
     (
         "systemd_timers",
         "Systemd timers",
         true,
-        ScanInterval::Frequent,
+        ScanInterval::OnDemand,
     ),
     (
         "shell_aliases",
         "Shell alias backdoors",
         true,
-        ScanInterval::Frequent,
+        ScanInterval::OnDemand,
     ),
     ("polkit", "polkit rules audit", true, ScanInterval::OnDemand),
     (
@@ -314,7 +318,7 @@ const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
         "git_hooks",
         "Malicious git hooks",
         false,
-        ScanInterval::Frequent,
+        ScanInterval::OnDemand,
     ),
     (
         "webserver_config",
@@ -656,6 +660,19 @@ impl RestoreCredDialog {
     }
 }
 
+/// How long the second `r` press that confirms nftbuild may take.
+const NFTBUILD_CONFIRM_WINDOW: Duration = Duration::from_secs(5);
+
+/// What one background poll of services, sessions and the auth log found.
+struct PollResult {
+    /// Service histories with this poll's results appended.
+    services: Vec<ServiceHistory>,
+    /// Current logged-in sessions.
+    sessions: Vec<SessionInfo>,
+    /// Latest relevant auth log lines.
+    auth_events: Vec<String>,
+}
+
 /// Which router phase the configuration dialog is prompting for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RouterDialogStep {
@@ -806,6 +823,8 @@ pub struct App {
     pub finding_tx: Sender<Finding>,
     pub finding_rx: Receiver<Finding>,
     pub last_service_check: Instant,
+    /// Results of the in-flight background poll, if one is running.
+    poll_rx: Option<Receiver<PollResult>>,
     // Scan tab state
     pub scan_running: bool,
     pub scan_progress: String,
@@ -820,6 +839,9 @@ pub struct App {
     pub action_feedback: Option<String>,
     /// Generated nftables config from nftbuild (not yet applied).
     pub nft_config: Option<String>,
+    /// When `r` was first pressed on nftbuild; a second press within
+    /// [`NFTBUILD_CONFIRM_WINDOW`] applies the rules.
+    nftbuild_confirm_at: Option<Instant>,
     /// Status message shown in the Tools tab during downloads.
     pub download_status: Option<String>,
     /// Receives the result string from a background download thread.
@@ -982,6 +1004,7 @@ impl App {
             finding_tx,
             finding_rx,
             last_service_check: Instant::now(),
+            poll_rx: None,
             scan_running: false,
             scan_progress: String::new(),
             scan_progress_rx,
@@ -993,6 +1016,7 @@ impl App {
             show_finding_detail: false,
             action_feedback: None,
             nft_config,
+            nftbuild_confirm_at: None,
             download_status: None,
             download_result_rx,
             nftbuild_result_rx,
@@ -1206,30 +1230,63 @@ impl App {
         if self.auto_scan_enabled {
             self.tick_auto_scan();
         }
-        if self.last_service_check.elapsed() >= Duration::from_secs(5) {
-            poll_all(&mut self.services);
-            self.sessions = poll_sessions(&self.authorized_users);
-            self.auth_events = poll_auth_events();
+        // Service checks block for seconds when services are down, which is
+        // exactly when the operator needs the UI. They run on a background
+        // thread; the UI applies the results when they arrive.
+        if let Some(rx) = &self.poll_rx {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.poll_rx = None;
+                    self.services = result.services;
+                    self.sessions = result.sessions;
+                    self.auth_events = result.auth_events;
+                    self.run_watchdog();
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => self.poll_rx = None,
+            }
+        } else if self.last_service_check.elapsed() >= Duration::from_secs(5) {
             self.last_service_check = Instant::now();
-            // Watchdog: automatically restart scored services that have gone down.
-            if self.watchdog_enabled {
-                let down: Vec<&'static str> = self
-                    .services
-                    .iter()
-                    .filter_map(|h| if !h.is_up() { Some(h.check.name) } else { None })
-                    .collect();
-                for name in down {
-                    let count = self.watchdog_restart_count.get(name).copied().unwrap_or(0);
-                    if count < 3 {
-                        *self.watchdog_restart_count.entry(name).or_insert(0) += 1;
-                        let name_owned = name.to_string();
-                        std::thread::spawn(move || {
-                            let _ = std::process::Command::new("systemctl")
-                                .args(["restart", &name_owned])
-                                .output();
-                        });
-                        self.action_feedback = Some(format!("Watchdog: restarting {}…", name));
-                    }
+            let mut services = self.services.clone();
+            let authorized = self.authorized_users.clone();
+            let (tx, rx) = mpsc::channel();
+            self.poll_rx = Some(rx);
+            std::thread::spawn(move || {
+                poll_all(&mut services);
+                let _ = tx.send(PollResult {
+                    services,
+                    sessions: poll_sessions(&authorized),
+                    auth_events: poll_auth_events(),
+                });
+            });
+        }
+    }
+
+    /// Restart scored services that the latest poll found down (at most three
+    /// attempts each), when the watchdog is enabled.
+    fn run_watchdog(&mut self) {
+        if self.watchdog_enabled {
+            let down: Vec<crate::score_check::ServiceCheck> = self
+                .services
+                .iter()
+                .filter(|h| !h.is_up())
+                .map(|h| h.check.clone())
+                .collect();
+            for check in down {
+                let name = check.name;
+                let count = self.watchdog_restart_count.get(name).copied().unwrap_or(0);
+                if count < 3 {
+                    *self.watchdog_restart_count.entry(name).or_insert(0) += 1;
+                    // `name` is a display label; restart the systemd
+                    // unit(s) that actually provide the service.
+                    self.action_feedback = Some(format!(
+                        "Watchdog: {} is down — restarting {}…",
+                        name,
+                        check.units.join("/")
+                    ));
+                    std::thread::spawn(move || {
+                        let _ = crate::score_check::restart_service_units(&check);
+                    });
                 }
             }
         }
@@ -1243,6 +1300,9 @@ impl App {
                 ScanInterval::Frequent => Duration::from_secs(300),
                 ScanInterval::OnDemand => continue,
             };
+            if REMEDIATING_MODULES.contains(id) {
+                continue;
+            }
             if self.auto_scan_running.contains(id) {
                 continue;
             }
@@ -1263,17 +1323,13 @@ impl App {
             let is_ap = *is_ap;
 
             std::thread::spawn(move || {
-                let report = PathBuf::from("/tmp/defender-autoscan.log");
+                let report = crate::core::log_path("autoscan.log");
                 let mut ctx = DefenderContext::new(report, false);
                 ctx.finding_tx = Some(finding_tx);
                 let (progress_sink_tx, progress_sink_rx) = mpsc::channel::<String>();
                 std::thread::spawn(move || while progress_sink_rx.recv().is_ok() {});
                 ctx.progress_tx = Some(progress_sink_tx);
-                if is_ap {
-                    let _ = crate::anti_persistence::run_module(id_str, &ctx);
-                } else {
-                    let _ = crate::monitoring::run_module(id_str, &ctx);
-                }
+                run_scan_module(id_str, is_ap, &ctx);
                 let _ = done_tx.send(id_str);
             });
         }
@@ -1306,7 +1362,7 @@ impl App {
         let progress_tx = self.scan_progress_tx.clone();
 
         std::thread::spawn(move || {
-            let report = PathBuf::from("/tmp/defender-scan.log");
+            let report = crate::core::log_path("scan.log");
             let mut ctx = DefenderContext::new(report, false);
             ctx.finding_tx = Some(finding_tx);
             let (progress_sink_tx, progress_sink_rx) = mpsc::channel::<String>();
@@ -1315,11 +1371,7 @@ impl App {
 
             for (id, is_ap) in selected {
                 let _ = progress_tx.send(id.to_string());
-                if is_ap {
-                    let _ = crate::anti_persistence::run_module(id, &ctx);
-                } else {
-                    let _ = crate::monitoring::run_module(id, &ctx);
-                }
+                run_scan_module(id, is_ap, &ctx);
             }
             let _ = progress_tx.send(String::new()); // signal done
         });
@@ -1336,10 +1388,13 @@ impl App {
 
         let finding_tx = self.hardening_finding_tx.clone();
         let progress_tx = self.hardening_progress_tx.clone();
+        let box_type = self.box_type;
 
         std::thread::spawn(move || {
-            let report = PathBuf::from("/tmp/defender-hardening.log");
-            let mut ctx = DefenderContext::new(report, false).with_progress(progress_tx.clone());
+            let report = crate::core::log_path("hardening.log");
+            let mut ctx = DefenderContext::new(report, false)
+                .with_progress(progress_tx.clone())
+                .with_box_type(box_type);
             ctx.finding_tx = Some(finding_tx);
 
             let args = crate::system_hardening::CliArgs {
@@ -1372,7 +1427,7 @@ impl App {
 
         std::thread::spawn(move || {
             let _ = progress_tx.send(format!("Running {}…", module_id));
-            let report = PathBuf::from("/tmp/defender-monitor.log");
+            let report = crate::core::log_path("monitor.log");
             let mut ctx = DefenderContext::new(report, false).with_progress(progress_tx.clone());
             ctx.finding_tx = Some(finding_tx);
             match crate::monitoring::run_module(module_id, &ctx) {
@@ -1405,7 +1460,7 @@ impl App {
 
         std::thread::spawn(move || {
             let _ = progress_tx.send(format!("Starting: {}…", label));
-            let report = PathBuf::from("/tmp/defender-backup.log");
+            let report = crate::core::log_path("backup.log");
             let ctx = DefenderContext::new(report, false).with_progress(progress_tx.clone());
             let mut args = crate::backups::CliArgs {
                 all: false,
@@ -1460,7 +1515,7 @@ impl App {
 
         std::thread::spawn(move || {
             let _ = progress_tx.send(format!("Restoring: {}…", label));
-            let report = PathBuf::from("/tmp/defender-restore.log");
+            let report = crate::core::log_path("restore.log");
             let ctx = DefenderContext::new(report, false).with_progress(progress_tx.clone());
             let mut args = crate::service_restore::CliArgs {
                 ssh: false,
@@ -1703,6 +1758,12 @@ pub fn run() -> anyhow::Result<()> {
 
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // Only a panic on the UI thread ends the program. Worker-thread panics
+        // are contained by `run_scan_module` and reported as findings; tearing
+        // the terminal down (or printing) for them would wreck a live UI.
+        if std::thread::current().name() != Some("main") {
+            return;
+        }
         let _ = disable_raw_mode();
         let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
         original_hook(info);
@@ -1715,6 +1776,53 @@ pub fn run() -> anyhow::Result<()> {
     terminal.show_cursor().ok();
 
     result
+}
+
+/// Scan modules that modify the system when they find something. They must
+/// never be scheduled by the background auto-scan.
+const REMEDIATING_MODULES: &[&str] = &[
+    "ssh_keys",
+    "cron",
+    "at_jobs",
+    "users",
+    "webshells",
+    "systemd",
+    "ld_preload",
+    "immutable",
+    "startup_scripts",
+    "rc_local",
+    "pam",
+    "mail_intercept",
+    "cron_system",
+    "systemd_timers",
+    "shell_aliases",
+    "xdg_autostart",
+    "git_hooks",
+];
+
+/// Run one scan module on a worker thread, containing any panic.
+///
+/// Scan modules parse attacker-shaped input (logs, crontabs, unit files). If
+/// one panics, the worker must still reach its "done" signal, otherwise the
+/// scan stays marked as running forever and an auto-scan module never runs
+/// again. The crash is surfaced as a finding instead.
+fn run_scan_module(id: &'static str, is_anti_persistence: bool, ctx: &DefenderContext) {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if is_anti_persistence {
+            crate::anti_persistence::run_module(id, ctx)
+        } else {
+            crate::monitoring::run_module(id, ctx)
+        }
+    }));
+    if outcome.is_err() {
+        ctx.emit(Finding::new(
+            Severity::Medium,
+            "scan",
+            format!("Module {} crashed while scanning and was skipped", id),
+            "The module panicked on its input. Its results for this run are incomplete; \
+             treat that as suspicious and inspect the data it reads by hand.",
+        ));
+    }
 }
 
 /// Inner event loop — runs after the terminal is already in raw/alternate-screen mode.
@@ -1826,8 +1934,9 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                     }
                                 };
                                 if missing {
-                                    // Required field empty — stay on dialog, do nothing.
-                                    return Ok(());
+                                    // Required field empty: stay on the dialog. `return` here
+                                    // would exit the whole TUI.
+                                    continue;
                                 }
                                 // Last field confirmed — start restore.
                                 let dialog = app.restore_cred_dialog.take().unwrap();
@@ -2246,6 +2355,22 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                         use crate::tui::tools_view::SelectedTool;
                         match SelectedTool::from_cursor(app.tools_cursor) {
                             SelectedTool::Binary(_) => {
+                                // nftbuild applies rules immediately and can cut
+                                // scored services off: require a second press.
+                                let confirmed = app
+                                    .nftbuild_confirm_at
+                                    .is_some_and(|t| t.elapsed() <= NFTBUILD_CONFIRM_WINDOW);
+                                if !confirmed {
+                                    app.nftbuild_confirm_at = Some(Instant::now());
+                                    app.action_feedback = Some(format!(
+                                        "nftbuild APPLIES {} firewall rules NOW and may drop scored \
+                                         services. Press r again within {}s to confirm.",
+                                        app.box_type.label(),
+                                        NFTBUILD_CONFIRM_WINDOW.as_secs()
+                                    ));
+                                    continue;
+                                }
+                                app.nftbuild_confirm_at = None;
                                 // Run nftbuild in background — avoids blocking the TUI event loop
                                 let box_type = app.box_type;
                                 let opts = crate::tools::nftbuild::RunOptions::default();
@@ -2868,7 +2993,7 @@ fn render_scan(f: &mut ratatui::Frame, area: Rect, app: &App) {
                     Style::default()
                 };
                 let module_prefix =
-                    format!("{:<10}", &finding.module[..finding.module.len().min(10)]);
+                    format!("{:<10}", crate::core::truncate_chars(finding.module, 10));
                 let line = Line::from(vec![
                     Span::styled(
                         format!("[{}]", finding.severity.label()),
@@ -4238,5 +4363,22 @@ mod tests {
         assert_eq!(Tab::from_digit('9', BoxType::Router), None);
         assert_eq!(Tab::from_digit('0', BoxType::Router), None);
         assert_eq!(Tab::from_digit('a', BoxType::Router), None);
+    }
+}
+
+#[cfg(test)]
+mod auto_scan_tests {
+    use super::*;
+
+    #[test]
+    fn remediating_modules_are_never_auto_scanned() {
+        for (id, _, _, interval) in SCAN_MODULES {
+            if REMEDIATING_MODULES.contains(id) {
+                assert!(
+                    matches!(interval, ScanInterval::OnDemand),
+                    "{id} changes the system and must be on-demand only"
+                );
+            }
+        }
     }
 }

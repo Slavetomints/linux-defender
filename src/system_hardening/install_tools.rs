@@ -1,30 +1,23 @@
 //! Downloading the team's hardening toolchain.
 
-use std::process::Command;
+use crate::core::{DefenderContext, Result};
+use crate::tools::catalog::NFTBUILD;
+use crate::tools::downloader;
 
-use crate::core::{DefenderContext, DefenderError, Result};
-
-/// The team's host firewall script in the CCDC-scripts repository.
-const NFTBUILD_URL: &str = "https://github.com/UWStout-CCDC/CCDC-scripts/raw/refs/heads/master/firewall/host_firewall/nftbuild";
-
-/// Download the nftbuild firewall script into the working directory.
+/// Download the nftbuild firewall script into `/usr/local/bin`.
+///
+/// Goes through [`downloader::download`], so the file is only installed when
+/// its SHA-256 matches the pinned hash. A failed download or a hash mismatch
+/// is returned as an error.
 pub fn run(ctx: &DefenderContext) -> Result {
-    println!("[+] Downloading nftbuild");
-    ctx.debug(NFTBUILD_URL);
+    ctx.progress("[+] Downloading nftbuild");
+    ctx.debug(NFTBUILD.url);
 
-    let output = Command::new("wget")
-        .arg(NFTBUILD_URL)
-        .output()
-        .map_err(|e| DefenderError::Command(format!("wget: {}", e)))?;
-
-    if output.status.success() {
-        println!("[✓] Downloaded nftbuild to the current directory");
-    } else {
-        eprintln!(
-            "[X] wget failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
+    let result = downloader::download(&NFTBUILD)?;
+    ctx.progress(&format!(
+        "[✓] Installed nftbuild to {} (sha256 {})",
+        result.path.display(),
+        result.sha256
+    ));
     Ok(())
 }

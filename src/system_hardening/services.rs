@@ -7,7 +7,10 @@
 //! # Allow-lists
 //!
 //! All box types share a baseline: ssh/sshd, cron/crond, atd, nftables/ufw/iptables/firewalld,
-//! rsyslog/syslog, auditd, fail2ban, apparmor, dbus, and all systemd-* units.
+//! rsyslog/syslog, auditd, fail2ban, apparmor, dbus/dbus-broker, getty (console
+//! login), time sync, hypervisor guest agents, container runtimes, AD helpers,
+//! storage/boot plumbing, and vendor-installed systemd-* units. Anything that would take the
+//! console, the clock, or the VM tooling away from the operator stays enabled.
 //!
 //! Box-specific additions:
 //! | Box type | Additional allowed services |
@@ -17,11 +20,12 @@
 //! | Splunk   | splunk, SplunkForwarder |
 //! | General  | mysql/mariadb/postgresql, named/bind9 |
 
+use std::path::Path;
 use std::process::Command;
 
 use crate::core::{
     Action, BoxType, DefenderContext, DefenderError, Finding, Result, Severity, Verdict,
-    detect_box_type, is_scored_unit, require_root,
+    is_scored_unit, require_root,
 };
 
 /// Services that must never be disabled regardless of box type.
@@ -51,8 +55,84 @@ const BASELINE_ALLOW: &[&str] = &[
     // mandatory access control
     "apparmor",
     "selinux",
-    // dbus (required by many systemd units)
+    // dbus (required by many systemd units); Rocky/Fedora ship dbus-broker
     "dbus",
+    "dbus-broker",
+    "dbus-daemon",
+    "polkit",
+    // console and serial logins: the fallback when SSH is lost
+    "getty",
+    "serial-getty",
+    "autovt",
+    "console-getty",
+    "container-getty",
+    // SSH host key generation (RHEL family)
+    "sshd-keygen",
+    // time sync: clock skew breaks Kerberos/AD auth and TLS
+    "chronyd",
+    "chrony",
+    "ntpd",
+    "ntp",
+    "ntpsec",
+    // hypervisor guest agents: the competition boxes are VMs
+    "vmtoolsd",
+    "open-vm-tools",
+    "vgauthd",
+    "qemu-guest-agent",
+    "vboxadd",
+    "vboxadd-service",
+    "hv-kvp-daemon",
+    "hv-vss-daemon",
+    "hv-fcopy-daemon",
+    "xe-linux-distribution",
+    "cloud-init",
+    "cloud-init-local",
+    "cloud-config",
+    "cloud-final",
+    // container runtimes: scored services may live in containers
+    "docker",
+    "containerd",
+    "podman",
+    "podman-restart",
+    "crio",
+    // caches and queues commonly backing the web store or webmail
+    "redis",
+    "redis-server",
+    "memcached",
+    "valkey",
+    // AD / directory helpers (home dir creation, realm join, name caching)
+    "oddjobd",
+    "realmd",
+    "nscd",
+    // storage and boot plumbing
+    "lvm2-monitor",
+    "lvm2-lvmpolld",
+    "multipathd",
+    "mdmonitor",
+    "blk-availability",
+    "dm-event",
+    "iscsid",
+    "open-iscsi",
+    "irqbalance",
+    "kdump",
+    "tuned",
+    "rngd",
+    "haveged",
+    "selinux-autorelabel-mark",
+    "e2scrub_reap",
+    "grub-common",
+    "kmod-static-nodes",
+    "keyboard-setup",
+    "console-setup",
+    "setvtrgb",
+    "ifupdown-pre",
+    "networkd-dispatcher",
+    "networkmanager-dispatcher",
+    "networkmanager-wait-online",
+    "nis-domainname",
+    "import-state",
+    "loadmodules",
+    "microcode",
 ];
 
 /// Services allowed on a Web box.
@@ -110,10 +190,34 @@ pub fn allow_list(box_type: BoxType) -> &'static [&'static str] {
     }
 }
 
+/// Where packages install unit files.
+const VENDOR_UNIT_DIRS: &[&str] = &["/usr/lib/systemd/system", "/lib/systemd/system"];
+
+/// Where local or runtime unit files live; a copy here shadows the vendor one.
+const OVERRIDE_UNIT_DIRS: &[&str] = &["/etc/systemd/system", "/run/systemd/system"];
+
+/// True for a `systemd-*` unit whose file exists in a vendor directory and is
+/// not shadowed by a same-named file in an override directory.
+fn is_vendor_systemd_unit(name: &str, vendor_dirs: &[&str], override_dirs: &[&str]) -> bool {
+    if !name.starts_with("systemd-") || name.contains('/') {
+        return false;
+    }
+    // Templates (`systemd-fsck@`) and their instances (`systemd-fsck@sda1`)
+    // both live in the template file `systemd-fsck@.service`.
+    let file = match name.split_once('@') {
+        Some((template, _)) => format!("{template}@.service"),
+        None => format!("{name}.service"),
+    };
+    let in_dir = |d: &&str| Path::new(d).join(&file).exists();
+    vendor_dirs.iter().any(in_dir) && !override_dirs.iter().any(in_dir)
+}
+
 /// Return `true` when `service_name` is allowed on `box_type`.
 pub fn is_allowed(service_name: &str, box_type: BoxType) -> bool {
-    // Core systemd units are always kept on every box.
-    if service_name.starts_with("systemd-") {
+    // Core systemd units are kept on every box, but only genuine ones: the
+    // unit file must be the vendor copy. A `systemd-update.service` an
+    // attacker dropped in /etc/systemd/system gets no free pass.
+    if is_vendor_systemd_unit(service_name, VENDOR_UNIT_DIRS, OVERRIDE_UNIT_DIRS) {
         return true;
     }
     // Scored services and their dependencies (Splunkd, mariadb, NetworkManager,
@@ -121,12 +225,19 @@ pub fn is_allowed(service_name: &str, box_type: BoxType) -> bool {
     if is_scored_unit(service_name) {
         return true;
     }
+    // `systemctl list-unit-files` reports templates as `getty@` and instances
+    // as `getty@tty1`; match both on the template name. Compare lowercased so
+    // `NetworkManager-dispatcher` matches its entry.
+    let lower = service_name.to_ascii_lowercase();
+    let base = lower.split('@').next().unwrap_or(&lower);
     // Baseline services that must never be disabled regardless of box type.
-    if BASELINE_ALLOW.contains(&service_name) {
+    if BASELINE_ALLOW.contains(&base) {
         return true;
     }
     // Box-specific services.
-    allow_list(box_type).contains(&service_name)
+    allow_list(box_type)
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(base))
 }
 
 /// Disable services that are not on the allow-list for this box's type.
@@ -146,7 +257,9 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
     ctx.log_msg("[+] Hardening enabled services...");
 
-    let box_type = detect_box_type();
+    // Use the box type the operator confirmed in the TUI when there is one;
+    // detection alone can be wrong (a forwarder on a web box, say).
+    let box_type = ctx.box_type();
     ctx.log_msg(&format!(
         "[+] Detected box type: {} — using {} allow-list",
         box_type.label(),
@@ -207,10 +320,22 @@ pub fn run(ctx: &DefenderContext) -> Result {
         );
     }
 
-    check_masked_scored_units(ctx);
+    check_masked_scored_units(ctx, box_type);
 
     ctx.log_msg("[✓] Service hardening complete");
     Ok(())
+}
+
+/// Whether a masked unit `svc` should be unmasked and started automatically:
+/// it must back one of `box_type`'s scored checks, and no other unit for that
+/// check may already be active (nginx masked while apache serves port 80).
+fn should_auto_unmask(svc: &str, box_type: BoxType, is_active: impl Fn(&str) -> bool) -> bool {
+    let base = |u: &str| u.trim_end_matches(".service").to_ascii_lowercase();
+    let svc = base(svc);
+    box_type.checks().iter().any(|check| {
+        check.units.iter().any(|u| base(u) == svc)
+            && !check.units.iter().any(|u| base(u) != svc && is_active(u))
+    })
 }
 
 /// Detect scored services that have been masked and unmask them.
@@ -218,9 +343,12 @@ pub fn run(ctx: &DefenderContext) -> Result {
 /// `systemctl mask <svc>` symlinks the unit to /dev/null, so the service can't
 /// start and never shows up as "enabled". It's a one-command way to take a
 /// scored service offline, and nothing else in the hardening loop catches it
-/// (masked units aren't enabled). We list masked units, and for any that back a
-/// scored service we unmask it and flag Critical.
-fn check_masked_scored_units(ctx: &DefenderContext) {
+/// (masked units aren't enabled). We list masked units; one that backs a scored
+/// check on this box type is unmasked and started, unless another unit is
+/// already serving that check. Other masked scored-adjacent units (networkd,
+/// resolved, databases, FTP) may have been masked on purpose and are only
+/// reported.
+fn check_masked_scored_units(ctx: &DefenderContext, box_type: BoxType) {
     ctx.log_msg("[+] Checking for masked scored services...");
     let output = Command::new("systemctl")
         .args([
@@ -242,6 +370,39 @@ fn check_masked_scored_units(ctx: &DefenderContext) {
             continue;
         }
         ctx.log_evidence_line("systemctl list-unit-files --state=masked", &svc);
+        if !should_auto_unmask(&svc, box_type, check_active) {
+            ctx.emit(
+                Finding::new(
+                    Severity::High,
+                    "services",
+                    format!("Scored-adjacent service '{}' is MASKED (left as is)", svc),
+                    format!(
+                        "service: {}\nwas: masked\nunmasked: false\nbox_type: {}",
+                        svc,
+                        box_type.label()
+                    ),
+                )
+                .with_context("service", svc.as_str())
+                .with_verdict(
+                    Verdict::Investigate,
+                    format!(
+                        "'{}' is masked. It does not back a scored check on a {} box, or \
+                         another unit already serves that check, so it may have been masked \
+                         on purpose and was not touched. If it should run: \
+                         `systemctl unmask {} && systemctl enable --now {}`.",
+                        svc,
+                        box_type.label(),
+                        svc,
+                        svc
+                    ),
+                )
+                .with_action(Action::Manual(format!(
+                    "systemctl unmask {} && systemctl enable --now {}",
+                    svc, svc
+                ))),
+            );
+            continue;
+        }
         let unmasked = ctx.run_remediation(&["systemctl", "unmask", &svc]);
         // Bring it back up after unmasking.
         let started = unmasked && ctx.run_remediation(&["systemctl", "enable", "--now", &svc]);
@@ -425,11 +586,85 @@ mod tests {
     }
 
     #[test]
-    fn systemd_prefix_always_allowed() {
-        assert!(is_allowed("systemd-journald", BoxType::Web));
-        assert!(is_allowed("systemd-networkd", BoxType::Mail));
-        assert!(is_allowed("systemd-resolved", BoxType::Splunk));
-        assert!(is_allowed("systemd-logind", BoxType::General));
+    fn console_dbus_time_and_vm_services_are_never_disabled() {
+        for svc in [
+            "getty@",
+            "getty@tty1",
+            "serial-getty@",
+            "dbus-broker",
+            "chronyd",
+            "vmtoolsd",
+            "qemu-guest-agent",
+            "docker",
+            "containerd",
+            "redis-server",
+            "memcached",
+            "oddjobd",
+            "NetworkManager-dispatcher",
+            "sshd-keygen@",
+            "lvm2-monitor",
+        ] {
+            for box_type in BoxType::ALL {
+                assert!(
+                    is_allowed(svc, *box_type),
+                    "{svc} must be allowed on {box_type:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_units_behind_this_boxs_scored_checks_are_auto_unmasked() {
+        let none_active = |_: &str| false;
+        assert!(should_auto_unmask("postfix", BoxType::Mail, none_active));
+        assert!(should_auto_unmask("sshd", BoxType::General, none_active));
+        assert!(!should_auto_unmask(
+            "systemd-networkd",
+            BoxType::Mail,
+            none_active
+        ));
+        assert!(!should_auto_unmask(
+            "systemd-resolved",
+            BoxType::Web,
+            none_active
+        ));
+        assert!(!should_auto_unmask("mysql", BoxType::Web, none_active));
+        assert!(!should_auto_unmask("vsftpd", BoxType::Web, none_active));
+        assert!(!should_auto_unmask("postfix", BoxType::Splunk, none_active));
+    }
+
+    #[test]
+    fn a_masked_alternative_is_left_alone_when_another_unit_serves() {
+        let apache_up = |u: &str| u == "apache2";
+        assert!(!should_auto_unmask("nginx", BoxType::Web, apache_up));
+        assert!(should_auto_unmask("nginx", BoxType::Web, |_| false));
+    }
+
+    #[test]
+    fn systemd_units_are_allowed_only_when_they_are_vendor_files() {
+        let vendor = tempfile::TempDir::new().unwrap();
+        let local = tempfile::TempDir::new().unwrap();
+        for f in [
+            "systemd-journald.service",
+            "systemd-fsck@.service",
+            "systemd-resolved.service",
+        ] {
+            std::fs::write(vendor.path().join(f), "").unwrap();
+        }
+        // An attacker unit with a systemd- name, and a local copy shadowing a
+        // vendor unit.
+        std::fs::write(local.path().join("systemd-update.service"), "").unwrap();
+        std::fs::write(local.path().join("systemd-resolved.service"), "").unwrap();
+        let v = [vendor.path().to_str().unwrap()];
+        let o = [local.path().to_str().unwrap()];
+
+        assert!(is_vendor_systemd_unit("systemd-journald", &v, &o));
+        assert!(is_vendor_systemd_unit("systemd-fsck@", &v, &o));
+        assert!(is_vendor_systemd_unit("systemd-fsck@dev-sda1", &v, &o));
+        assert!(!is_vendor_systemd_unit("systemd-update", &v, &o));
+        assert!(!is_vendor_systemd_unit("systemd-resolved", &v, &o));
+        assert!(!is_vendor_systemd_unit("journald", &v, &o));
+        assert!(!is_vendor_systemd_unit("systemd-../../tmp/x", &v, &o));
     }
 
     #[test]

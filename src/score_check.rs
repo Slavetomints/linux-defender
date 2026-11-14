@@ -18,14 +18,14 @@
 //! - [`CheckKind::Dns`] — `dig` query, check for an ANSWER section
 
 use std::collections::VecDeque;
-use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::path::Path;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Path where score-check results are logged for post-mortem debugging.
-pub const SCORE_LOG: &str = "/tmp/defender-score.log";
+pub const SCORE_LOG: &str = "/var/log/linux-defender/score.log";
 
 /// Which external HTTP client is available on this machine.
 enum ExtHttpClient {
@@ -130,6 +130,64 @@ pub struct ServiceCheck {
     pub port: u16,
     /// How to verify the service is working.
     pub kind: CheckKind,
+    /// systemd units that can provide this service, in order of preference.
+    /// `name` is a display label ("Postfix SMTP"), not something systemctl
+    /// understands; the watchdog restarts these instead.
+    pub units: &'static [&'static str],
+}
+
+/// Whether systemd knows a unit called `unit`.
+fn unit_exists(unit: &str) -> bool {
+    std::process::Command::new("systemctl")
+        .args(["list-unit-files", "--no-legend", &format!("{unit}.service")])
+        .output()
+        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// Whether `unit` is enabled to start at boot.
+fn unit_enabled(unit: &str) -> bool {
+    std::process::Command::new("systemctl")
+        .args(["is-enabled", "--quiet", unit])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Pick which of `candidates` to restart, given predicates for "enabled" and
+/// "exists": every enabled candidate, or failing that the first one that
+/// exists. Enabled wins so a box with both apache2 and nginx installed
+/// restarts the one actually serving.
+pub fn choose_restart_units<'a>(
+    candidates: &[&'a str],
+    enabled: impl Fn(&str) -> bool,
+    exists: impl Fn(&str) -> bool,
+) -> Vec<&'a str> {
+    let on: Vec<&str> = candidates.iter().copied().filter(|u| enabled(u)).collect();
+    if !on.is_empty() {
+        return on;
+    }
+    candidates
+        .iter()
+        .copied()
+        .find(|u| exists(u))
+        .into_iter()
+        .collect()
+}
+
+/// Restart the systemd unit(s) behind `check`. Returns the units that were
+/// restarted successfully; empty when none exist on this box.
+pub fn restart_service_units(check: &ServiceCheck) -> Vec<&'static str> {
+    choose_restart_units(check.units, unit_enabled, unit_exists)
+        .into_iter()
+        .filter(|unit| {
+            std::process::Command::new("systemctl")
+                .args(["restart", unit])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        })
+        .collect()
 }
 
 /// Result of a single poll of one service.
@@ -146,6 +204,7 @@ pub struct CheckResult {
 }
 
 /// Running history for one service: the last 20 results.
+#[derive(Clone)]
 pub struct ServiceHistory {
     /// The check definition.
     pub check: ServiceCheck,
@@ -338,7 +397,7 @@ fn log_check_result(svc: &ServiceCheck, up: bool, latency_ms: u64, detail: &str)
         name = svc.name,
         port = svc.port,
     );
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(SCORE_LOG) {
+    if let Ok(mut f) = crate::core::open_private_append(&crate::core::log_path("score.log")) {
         let _ = f.write_all(line.as_bytes());
     }
 }
@@ -736,7 +795,10 @@ fn check_smtp_send(host: &str, port: u16, from: &str, to: &str) -> (bool, String
     if !banner.starts_with("220") {
         return (
             false,
-            format!("no 220 banner: {}", &banner[..banner.len().min(40)]),
+            format!(
+                "no 220 banner: {}",
+                crate::core::truncate_chars(&banner, 40)
+            ),
         );
     }
     let cmds = [
@@ -751,7 +813,11 @@ fn check_smtp_send(host: &str, port: u16, from: &str, to: &str) -> (bool, String
         if !resp.starts_with(expect) {
             return (
                 false,
-                format!("cmd {:?} → {:?}", cmd.trim(), &resp[..resp.len().min(50)]),
+                format!(
+                    "cmd {:?} → {:?}",
+                    cmd.trim(),
+                    crate::core::truncate_chars(&resp, 50)
+                ),
             );
         }
     }
@@ -849,7 +915,11 @@ fn check_pop3_login(host: &str, port: u16, user: &str) -> (bool, String) {
         if !first.starts_with(expect) {
             return (
                 false,
-                format!("{}: {}", template.trim(), &first[..first.len().min(50)]),
+                format!(
+                    "{}: {}",
+                    template.trim(),
+                    crate::core::truncate_chars(first, 50)
+                ),
             );
         }
     }
@@ -895,6 +965,7 @@ pub fn parse_http_status(response: &str) -> Option<u16> {
 pub const WEB_CHECKS: &[ServiceCheck] = &[
     ServiceCheck {
         name: "HTTP",
+        units: &["apache2", "httpd", "nginx"],
         host: "127.0.0.1",
         port: 80,
         kind: CheckKind::Http {
@@ -904,6 +975,7 @@ pub const WEB_CHECKS: &[ServiceCheck] = &[
     },
     ServiceCheck {
         name: "HTTPS",
+        units: &["apache2", "httpd", "nginx"],
         host: "127.0.0.1",
         port: 443,
         kind: CheckKind::Https {
@@ -913,6 +985,7 @@ pub const WEB_CHECKS: &[ServiceCheck] = &[
     },
     ServiceCheck {
         name: "SSH",
+        units: &["ssh", "sshd"],
         host: "127.0.0.1",
         port: 22,
         kind: CheckKind::Tcp,
@@ -937,6 +1010,8 @@ pub fn mail_check_pass() -> &'static str {
         if let Ok(text) = std::fs::read_to_string(MAIL_CHECK_CONF) {
             let trimmed = text.trim().to_string();
             if !trimmed.is_empty() {
+                // Older versions wrote this file 0644; tighten it on read.
+                let _ = restrict_secret_file(Path::new(MAIL_CHECK_CONF));
                 return trimmed;
             }
         }
@@ -944,26 +1019,62 @@ pub fn mail_check_pass() -> &'static str {
         let pass = gen_random_hex(16);
         // Persist it so future runs (and the next `ensure_mail_test_account` call)
         // use the same password.
-        let _ = std::fs::create_dir_all("/etc/linux-defender");
-        let _ = std::fs::write(MAIL_CHECK_CONF, &pass);
+        let _ = write_secret_file(Path::new(MAIL_CHECK_CONF), &pass);
         pass
     })
 }
 
 /// Read `n` bytes from `/dev/urandom` and return them as a lowercase hex string.
 fn gen_random_hex(n: usize) -> String {
-    use std::fs::File;
+    use std::io::Read;
     let mut buf = vec![0u8; n];
-    if let Ok(mut f) = File::open("/dev/urandom") {
-        let _ = std::io::Read::read(&mut f, &mut buf);
+    // read_exact: a short read must not leave part of the password as zeros.
+    let filled = std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .is_ok();
+    if !filled {
+        // SAFETY: buf is valid for n bytes; getrandom writes at most n bytes.
+        let got = unsafe { libc::getrandom(buf.as_mut_ptr().cast(), n, 0) };
+        assert!(
+            usize::try_from(got).is_ok_and(|g| g == n),
+            "no source of randomness for the mail check password"
+        );
     }
     buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Write `contents` to `path` readable by root only (0600, parent 0700).
+fn write_secret_file(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    if let Some(parent) = path.parent() {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    restrict_secret_file(path)?;
+    f.write_all(contents.as_bytes())
+}
+
+/// Force `path` to mode 0600 (an existing file keeps its old mode otherwise).
+fn restrict_secret_file(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
 /// Scored services for a mail box.
 pub const MAIL_CHECKS: &[ServiceCheck] = &[
     ServiceCheck {
         name: "Postfix SMTP",
+        units: &["postfix"],
         host: "127.0.0.1",
         port: 25,
         kind: CheckKind::SmtpSend {
@@ -973,6 +1084,7 @@ pub const MAIL_CHECKS: &[ServiceCheck] = &[
     },
     ServiceCheck {
         name: "Dovecot IMAP",
+        units: &["dovecot"],
         host: "127.0.0.1",
         port: 143,
         kind: CheckKind::ImapLogin {
@@ -981,6 +1093,7 @@ pub const MAIL_CHECKS: &[ServiceCheck] = &[
     },
     ServiceCheck {
         name: "Dovecot POP3",
+        units: &["dovecot"],
         host: "127.0.0.1",
         port: 110,
         kind: CheckKind::Pop3Login {
@@ -989,6 +1102,7 @@ pub const MAIL_CHECKS: &[ServiceCheck] = &[
     },
     ServiceCheck {
         name: "Roundcube",
+        units: &["apache2", "httpd", "nginx"],
         host: "127.0.0.1",
         port: 80,
         kind: CheckKind::Http {
@@ -998,6 +1112,7 @@ pub const MAIL_CHECKS: &[ServiceCheck] = &[
     },
     ServiceCheck {
         name: "SSH",
+        units: &["ssh", "sshd"],
         host: "127.0.0.1",
         port: 22,
         kind: CheckKind::Tcp,
@@ -1008,6 +1123,7 @@ pub const MAIL_CHECKS: &[ServiceCheck] = &[
 pub const SPLUNK_CHECKS: &[ServiceCheck] = &[
     ServiceCheck {
         name: "Splunk Web",
+        units: &["Splunkd", "splunk"],
         host: "127.0.0.1",
         port: 8000,
         // Splunk web is plain HTTP (not HTTPS) on port 8000.
@@ -1020,12 +1136,14 @@ pub const SPLUNK_CHECKS: &[ServiceCheck] = &[
     },
     ServiceCheck {
         name: "Splunk Mgmt",
+        units: &["Splunkd", "splunk"],
         host: "127.0.0.1",
         port: 8089,
         kind: CheckKind::Tcp,
     },
     ServiceCheck {
         name: "SSH",
+        units: &["ssh", "sshd"],
         host: "127.0.0.1",
         port: 22,
         kind: CheckKind::Tcp,
@@ -1035,6 +1153,7 @@ pub const SPLUNK_CHECKS: &[ServiceCheck] = &[
 /// Scored services for a general-purpose box.
 pub const GENERAL_CHECKS: &[ServiceCheck] = &[ServiceCheck {
     name: "SSH",
+    units: &["ssh", "sshd"],
     host: "127.0.0.1",
     port: 22,
     kind: CheckKind::Tcp,
@@ -1045,6 +1164,58 @@ pub const GENERAL_CHECKS: &[ServiceCheck] = &[ServiceCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secret_file_is_root_only_even_when_it_existed_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("sub/mail-check.conf");
+        write_secret_file(&path, "abc").unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_secret_file(&path, "def").unwrap();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "def");
+    }
+
+    #[test]
+    fn random_hex_is_full_length_and_not_all_zero() {
+        let h = gen_random_hex(16);
+        assert_eq!(h.len(), 32);
+        assert_ne!(h, "0".repeat(32));
+    }
+
+    #[test]
+    fn every_builtin_check_names_real_units_not_its_label() {
+        for check in WEB_CHECKS
+            .iter()
+            .chain(MAIL_CHECKS)
+            .chain(SPLUNK_CHECKS)
+            .chain(GENERAL_CHECKS)
+        {
+            assert!(!check.units.is_empty(), "{} has no units", check.name);
+            for unit in check.units {
+                assert!(!unit.contains(' '), "{unit} is not a unit name");
+            }
+        }
+    }
+
+    #[test]
+    fn watchdog_restarts_enabled_units_else_first_existing() {
+        let c = ["apache2", "httpd", "nginx"];
+        assert_eq!(
+            choose_restart_units(&c, |u| u == "nginx", |_| true),
+            vec!["nginx"]
+        );
+        assert_eq!(
+            choose_restart_units(&c, |_| false, |u| u == "httpd" || u == "nginx"),
+            vec!["httpd"]
+        );
+        assert!(choose_restart_units(&c, |_| false, |_| false).is_empty());
+    }
 
     #[test]
     fn parse_http_status_200() {
@@ -1070,6 +1241,7 @@ mod tests {
     fn service_history_starts_empty() {
         let h = ServiceHistory::new(ServiceCheck {
             name: "test",
+            units: &[],
             host: "127.0.0.1",
             port: 9,
             kind: CheckKind::Tcp,
@@ -1084,6 +1256,7 @@ mod tests {
     fn uptime_fraction_all_up() {
         let mut h = ServiceHistory::new(ServiceCheck {
             name: "test",
+            units: &[],
             host: "127.0.0.1",
             port: 9,
             kind: CheckKind::Tcp,
@@ -1103,6 +1276,7 @@ mod tests {
     fn uptime_fraction_half() {
         let mut h = ServiceHistory::new(ServiceCheck {
             name: "test",
+            units: &[],
             host: "127.0.0.1",
             port: 9,
             kind: CheckKind::Tcp,
@@ -1122,6 +1296,7 @@ mod tests {
     fn history_ring_buffer_caps_at_history_len() {
         let mut h = ServiceHistory::new(ServiceCheck {
             name: "test",
+            units: &[],
             host: "127.0.0.1",
             port: 9,
             kind: CheckKind::Tcp,

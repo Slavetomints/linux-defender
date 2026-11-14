@@ -8,7 +8,6 @@
 // ioctl_read! generates an undocumentable unsafe fn; suppress the lint for this file.
 #![allow(missing_docs)]
 
-use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
@@ -149,7 +148,13 @@ fn sweep_dir(ctx: &DefenderContext, dir: &str) {
 
 /// Read the ext2 filesystem flags for `path` via ioctl.
 fn get_flags(path: &Path) -> std::result::Result<libc::c_long, nix::Error> {
-    let file = File::open(path).map_err(|_| nix::Error::EACCES)?;
+    // Non-blocking open, and only files and directories: a hidden FIFO in a
+    // home directory would otherwise hang the sweep on open().
+    let (file, meta) = crate::core::scan::open_nonblocking(path).map_err(|_| nix::Error::EACCES)?;
+    let kind = meta.file_type();
+    if !kind.is_file() && !kind.is_dir() {
+        return Err(nix::Error::ENOTSUP);
+    }
     let mut flags: libc::c_long = 0;
     // Safety: fd is valid for the lifetime of `file`; ioctl writes one c_long.
     unsafe { ext2_getflags(file.as_raw_fd(), &mut flags) }?;

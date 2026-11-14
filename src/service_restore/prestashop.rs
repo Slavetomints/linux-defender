@@ -33,7 +33,7 @@ use crate::core::{
 use super::distro::Distro;
 use super::webserver::{
     download_file, extract_zip, find_php, fix_permissions, purge_web_root, reload_webserver,
-    resolve_web_root, verify_site, verify_site_insecure,
+    require_archive_entry, resolve_web_root, verify_site, verify_site_insecure,
 };
 
 /// Credentials collected by the TUI dialog (or CLI prompts) before install.
@@ -77,7 +77,7 @@ const PRESTASHOP_DEFAULT_URL: &str =
     "https://github.com/PrestaShop/PrestaShop/releases/download/9.0.0/prestashop_9.0.0.zip";
 
 /// Temporary zip path used during extraction.
-const TMP_ZIP: &str = "/tmp/defender-prestashop.zip";
+const TMP_ZIP: &str = "/var/lib/linux-defender/downloads/prestashop.zip";
 
 /// Directories that need to be writable during (and after) installation.
 const WRITABLE_DIRS: &[&str] = &[
@@ -132,7 +132,11 @@ pub fn run(
     // ── 1. Download ───────────────────────────────────────────────────────────
     download_file(url, Path::new(TMP_ZIP), &distro, ctx)?;
 
-    // ── 1b. Purge web root — full clean slate, no attacker files survive ──────
+    // Fail here, with the old site still in place, if the archive is not a
+    // release we can install from.
+    require_archive_entry(Path::new(TMP_ZIP), "install/index_cli.php")?;
+
+    // ── 1b. Purge web root — previous contents go to quarantine ──────────────
     purge_web_root(&root, ctx)?;
 
     // ── 2. Extract flat zip to web root ───────────────────────────────────────
@@ -225,7 +229,7 @@ pub fn run(
 
     // ── 7. Permissions and web server ─────────────────────────────────────────
     ctx.progress("[+] Fixing ownership and permissions...");
-    fix_permissions(&root, &distro, ctx)?;
+    fix_permissions(&root, &distro, WRITABLE_DIRS, ctx)?;
 
     ctx.progress("[+] Reloading web server...");
     reload_webserver(ctx)?;

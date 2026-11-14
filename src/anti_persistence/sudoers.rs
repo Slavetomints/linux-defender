@@ -515,49 +515,62 @@ fn check_visudo(ctx: &DefenderContext, path: &Path) -> Vec<Finding> {
 /// Find files referenced by `@include`, `#include`, and `#includedir` lines.
 fn find_includes(base: &Path, contents: &str) -> Vec<PathBuf> {
     let mut result = Vec::new();
+    let base_dir = base.parent().unwrap_or(Path::new("/"));
+    let resolve = |p: &str| {
+        if Path::new(p).is_absolute() {
+            PathBuf::from(p)
+        } else {
+            base_dir.join(p)
+        }
+    };
 
     for line in contents.lines() {
         let trimmed = line.trim();
 
-        // @include <file> or #include <file>
-        if let Some(rest) =
-            strip_prefix_ci(trimmed, "@include").or_else(|| strip_prefix_ci(trimmed, "#include"))
-        {
-            let p = rest.trim().trim_matches('"');
-            if !p.is_empty() {
-                result.push(PathBuf::from(p));
-            }
-            continue;
-        }
-
-        // @includedir <dir> or #includedir <dir>
-        if let Some(rest) = strip_prefix_ci(trimmed, "@includedir")
-            .or_else(|| strip_prefix_ci(trimmed, "#includedir"))
-        {
-            let dir_path = rest.trim().trim_matches('"');
-            if dir_path.is_empty() {
-                continue;
-            }
-            let dir = if Path::new(dir_path).is_absolute() {
-                PathBuf::from(dir_path)
-            } else {
-                base.parent().unwrap_or(Path::new("/")).join(dir_path)
-            };
+        // Check @includedir before @include: "@include" is a prefix of it.
+        if let Some(rest) = include_argument(trimmed, "includedir") {
+            let dir = resolve(rest);
             if dir.is_dir() {
                 let mut entries: Vec<_> = std::fs::read_dir(&dir)
                     .into_iter()
                     .flatten()
                     .filter_map(|e| e.ok())
+                    .filter(|e| sudo_reads_includedir_entry(&e.file_name().to_string_lossy()))
                     .filter(|e| e.path().is_file())
                     .map(|e| e.path())
                     .collect();
                 entries.sort();
                 result.extend(entries);
             }
+            continue;
+        }
+
+        if let Some(rest) = include_argument(trimmed, "include") {
+            result.push(resolve(rest));
         }
     }
 
     result
+}
+
+/// The argument of an `@<keyword> <path>` or `#<keyword> <path>` line, with
+/// optional double quotes removed. The keyword must be followed by
+/// whitespace, so `include` does not match `includedir`.
+fn include_argument<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
+    let rest = strip_prefix_ci(line, "@")
+        .or_else(|| strip_prefix_ci(line, "#"))
+        .and_then(|r| strip_prefix_ci(r, keyword))?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let arg = rest.trim().trim_matches('"');
+    (!arg.is_empty()).then_some(arg)
+}
+
+/// sudo skips files in an included directory whose names end in `~` or
+/// contain a `.` (editor backups, `.rpmsave`, `README`s with extensions).
+fn sudo_reads_includedir_entry(name: &str) -> bool {
+    !name.ends_with('~') && !name.contains('.')
 }
 
 // ── Line parsing helpers ──────────────────────────────────────────────────────
@@ -607,12 +620,11 @@ fn logical_lines(contents: &str) -> Vec<String> {
 
 /// Strip a case-insensitive prefix from a string, returning the rest.
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    if s.len() < prefix.len() {
-        return None;
-    }
-    let (head, tail) = s.split_at(prefix.len());
+    // `get` returns None instead of panicking when `prefix.len()` falls inside
+    // a multi-byte character or past the end of `s`.
+    let head = s.get(..prefix.len())?;
     if head.eq_ignore_ascii_case(prefix) {
-        Some(tail)
+        s.get(prefix.len()..)
     } else {
         None
     }
@@ -729,6 +741,43 @@ fn is_service_account(name: &str, _known_uids: &HashSet<u32>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn includedir_is_followed_and_include_is_resolved() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let d = dir.path().join("sudoers.d");
+        std::fs::create_dir_all(&d).unwrap();
+        for f in ["90-backdoor", "README.txt", "old~", "10-team"] {
+            std::fs::write(d.join(f), "").unwrap();
+        }
+        let main = dir.path().join("sudoers");
+        let text = format!("@includedir {}\n#include extra\n@include\n", d.display());
+        let found = find_includes(&main, &text);
+        assert_eq!(
+            found,
+            vec![
+                d.join("10-team"),
+                d.join("90-backdoor"),
+                dir.path().join("extra"),
+            ]
+        );
+    }
+
+    #[test]
+    fn include_keyword_needs_whitespace() {
+        assert_eq!(
+            include_argument("@includedir /etc/sudoers.d", "include"),
+            None
+        );
+        assert_eq!(
+            include_argument("@includedir /etc/sudoers.d", "includedir"),
+            Some("/etc/sudoers.d")
+        );
+        assert_eq!(
+            include_argument("#include \"/etc/sudoers.local\"", "include"),
+            Some("/etc/sudoers.local")
+        );
+    }
     use std::path::PathBuf;
 
     fn fake_ctx() -> DefenderContext {

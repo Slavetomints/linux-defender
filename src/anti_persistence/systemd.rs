@@ -152,18 +152,24 @@ fn disable_service(name: &str) -> Result {
 }
 
 /// Exec paths that indicate a unit was planted by an attacker rather than
-/// installed by a package manager.
+/// installed by a package manager. A hit here is auto-remediated, so the list
+/// is limited to places no legitimate service runs from: world-writable
+/// volatile directories and hidden directories under library paths.
 const SUSPICIOUS_EXEC_PATHS: &[&str] = &[
     "/tmp/",
     "/dev/shm/",
     "/var/tmp/",
     "/run/shm/",
-    "/home/",
-    "/opt/",
     "/usr/local/lib/.",
     "/usr/lib/.",
     "/var/lib/.",
 ];
+
+/// Executable locations that are unusual for a packaged service but routinely
+/// legitimate (Tomcat, guest additions, vendor agents and custom apps live in
+/// `/opt`; developer services run from `/home`). A hit is reported for a human
+/// to judge and is never stopped, disabled or deleted automatically.
+const REVIEW_EXEC_PATHS: &[&str] = &["/home/", "/opt/"];
 
 /// Ask systemd for the on-disk path of a unit file.
 fn get_fragment_path(name: &str) -> Option<String> {
@@ -192,6 +198,23 @@ fn is_suspicious_exec(exec_start: &str) -> bool {
     SUSPICIOUS_EXEC_PATHS.iter().any(|p| exec_start.contains(p))
 }
 
+/// The executable an `ExecStart=` value runs, without systemd's special
+/// prefixes (`-`, `@`, `:`, `+`, `!`).
+fn exec_binary(exec_start: &str) -> &str {
+    exec_start
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_start_matches(['-', '@', ':', '+', '!'])
+}
+
+/// True when the executable itself (not its arguments) lives under a
+/// [`REVIEW_EXEC_PATHS`] directory.
+fn is_review_exec(exec_start: &str) -> bool {
+    let binary = exec_binary(exec_start);
+    REVIEW_EXEC_PATHS.iter().any(|p| binary.starts_with(p))
+}
+
 /// For every service whose unit file has a suspicious `ExecStart=` path:
 /// capture the unit file as evidence, stop and disable the service, delete the
 /// unit file, then emit a Critical finding with proof-of-removal context.
@@ -208,6 +231,41 @@ fn check_suspicious_units(ctx: &DefenderContext, services: &[Service]) -> Result
             continue;
         };
         if !is_suspicious_exec(&exec_start) {
+            if is_review_exec(&exec_start) {
+                ctx.emit(
+                    Finding::new(
+                        Severity::High,
+                        "systemd",
+                        format!(
+                            "Unit {} runs from {} (left running, review)",
+                            service.name,
+                            exec_binary(&exec_start)
+                        ),
+                        format!(
+                            "unit: {}\nexec_start: {}\nunit_path: {}\nremoved: false",
+                            service.name, exec_start, unit_path_str
+                        ),
+                    )
+                    .with_path(unit_path.to_path_buf())
+                    .with_context("unit_path", unit_path_str.clone())
+                    .with_context("exec_start", exec_start.clone())
+                    .with_context("removed", "false (review only)")
+                    .with_verdict(
+                        Verdict::Investigate,
+                        format!(
+                            "{} starts a binary under /opt or /home. That is normal for \
+                             vendor and custom applications and also a common place for \
+                             implants, so it was not touched. If it is not yours: \
+                             `systemctl disable --now {}` and remove {}.",
+                            service.name, service.name, unit_path_str
+                        ),
+                    )
+                    .with_action(Action::Manual(format!(
+                        "systemctl disable --now {} && rm {}",
+                        service.name, unit_path_str
+                    ))),
+                );
+            }
             continue;
         }
 
@@ -372,6 +430,32 @@ mod tests {
         let services = parse_services(line);
         assert_eq!(services.len(), 1);
         assert_eq!(services[0].name, "broken.service");
+    }
+
+    #[test]
+    fn volatile_and_hidden_exec_paths_are_auto_remove_tier() {
+        assert!(is_suspicious_exec("/tmp/.x/implant --daemon"));
+        assert!(is_suspicious_exec("/bin/sh -c /dev/shm/run.sh"));
+        assert!(is_suspicious_exec("/usr/lib/.cache/svc"));
+    }
+
+    #[test]
+    fn opt_and_home_are_review_only_never_auto_removed() {
+        for exec in [
+            "/opt/tomcat/bin/startup.sh",
+            "/opt/VBoxGuestAdditions-7.0.0/init/vboxadd-service start",
+            "-/home/deploy/app/run",
+        ] {
+            assert!(!is_suspicious_exec(exec), "{exec} must not be auto-removed");
+            assert!(is_review_exec(exec), "{exec} should be flagged for review");
+        }
+    }
+
+    #[test]
+    fn review_tier_looks_at_the_binary_not_its_arguments() {
+        assert!(!is_review_exec("/usr/bin/java -jar /opt/app/app.jar"));
+        assert!(!is_review_exec("/usr/sbin/nginx -c /home/web/nginx.conf"));
+        assert_eq!(exec_binary("-@/opt/x/bin --flag"), "/opt/x/bin");
     }
 
     #[test]

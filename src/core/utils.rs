@@ -144,6 +144,28 @@ pub fn prompt_string_default(question: &str, default: &str) -> Result<String> {
     }
 }
 
+/// The first `max_chars` characters of `s`, cut on a character boundary.
+///
+/// Use this instead of byte slicing (`&s[..n]`) whenever `s` comes from a log
+/// line, a network banner, a crontab or any other input an attacker can shape:
+/// slicing through the middle of a multi-byte character panics.
+///
+/// # Examples
+///
+/// ```
+/// use linux_defender::core::truncate_chars;
+///
+/// assert_eq!(truncate_chars("hello", 3), "hel");
+/// assert_eq!(truncate_chars("héllo", 2), "hé");
+/// assert_eq!(truncate_chars("short", 80), "short");
+/// ```
+pub fn truncate_chars(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
+}
+
 /// Strip ANSI/VT100 escape sequences so raw output renders cleanly in ratatui.
 pub fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -188,6 +210,20 @@ daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
 alice:x:1000:1000:Alice:/home/alice:/bin/zsh
 weird:x:1001:1001:Weird:/var/lib/weird:/bin/sh
 ";
+
+    #[test]
+    fn truncate_chars_never_splits_a_multibyte_character() {
+        // 3-byte characters: every byte offset that is not a multiple of 3
+        // would panic with a plain byte slice.
+        let s = "€€€€€€€€€€";
+        for n in 0..12 {
+            let cut = truncate_chars(s, n);
+            assert_eq!(cut.chars().count(), n.min(10));
+        }
+        // Replacement characters from a lossy decode of binary garbage.
+        let lossy = String::from_utf8_lossy(&[0xff; 100]).into_owned();
+        assert_eq!(truncate_chars(&lossy, 40).chars().count(), 40);
+    }
 
     #[test]
     fn parses_name_home_and_shell() {

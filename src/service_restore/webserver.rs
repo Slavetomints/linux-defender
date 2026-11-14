@@ -26,6 +26,47 @@ use super::distro::{Distro, enable_and_restart};
 /// In non-interactive mode (TUI), falls through to an error if neither tool
 /// succeeds rather than prompting to install curl.
 pub fn download_file(url: &str, dest: &Path, distro: &Distro, ctx: &DefenderContext) -> Result<()> {
+    prepare_download_dest(dest)?;
+    download_file_inner(url, dest, distro, ctx)?;
+    match crate::backups::hash::hash_file(dest) {
+        Ok(digest) => ctx.progress(&format!(
+            "[+] SHA-256 of download: {digest} (compare with the vendor's published hash)"
+        )),
+        Err(e) => ctx.progress(&format!("[!] Could not hash download: {e}")),
+    }
+    Ok(())
+}
+
+/// Root-only directory for installers and archives fetched during a restore.
+///
+/// Downloads must not live in `/tmp`: a predictable name in a world-writable
+/// directory lets any local user pre-create the file or a symlink there, and
+/// what lands in it is installed or unpacked as root.
+pub const DOWNLOAD_DIR: &str = "/var/lib/linux-defender/downloads";
+
+/// Create the parent of `dest` as a 0700 directory and clear any stale file.
+fn prepare_download_dest(dest: &Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+        if parent.starts_with(DOWNLOAD_DIR) {
+            fs::set_permissions(DOWNLOAD_DIR, fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    match fs::symlink_metadata(dest) {
+        Ok(_) => fs::remove_file(dest)?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
+/// Fetch `url` to `dest` with wget, then curl, installing wget if neither works.
+fn download_file_inner(
+    url: &str,
+    dest: &Path,
+    distro: &Distro,
+    ctx: &DefenderContext,
+) -> Result<()> {
     ctx.progress(&format!("[+] Downloading {}...", url));
 
     let dest_str = dest
@@ -112,6 +153,69 @@ pub fn install_package(distro: &Distro, packages: &[&str], ctx: &DefenderContext
     Ok(())
 }
 
+/// Official network apt sources for a Debian or Ubuntu release, or `None`
+/// when the distribution or codename is unknown.
+fn network_sources(id: &str, codename: &str) -> Option<Vec<String>> {
+    if codename.is_empty() || !codename.chars().all(|c| c.is_ascii_lowercase()) {
+        return None;
+    }
+    match id {
+        "debian" => Some(vec![
+            format!(
+                "deb http://deb.debian.org/debian {codename} main contrib non-free non-free-firmware"
+            ),
+            format!(
+                "deb http://deb.debian.org/debian-security {codename}-security main contrib non-free non-free-firmware"
+            ),
+            format!(
+                "deb http://deb.debian.org/debian {codename}-updates main contrib non-free non-free-firmware"
+            ),
+        ]),
+        "ubuntu" => Some(vec![
+            format!(
+                "deb http://archive.ubuntu.com/ubuntu {codename} main restricted universe multiverse"
+            ),
+            format!(
+                "deb http://archive.ubuntu.com/ubuntu {codename}-updates main restricted universe multiverse"
+            ),
+            format!(
+                "deb http://security.ubuntu.com/ubuntu {codename}-security main restricted universe multiverse"
+            ),
+        ]),
+        _ => None,
+    }
+}
+
+/// True when any `.list` or deb822 `.sources` file in `dir` has an active,
+/// non-cdrom source.
+fn sources_d_has_network(dir: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        let path = e.path();
+        let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return false;
+        };
+        let active = text.lines().map(str::trim).filter(|l| !l.starts_with('#'));
+        match ext {
+            "list" => active
+                .clone()
+                .any(|l| l.starts_with("deb ") && !l.starts_with("deb cdrom:")),
+            "sources" => {
+                let lines: Vec<&str> = active.collect();
+                let enabled = !lines.iter().any(|l| l.eq_ignore_ascii_case("enabled: no"));
+                enabled
+                    && lines.iter().any(|l| {
+                        l.starts_with("URIs:") && (l.contains("http://") || l.contains("https://"))
+                    })
+            }
+            _ => false,
+        }
+    })
+}
+
 /// Ensure `/etc/apt/sources.list` has at least one working network source.
 ///
 /// VMs installed from DVD often ship with only a `deb cdrom:` line. With no
@@ -146,27 +250,31 @@ fn fix_debian_apt_sources(ctx: &DefenderContext) {
         })
         .collect();
 
-    // Check whether any active (non-comment) network deb lines remain.
+    // Check whether any active (non-comment) network source remains, here or
+    // in sources.list.d (Ubuntu 24.04 keeps its mirrors in ubuntu.sources).
     let has_network = fixed.iter().any(|l| {
         let t = l.trim_start();
         t.starts_with("deb ") && !t.starts_with("deb cdrom:")
-    });
+    }) || sources_d_has_network("/etc/apt/sources.list.d");
 
     if !has_network {
-        // No network sources — add standard Debian 12 Bookworm mirrors.
-        fixed.push(String::new());
-        fixed.push("# Added by linux-defender (cdrom source was the only source)".into());
-        fixed.push(
-            "deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware"
-                .into(),
-        );
-        fixed.push(
-            "deb http://deb.debian.org/debian-security bookworm-security main contrib non-free"
-                .into(),
-        );
-        fixed
-            .push("deb http://deb.debian.org/debian bookworm-updates main contrib non-free".into());
-        ctx.progress("[+] Added Debian 12 Bookworm network apt sources");
+        let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+        let id = super::distro::os_release_field(&os_release, "ID").unwrap_or("");
+        let codename = super::distro::os_release_field(&os_release, "VERSION_CODENAME")
+            .or_else(|| super::distro::os_release_field(&os_release, "UBUNTU_CODENAME"))
+            .unwrap_or("");
+        match network_sources(id, codename) {
+            Some(lines) => {
+                fixed.push(String::new());
+                fixed.push("# Added by linux-defender (cdrom source was the only source)".into());
+                fixed.extend(lines);
+                ctx.progress(&format!("[+] Added {id} {codename} network apt sources"));
+            }
+            None => ctx.progress(&format!(
+                "[!] cdrom was the only apt source and no mirror is known for ID={id:?} \
+                 VERSION_CODENAME={codename:?}; add a network source by hand"
+            )),
+        }
     }
 
     let _ = std::fs::write(sources, fixed.join("\n") + "\n");
@@ -180,11 +288,12 @@ fn fix_debian_apt_sources(ctx: &DefenderContext) {
 
 // ── Web root purge ────────────────────────────────────────────────────────────
 
-/// Delete every entry inside `root` so the next extract starts from a clean slate.
+/// Empty `root` so the next extract starts from a clean slate.
 ///
-/// The directory itself is kept (web server vhost still points at it).  Any
-/// entry that cannot be removed is logged and skipped rather than aborting —
-/// a partial purge is still far better than leaving attacker-planted files.
+/// The directory itself is kept (web server vhost still points at it). Its
+/// contents are moved into the quarantine rather than deleted, so a failed
+/// rebuild, or anything else that lived in the web root, can be put back.
+/// An entry that cannot be moved is logged and skipped rather than aborting.
 pub fn purge_web_root(root: &Path, ctx: &DefenderContext) -> Result<()> {
     if !root.exists() {
         fs::create_dir_all(root)?;
@@ -192,33 +301,69 @@ pub fn purge_web_root(root: &Path, ctx: &DefenderContext) -> Result<()> {
         return Ok(());
     }
 
-    ctx.progress(&format!("[+] Purging {}...", root.display()));
-    let mut removed = 0usize;
-    let mut failed = 0usize;
-
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        let ok = if path.is_dir() {
-            fs::remove_dir_all(&path).is_ok()
-        } else {
-            fs::remove_file(&path).is_ok()
-        };
-        if ok {
-            removed += 1;
-        } else {
-            ctx.progress(&format!("[!] Could not remove {}", path.display()));
-            failed += 1;
-        }
-    }
-
     ctx.progress(&format!(
-        "[✓] Purged {} entries ({} failed) from {}",
-        removed,
-        failed,
+        "[+] Moving the contents of {} to quarantine...",
+        root.display()
+    ));
+    let (saved, failed) = crate::core::context::quarantine_dir_contents(root)?;
+    for (path, e) in &failed {
+        ctx.progress(&format!("[!] Could not move {}: {e}", path.display()));
+    }
+    ctx.progress(&format!(
+        "[✓] Previous web root saved to {} ({} entr(ies) could not be moved). \
+         Put it back with: cp -a '{}/.' '{}/'",
+        saved.display(),
+        failed.len(),
+        saved.display(),
         root.display()
     ));
     Ok(())
+}
+
+/// Error unless the archive at `zip_path` opens and contains `relative`
+/// (resolved under the archive's `upload/` prefix when it has one).
+///
+/// Run this before [`purge_web_root`]: a truncated download, an HTML error
+/// page saved as a zip, or a release that nests the real archive inside
+/// another one must fail while the old site is still in place.
+pub fn require_archive_entry(zip_path: &Path, relative: &str) -> Result<()> {
+    let prefix = detect_upload_prefix(zip_path)?.unwrap_or_default();
+    let wanted = format!("{prefix}{relative}");
+    let file = fs::File::open(zip_path)?;
+    let mut archive = ZipArchive::new(file).map_err(|e| {
+        DefenderError::Other(format!(
+            "{} is not a usable zip ({e}); nothing was purged",
+            zip_path.display()
+        ))
+    })?;
+
+    let mut nested_zips = Vec::new();
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| DefenderError::Other(format!("bad zip entry {i}: {e}")))?;
+        let Ok(name) = entry.name() else { continue };
+        if name == wanted {
+            return Ok(());
+        }
+        if name.ends_with(".zip") {
+            nested_zips.push(name.to_string());
+        }
+    }
+
+    let hint = if nested_zips.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " The archive contains {}; the real release may be nested inside it — \
+             extract that and pass it with the --*-url option.",
+            nested_zips.join(", ")
+        )
+    };
+    Err(DefenderError::Other(format!(
+        "{} has no {wanted}; refusing to purge the web root.{hint}",
+        zip_path.display()
+    )))
 }
 
 // ── Zip extraction ────────────────────────────────────────────────────────────
@@ -350,8 +495,74 @@ fn detect_upload_prefix(zip_path: &Path) -> Result<Option<String>> {
 
 /// Set ownership and permissions on a web root.
 ///
-/// Directories get `755`, regular files get `644`.
-pub fn fix_permissions(root: &Path, distro: &Distro, ctx: &DefenderContext) -> Result<()> {
+/// The tree ends up `root:<web user>` with directories `755` and files `644`,
+/// so the web server can read everything but a compromised PHP process cannot
+/// rewrite the application. Only the `writable` subdirectories (relative to
+/// `root`: caches, uploads) are handed to the web user.
+///
+/// Symlinks are never followed. Modes are set first, while the freshly
+/// extracted tree is still root-owned, so the web user cannot swap a file for
+/// a link to `/etc/shadow` between the walk and the chmod.
+pub fn fix_permissions(
+    root: &Path,
+    distro: &Distro,
+    writable: &[&str],
+    ctx: &DefenderContext,
+) -> Result<()> {
+    let web_user = web_server_user(distro);
+    let root_str = root
+        .to_str()
+        .ok_or_else(|| DefenderError::Other("web root path is not valid UTF-8".into()))?;
+
+    // 1. Modes, skipping symlinks (set_permissions would follow them).
+    for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+        let kind = entry.file_type();
+        if kind.is_symlink() {
+            continue;
+        }
+        let mode = if kind.is_dir() { 0o755 } else { 0o644 };
+        let _ = fs::set_permissions(entry.path(), fs::Permissions::from_mode(mode));
+    }
+
+    // 2. root:<web user> everywhere; -h acts on links themselves.
+    report_chown(
+        ctx,
+        Command::new("chown")
+            .args(["-R", "-h", &format!("root:{web_user}"), "--", root_str])
+            .output(),
+        &format!("root:{web_user}"),
+    );
+
+    // 3. The few directories the application must write to.
+    let mut granted = 0usize;
+    for rel in writable {
+        let dir = root.join(rel);
+        let Ok(meta) = fs::symlink_metadata(&dir) else {
+            continue;
+        };
+        if !meta.is_dir() || !dir.starts_with(root) {
+            continue;
+        }
+        let ok = Command::new("chown")
+            .args(["-R", "-h", &format!("{web_user}:{web_user}"), "--"])
+            .arg(&dir)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o775));
+        if ok {
+            granted += 1;
+        }
+    }
+
+    ctx.progress(&format!(
+        "[✓] Permissions set (root:{web_user}, dirs 755, files 644; {granted} writable dir(s) owned by {web_user})"
+    ));
+    Ok(())
+}
+
+/// The account the web server runs as on `distro`.
+fn web_server_user(distro: &Distro) -> &'static str {
     let candidates: &[&str] = match distro {
         Distro::Debian => &["www-data"],
         Distro::Rhel => &["apache", "www-data"],
@@ -359,8 +570,7 @@ pub fn fix_permissions(root: &Path, distro: &Distro, ctx: &DefenderContext) -> R
         Distro::Suse => &["wwwrun", "www-data"],
         Distro::Alpine => &["www-data", "nginx"],
     };
-
-    let web_user = candidates
+    candidates
         .iter()
         .find(|&&u| {
             Command::new("id")
@@ -370,37 +580,19 @@ pub fn fix_permissions(root: &Path, distro: &Distro, ctx: &DefenderContext) -> R
                 .unwrap_or(false)
         })
         .copied()
-        .unwrap_or("www-data");
+        .unwrap_or("www-data")
+}
 
-    let root_str = root
-        .to_str()
-        .ok_or_else(|| DefenderError::Other("web root path is not valid UTF-8".into()))?;
-
-    let output = Command::new("chown")
-        .args(["-R", &format!("{web_user}:{web_user}"), root_str])
-        .output()
-        .map_err(|e| DefenderError::Command(format!("chown: {e}")))?;
-
-    if output.status.success() {
-        ctx.progress(&format!("[✓] Ownership set to {web_user}:{web_user}"));
-    } else {
-        ctx.progress(&format!(
+/// Log the outcome of a chown run.
+fn report_chown(ctx: &DefenderContext, out: io::Result<std::process::Output>, owner: &str) {
+    match out {
+        Ok(o) if o.status.success() => ctx.progress(&format!("[✓] Ownership set to {owner}")),
+        Ok(o) => ctx.progress(&format!(
             "[!] chown failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => ctx.progress(&format!("[!] chown failed: {e}")),
     }
-
-    for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
-        let mode = if entry.file_type().is_dir() {
-            0o755
-        } else {
-            0o644
-        };
-        let _ = fs::set_permissions(entry.path(), fs::Permissions::from_mode(mode));
-    }
-
-    ctx.progress("[✓] Permissions set (dirs 755, files 644)");
-    Ok(())
 }
 
 // ── Web-server detection and reload ──────────────────────────────────────────
@@ -607,15 +799,15 @@ pub fn ensure_php_apache(distro: &Distro, ctx: &DefenderContext) -> Result<()> {
 
 // ── Database bootstrapping ───────────────────────────────────────────────────
 
-/// Ensure MariaDB is installed, running, and has `db_name` created.
+/// Ensure MariaDB is installed, running, has `db_name`, and that `db_user`
+/// can log in with `db_pass` and use it.
 ///
-/// On a fresh install the root account has no password, so we set it to
-/// `db_pass` and create the target database in one step. If root already has
-/// a password (re-run scenario), we skip the ALTER USER and just ensure the
-/// database exists.
+/// The MariaDB root password is left untouched (it used to be overwritten with
+/// the store's password, breaking anything else that used root).
 pub fn ensure_mysql(
     distro: &Distro,
     db_name: &str,
+    db_user: &str,
     db_pass: &str,
     ctx: &DefenderContext,
 ) -> Result<()> {
@@ -647,41 +839,99 @@ pub fn ensure_mysql(
 
     enable_and_restart("mariadb", ctx)?;
 
-    // Fresh install: root has no password — set it and create the database.
-    let setup_sql = format!(
-        "ALTER USER 'root'@'localhost' IDENTIFIED BY '{db_pass}'; \
-         CREATE DATABASE IF NOT EXISTS `{db_name}`; \
-         FLUSH PRIVILEGES;"
-    );
-    let fresh = Command::new("mysql")
-        .args(["-u", "root", "--connect-expired-password", "-e", &setup_sql])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    validate_sql_identifier(db_name, "database name")?;
+    validate_sql_identifier(db_user, "database user")?;
 
-    if fresh {
+    // Connect as root over the unix socket (MariaDB's default root auth on
+    // Debian/Ubuntu, and passwordless on a fresh RHEL install). The root
+    // password is never changed: other services may depend on it.
+    let sql = app_database_sql(db_name, db_user, db_pass);
+    let output = run_mysql_root(&sql)?;
+    if output.status.success() {
         ctx.progress(&format!(
-            "[✓] MariaDB configured, database '{db_name}' ready"
+            "[✓] Database '{db_name}' ready, '{db_user}'@'localhost' granted access"
         ));
         return Ok(());
     }
 
-    // Re-run: root already has a password — just ensure the database exists.
-    let create_sql = format!("CREATE DATABASE IF NOT EXISTS `{db_name}`;");
-    let output = Command::new("mysql")
-        .args(["-u", "root", &format!("-p{db_pass}"), "-e", &create_sql])
-        .output()
-        .map_err(|e| DefenderError::Command(format!("mysql: {e}")))?;
-
-    if output.status.success() {
-        ctx.progress(&format!("[✓] Database '{db_name}' ready"));
-        return Ok(());
-    }
-
     Err(DefenderError::Command(format!(
-        "Could not create database: {}",
+        "could not set up database '{db_name}' as MariaDB root over the local socket: {}. \
+         If root needs a password, put it in /root/.my.cnf ([client] password=...) and retry.",
         String::from_utf8_lossy(&output.stderr).trim()
     )))
+}
+
+/// Run `sql` as the MariaDB root user, passing the statements on stdin so
+/// passwords never appear in the process list.
+pub(crate) fn run_mysql_root(sql: &str) -> Result<std::process::Output> {
+    use std::io::Write;
+    let mut child = Command::new("mysql")
+        .args(["-u", "root", "--batch"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| DefenderError::Command(format!("mysql: {e}")))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(sql.as_bytes())?;
+    }
+    child
+        .wait_with_output()
+        .map_err(|e| DefenderError::Command(format!("mysql: {e}")))
+}
+
+/// Reject database and user names that are not plain identifiers. They are
+/// interpolated into SQL, so anything beyond letters, digits, `_`, `-` and
+/// `.` is refused rather than escaped.
+pub(crate) fn validate_sql_identifier(value: &str, what: &str) -> Result<()> {
+    let ok = !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+    if ok {
+        Ok(())
+    } else {
+        Err(DefenderError::Other(format!(
+            "{what} {value:?} must be 1-64 characters of letters, digits, '_', '-' or '.'"
+        )))
+    }
+}
+
+/// Escape `value` for use inside a single-quoted MariaDB string literal.
+fn sql_string_literal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '\0' => out.push_str("\\0"),
+            _ => out.push(c),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// SQL that creates `db_name` and gives `db_user` (identified by `db_pass`)
+/// full rights on it. Identifiers must already be validated. A `root` user is
+/// left alone: only the database is created.
+pub(crate) fn app_database_sql(db_name: &str, db_user: &str, db_pass: &str) -> String {
+    let mut sql = format!(
+        "CREATE DATABASE IF NOT EXISTS `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n"
+    );
+    if db_user != "root" {
+        let user = format!("{}@'localhost'", sql_string_literal(db_user));
+        let pass = sql_string_literal(db_pass);
+        sql.push_str(&format!(
+            "CREATE USER IF NOT EXISTS {user} IDENTIFIED BY {pass};\n\
+             ALTER USER {user} IDENTIFIED BY {pass};\n\
+             GRANT ALL PRIVILEGES ON `{db_name}`.* TO {user};\n"
+        ));
+    }
+    sql.push_str("FLUSH PRIVILEGES;\n");
+    sql
 }
 
 // ── Site verification ─────────────────────────────────────────────────────────
@@ -932,6 +1182,115 @@ mod tests {
             zw.write_all(body.as_bytes()).unwrap();
         }
         zw.finish().unwrap();
+    }
+
+    #[test]
+    fn archive_check_finds_installer_under_upload_prefix_or_flat() {
+        let dir = TempDir::new().unwrap();
+        let oc = dir.path().join("oc.zip");
+        make_zip(
+            &oc,
+            &[("opencart-4/upload/install/cli_install.php", "<?php")],
+        );
+        assert!(require_archive_entry(&oc, "install/cli_install.php").is_ok());
+
+        let ps = dir.path().join("ps.zip");
+        make_zip(
+            &ps,
+            &[("install/index_cli.php", "<?php"), ("index.php", "")],
+        );
+        assert!(require_archive_entry(&ps, "install/index_cli.php").is_ok());
+    }
+
+    #[test]
+    fn archive_check_rejects_nested_or_broken_archives_before_any_purge() {
+        let dir = TempDir::new().unwrap();
+        let nested = dir.path().join("nested.zip");
+        make_zip(&nested, &[("prestashop.zip", "PK..."), ("index.php", "")]);
+        let err = require_archive_entry(&nested, "install/index_cli.php")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("prestashop.zip"), "{err}");
+
+        let html = dir.path().join("html.zip");
+        fs::write(&html, "<html>login required</html>").unwrap();
+        assert!(require_archive_entry(&html, "install/index_cli.php").is_err());
+    }
+
+    #[test]
+    fn database_sql_escapes_passwords_and_never_touches_root() {
+        let sql = app_database_sql("opencart", "oc_user", "p'w\\d");
+        assert!(sql.contains("CREATE DATABASE IF NOT EXISTS `opencart` CHARACTER SET utf8mb4"));
+        assert!(sql.contains("IDENTIFIED BY 'p\\'w\\\\d'"));
+        assert!(sql.contains("GRANT ALL PRIVILEGES ON `opencart`.* TO 'oc_user'@'localhost';"));
+        assert!(!sql.contains("'root'"));
+
+        let root_only = app_database_sql("shop", "root", "x");
+        assert!(!root_only.contains("CREATE USER"));
+        assert!(!root_only.contains("ALTER USER"));
+    }
+
+    #[test]
+    fn sql_identifiers_are_validated() {
+        assert!(validate_sql_identifier("opencart", "db").is_ok());
+        assert!(validate_sql_identifier("oc_user-1.x", "db").is_ok());
+        assert!(validate_sql_identifier("", "db").is_err());
+        assert!(validate_sql_identifier("a`; DROP DATABASE x; --", "db").is_err());
+        assert!(validate_sql_identifier("o'c", "db").is_err());
+    }
+
+    #[test]
+    fn fix_permissions_never_follows_symlinks_out_of_the_web_root() {
+        let dir = TempDir::new().unwrap();
+        let outside = dir.path().join("shadow");
+        fs::write(&outside, "secret").unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).unwrap();
+        let root = dir.path().join("html");
+        fs::create_dir_all(root.join("image/cache")).unwrap();
+        fs::write(root.join("index.php"), "<?php").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("evil")).unwrap();
+
+        // chown fails without root; the mode pass is what matters here.
+        fix_permissions(&root, &Distro::Debian, &["image/cache"], &ctx()).unwrap();
+
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&outside), 0o600, "symlink target was chmod-ed");
+        assert_eq!(mode(&root.join("index.php")), 0o644);
+        assert_eq!(mode(&root.join("image/cache")), 0o775);
+    }
+
+    #[test]
+    fn apt_sources_match_the_distribution() {
+        let ubuntu = network_sources("ubuntu", "noble").unwrap().join("\n");
+        assert!(ubuntu.contains("archive.ubuntu.com/ubuntu noble main"));
+        assert!(ubuntu.contains("noble-security"));
+        assert!(!ubuntu.contains("debian"));
+
+        let debian = network_sources("debian", "trixie").unwrap().join("\n");
+        assert!(debian.contains("deb.debian.org/debian trixie main"));
+        assert!(!debian.contains("bookworm"));
+
+        assert!(network_sources("rocky", "blue").is_none());
+        assert!(network_sources("ubuntu", "").is_none());
+    }
+
+    #[test]
+    fn deb822_sources_count_as_network_sources() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("ubuntu.sources"),
+            "Types: deb\nURIs: http://archive.ubuntu.com/ubuntu/\nSuites: noble\n",
+        )
+        .unwrap();
+        assert!(sources_d_has_network(dir.path().to_str().unwrap()));
+
+        let off = TempDir::new().unwrap();
+        fs::write(
+            off.path().join("x.sources"),
+            "Types: deb\nURIs: http://x/\nEnabled: no\n",
+        )
+        .unwrap();
+        assert!(!sources_d_has_network(off.path().to_str().unwrap()));
     }
 
     fn ctx() -> DefenderContext {

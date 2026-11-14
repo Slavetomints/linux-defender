@@ -582,6 +582,22 @@ impl SplunkForwarderWizard {
                     *done.lock().unwrap() = true;
                     return;
                 }
+                // Re-check right before installing: this runs as root.
+                match vet_package(std::path::Path::new(&pkg_path)) {
+                    Ok(sha) => push!(format!(
+                        "  ✓ package is root-owned and not writable by others (sha256 {})",
+                        sha
+                    )),
+                    Err(why) => {
+                        push!(format!(
+                            "  ERROR: refusing to install {}: {}",
+                            pkg_path, why
+                        ));
+                        push!("    Copy it somewhere root-only, chown root:root, chmod 644.");
+                        *done.lock().unwrap() = true;
+                        return;
+                    }
+                }
                 if pkg_path.ends_with(".deb") {
                     super::run_cmd_to_log(&["dpkg", "-i", &pkg_path], &lc);
                 } else if pkg_path.ends_with(".rpm") {
@@ -683,71 +699,91 @@ impl SplunkForwarderWizard {
 
 /// Build an `inputs.conf` content string with log monitors appropriate for `bt`.
 fn build_inputs_conf(bt: SplunkBoxType) -> String {
+    build_inputs_conf_with(bt, |p| std::path::Path::new(p).exists())
+}
+
+/// Debian/Ubuntu and RHEL/Rocky names for the same system logs. Every one
+/// that exists is monitored, so the profile works on either family.
+const SYSTEM_LOGS: &[(&str, &str)] = &[
+    ("/var/log/auth.log", "linux_secure"),
+    ("/var/log/secure", "linux_secure"),
+    ("/var/log/syslog", "syslog"),
+    ("/var/log/messages", "syslog"),
+];
+
+/// [`build_inputs_conf`] with an injectable existence check, for tests.
+fn build_inputs_conf_with(bt: SplunkBoxType, exists: impl Fn(&str) -> bool) -> String {
     let mut out = String::new();
-    macro_rules! monitor {
-        ($path:expr, $stype:expr) => {
+    let mut monitor = |path: &str, sourcetype: &str| {
+        if exists(path) {
             out.push_str(&format!(
-                "[monitor://{}]\nindex = main\nsourcetype = {}\n\n",
-                $path, $stype
+                "[monitor://{path}]\nindex = main\nsourcetype = {sourcetype}\n\n"
             ));
-        };
+        }
+    };
+
+    for (path, st) in SYSTEM_LOGS {
+        monitor(path, st);
     }
+
     match bt {
         SplunkBoxType::Web => {
-            // Apache
-            if std::path::Path::new("/var/log/apache2").exists() {
-                monitor!("/var/log/apache2/access.log", "access_combined");
-                monitor!("/var/log/apache2/error.log", "apache_error");
-            }
-            if std::path::Path::new("/var/log/httpd").exists() {
-                monitor!("/var/log/httpd/access_log", "access_combined");
-                monitor!("/var/log/httpd/error_log", "apache_error");
-            }
-            if std::path::Path::new("/var/log/nginx").exists() {
-                monitor!("/var/log/nginx/access.log", "nginx_access");
-                monitor!("/var/log/nginx/error.log", "nginx_error");
-            }
-            monitor!("/var/log/auth.log", "linux_secure");
-            monitor!("/var/log/syslog", "syslog");
+            monitor("/var/log/apache2/access.log", "access_combined");
+            monitor("/var/log/apache2/error.log", "apache_error");
+            monitor("/var/log/httpd/access_log", "access_combined");
+            monitor("/var/log/httpd/error_log", "apache_error");
+            monitor("/var/log/httpd/ssl_access_log", "access_combined");
+            monitor("/var/log/httpd/ssl_error_log", "apache_error");
+            monitor("/var/log/nginx/access.log", "nginx_access");
+            monitor("/var/log/nginx/error.log", "nginx_error");
+            monitor("/var/log/audit/audit.log", "linux_audit");
         }
         SplunkBoxType::Mail => {
-            monitor!("/var/log/mail.log", "syslog");
-            monitor!("/var/log/auth.log", "linux_secure");
-            monitor!("/var/log/syslog", "syslog");
-            if std::path::Path::new("/var/log/maillog").exists() {
-                monitor!("/var/log/maillog", "syslog");
-            }
-            for rc in &[
-                "/var/log/roundcube/errors.log",
-                "/var/log/roundcubemail/errors.log",
-            ] {
-                if std::path::Path::new(rc).exists() {
-                    monitor!(rc, "php");
-                }
-            }
+            monitor("/var/log/mail.log", "syslog");
+            monitor("/var/log/maillog", "syslog");
+            monitor("/var/log/roundcube/errors.log", "php");
+            monitor("/var/log/roundcubemail/errors.log", "php");
         }
         SplunkBoxType::Splunk => {
-            monitor!("/opt/splunk/var/log/splunk/splunkd.log", "splunk_splunkd");
-            monitor!(
+            monitor("/opt/splunk/var/log/splunk/splunkd.log", "splunk_splunkd");
+            monitor(
                 "/opt/splunk/var/log/splunk/web_access.log",
-                "splunk_web_access"
+                "splunk_web_access",
             );
-            monitor!("/opt/splunk/var/log/splunk/metrics.log", "splunk_metrics");
-            monitor!("/var/log/auth.log", "linux_secure");
+            monitor("/opt/splunk/var/log/splunk/metrics.log", "splunk_metrics");
         }
         SplunkBoxType::General => {
-            monitor!("/var/log/auth.log", "linux_secure");
-            monitor!("/var/log/syslog", "syslog");
-            monitor!("/var/log/kern.log", "syslog");
-            if std::path::Path::new("/var/log/secure").exists() {
-                monitor!("/var/log/secure", "linux_secure");
-            }
-            if std::path::Path::new("/var/log/messages").exists() {
-                monitor!("/var/log/messages", "syslog");
-            }
+            monitor("/var/log/kern.log", "syslog");
         }
     }
     out
+}
+
+/// Check that `path` is safe to install as root: a regular file (not a
+/// symlink), owned by root, and not writable by group or others. Returns its
+/// SHA-256 so the operator can compare it with Splunk's published hash.
+pub fn vet_package(path: &std::path::Path) -> Result<String, String> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    vet_metadata(meta.file_type().is_file(), meta.uid(), meta.mode())?;
+    crate::backups::hash::hash_file(path).map_err(|e| e.to_string())
+}
+
+/// The ownership and mode rules behind [`vet_package`].
+fn vet_metadata(is_regular_file: bool, uid: u32, mode: u32) -> Result<(), String> {
+    if !is_regular_file {
+        return Err("not a regular file (symlink or special file)".into());
+    }
+    if uid != 0 {
+        return Err(format!("owned by uid {uid}, not root"));
+    }
+    if mode & 0o022 != 0 {
+        return Err(format!(
+            "mode {:o} is writable by group or others",
+            mode & 0o777
+        ));
+    }
+    Ok(())
 }
 
 /// Search common locations for Splunk `.tgz`, `.deb`, and `.rpm` packages.
@@ -761,6 +797,10 @@ fn find_packages() -> Vec<String> {
                 if (name.starts_with("splunk") || name.starts_with("splunkforwarder"))
                     && (name.ends_with(".deb") || name.ends_with(".rpm"))
                     && let Ok(path) = entry.path().canonicalize()
+                    // Anyone with a shell can drop splunk*.deb into /tmp;
+                    // only offer packages an unprivileged user cannot own or
+                    // modify.
+                    && vet_package(&path).is_ok()
                 {
                     found.push(path.to_string_lossy().into_owned());
                 }
@@ -769,4 +809,52 @@ fn find_packages() -> Vec<String> {
     }
     found.sort();
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn web_profile_on_rocky_monitors_secure_messages_and_httpd() {
+        let rocky = |p: &str| {
+            matches!(
+                p,
+                "/var/log/secure"
+                    | "/var/log/messages"
+                    | "/var/log/httpd/access_log"
+                    | "/var/log/httpd/error_log"
+            )
+        };
+        let conf = build_inputs_conf_with(SplunkBoxType::Web, rocky);
+        assert!(conf.contains("[monitor:///var/log/secure]"));
+        assert!(conf.contains("[monitor:///var/log/messages]"));
+        assert!(conf.contains("[monitor:///var/log/httpd/access_log]"));
+        assert!(!conf.contains("auth.log"));
+        assert!(!conf.contains("apache2"));
+    }
+
+    #[test]
+    fn mail_profile_on_ubuntu_monitors_auth_and_mail_log() {
+        let ubuntu = |p: &str| {
+            matches!(
+                p,
+                "/var/log/auth.log" | "/var/log/syslog" | "/var/log/mail.log"
+            )
+        };
+        let conf = build_inputs_conf_with(SplunkBoxType::Mail, ubuntu);
+        assert!(conf.contains("[monitor:///var/log/auth.log]"));
+        assert!(conf.contains("[monitor:///var/log/mail.log]"));
+        assert!(!conf.contains("/var/log/secure"));
+    }
+
+    #[test]
+    fn only_root_owned_unwritable_packages_pass() {
+        assert!(vet_metadata(true, 0, 0o100644).is_ok());
+        assert!(vet_metadata(true, 0, 0o100600).is_ok());
+        assert!(vet_metadata(true, 33, 0o100644).is_err());
+        assert!(vet_metadata(true, 0, 0o100666).is_err());
+        assert!(vet_metadata(true, 0, 0o100664).is_err());
+        assert!(vet_metadata(false, 0, 0o120777).is_err());
+    }
 }

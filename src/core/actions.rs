@@ -12,8 +12,15 @@ use super::{DefenderError, Result};
 pub fn execute(action: &Action) -> Result<String> {
     match action {
         Action::Delete(path) => {
-            std::fs::remove_file(path)?;
-            Ok(format!("Deleted {}", path.display()))
+            // Same policy as the scan modules: move to quarantine, so a
+            // mistaken keypress is one `mv` away from undone.
+            super::utils::try_clear_immutable(path);
+            let dest = super::context::quarantine(path)?;
+            Ok(format!(
+                "Moved {} to quarantine ({})",
+                path.display(),
+                dest.display()
+            ))
         }
         Action::RemoveImmutable(path) => {
             let status = std::process::Command::new("chattr")

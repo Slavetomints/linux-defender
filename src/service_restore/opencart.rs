@@ -36,7 +36,7 @@ use super::distro::Distro;
 use super::webserver::{
     download_file, ensure_mysql, ensure_php_apache, ensure_ssl, ensure_webserver, extract_zip,
     find_php, fix_permissions, open_http_firewall, purge_web_root, reload_webserver,
-    resolve_web_root, verify_site, verify_site_insecure,
+    require_archive_entry, resolve_web_root, verify_site, verify_site_insecure,
 };
 
 /// Credentials collected by the TUI dialog (or the CLI prompts) before install.
@@ -86,7 +86,7 @@ const OPENCART_DEFAULT_URL: &str =
     "https://github.com/opencart/opencart/releases/download/4.1.0.4/opencart-4.1.0.4.zip";
 
 /// Temporary zip path used during extraction.
-const TMP_ZIP: &str = "/tmp/defender-opencart.zip";
+const TMP_ZIP: &str = "/var/lib/linux-defender/downloads/opencart.zip";
 
 /// Where to move the storage directory (outside the web root).
 const STORAGE_DEST: &str = "/var/opencart-storage";
@@ -140,7 +140,11 @@ pub fn run(
     // ── 1. Download ───────────────────────────────────────────────────────────
     download_file(url, Path::new(TMP_ZIP), &distro, ctx)?;
 
-    // ── 1b. Purge web root — full clean slate, no attacker files survive ──────
+    // Fail here, with the old site still in place, if the archive is not a
+    // release we can install from.
+    require_archive_entry(Path::new(TMP_ZIP), "install/cli_install.php")?;
+
+    // ── 1b. Purge web root — previous contents go to quarantine ──────────────
     purge_web_root(&root, ctx)?;
 
     // ── 2. Extract upload/ subtree to web root ────────────────────────────────
@@ -211,7 +215,7 @@ pub fn run(
     let admin_email = &creds.admin_email;
 
     // ── 5b. Ensure database is ready ─────────────────────────────────────────
-    ensure_mysql(&distro, db_name, db_pass, ctx)?;
+    ensure_mysql(&distro, db_name, db_user, db_pass, ctx)?;
 
     // ── 6. Run CLI installer ──────────────────────────────────────────────────
     // Truncate config.php before running so the post-install empty-check is
@@ -326,7 +330,9 @@ pub fn run(
     }
 
     ctx.progress("[+] Fixing ownership and permissions...");
-    fix_permissions(&root, &distro, ctx)?;
+    // image/ holds uploads and the resized-image cache; storage lives outside
+    // the web root (see move_storage) with its own ownership.
+    fix_permissions(&root, &distro, &["image", "system/storage"], ctx)?;
 
     ctx.progress("[+] Reloading web server...");
     reload_webserver(ctx)?;

@@ -12,7 +12,7 @@
 //! emitted as Info so the operator has a full picture without noise.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::core::{
     Action, DefenderContext, DefenderError, Finding, Result, Severity, Verdict, require_root,
@@ -59,7 +59,7 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
         // Check for a second UID-0 account — always Critical.
         if acct.uid == 0 && acct.name != "root" {
-            emit_uid0_finding(ctx, acct);
+            emit_uid0_finding(ctx, acct, &accounts);
             continue;
         }
 
@@ -83,8 +83,51 @@ pub fn run(ctx: &DefenderContext) -> Result {
     Ok(())
 }
 
+/// Directories that must never be removed as someone's "home".
+const SYSTEM_HOMES: &[&str] = &[
+    "/",
+    "/root",
+    "/home",
+    "/bin",
+    "/sbin",
+    "/usr",
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/local",
+    "/etc",
+    "/var",
+    "/var/lib",
+    "/var/spool",
+    "/var/www",
+    "/srv",
+    "/opt",
+    "/tmp",
+    "/dev",
+    "/nonexistent",
+    "/proc",
+    "/sys",
+    "/run",
+    "/boot",
+    "/lib",
+    "/lib64",
+];
+
+/// True when `home` belongs to one account only and is not a system path,
+/// so removing it with the account cannot take anything else with it.
+fn home_is_disposable(home: &Path, other_homes: &[&Path]) -> bool {
+    let norm = |p: &Path| p.to_string_lossy().trim_end_matches('/').to_string();
+    let h = norm(home);
+    if h.is_empty() || !home.is_absolute() || SYSTEM_HOMES.contains(&h.as_str()) {
+        return false;
+    }
+    !other_homes.iter().any(|o| {
+        let o = norm(o);
+        o == h || o.starts_with(&format!("{h}/")) || h.starts_with(&format!("{o}/"))
+    })
+}
+
 /// Emit a Critical finding for a non-root UID-0 account and attempt removal.
-fn emit_uid0_finding(ctx: &DefenderContext, acct: &Account) {
+fn emit_uid0_finding(ctx: &DefenderContext, acct: &Account, accounts: &[Account]) {
     // 1. Log the /etc/passwd entry as evidence before touching anything.
     ctx.log_evidence_line("/etc/passwd", &acct.raw_line);
 
@@ -94,12 +137,32 @@ fn emit_uid0_finding(ctx: &DefenderContext, acct: &Account) {
             .lines()
             .find(|l| l.split(':').next() == Some(&acct.name))
     {
-        ctx.log_evidence_line("/etc/shadow", shadow_line);
+        // Whether a password is set matters for IR; the hash itself must not
+        // end up in a report.
+        ctx.log_evidence_line("/etc/shadow", &crate::core::redact_shadow_line(shadow_line));
     }
 
-    // 3. Remove the account.  ctx.run_remediation() uses .output() internally,
-    //    so it always waits for the child — no zombie processes.
-    let _removed = ctx.run_remediation(&["userdel", "-r", &acct.name]);
+    // 3. Remove the account. `-f` is required: userdel refuses an account
+    //    whose UID owns running processes, and for UID 0 that is every root
+    //    process on the box. No `-r`: the home of a cloned root account is
+    //    often /root itself, so it is handled separately below.
+    let _removed = ctx.run_remediation(&["userdel", "-f", &acct.name]);
+
+    // 3b. Quarantine the home directory only when it belonged to this account
+    //     alone and is not a system path.
+    let other_homes: Vec<&Path> = accounts
+        .iter()
+        .filter(|a| a.name != acct.name)
+        .map(|a| a.home.as_path())
+        .collect();
+    if home_is_disposable(&acct.home, &other_homes) && acct.home.is_dir() {
+        ctx.remove_path_logged(&acct.home);
+    } else {
+        ctx.log_msg(&format!(
+            "[!] Left home directory {} in place (shared or system path)",
+            acct.home.display()
+        ));
+    }
 
     // 4. Verify: re-read /etc/passwd and check whether the entry is still there.
     let still_present = fs::read_to_string("/etc/passwd")
@@ -141,12 +204,12 @@ fn emit_uid0_finding(ctx: &DefenderContext, acct: &Account) {
             Verdict::Remove,
             format!(
                 "Any UID-0 account other than root is a backdoor. \
-                 Delete it with `userdel {}` (add -r to remove home dir). \
+                 Delete it with `userdel -f {}` (never -r: its home is often /root). \
                  Also check /etc/sudoers for NOPASSWD entries for this account.",
                 acct.name
             ),
         )
-        .with_action(Action::Manual(format!("userdel -r {}", acct.name))),
+        .with_action(Action::Manual(format!("userdel -f {}", acct.name))),
     );
 }
 
@@ -288,7 +351,7 @@ fn has_nopasswd_sudo(name: &str) -> bool {
 
 /// Return true if `name` appears in the sudoers file at `path` with a NOPASSWD rule.
 fn check_sudoers_file(path: &str, name: &str) -> bool {
-    let Ok(contents) = fs::read_to_string(path) else {
+    let Some(contents) = crate::core::scan::read_text_file(Path::new(path)) else {
         return false;
     };
     contents
@@ -311,7 +374,7 @@ fn read_sudoers_d() -> Vec<String> {
 /// Number of public keys in `home/.ssh/authorized_keys`.
 fn count_ssh_keys(home: &std::path::Path) -> usize {
     let path = home.join(".ssh").join("authorized_keys");
-    let Ok(contents) = fs::read_to_string(path) else {
+    let Some(contents) = crate::core::scan::read_text_file(&path) else {
         return 0;
     };
     contents
@@ -349,6 +412,20 @@ fn parse_passwd() -> Result<Vec<Account>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloned_root_homes_are_never_disposable() {
+        let others = [Path::new("/root"), Path::new("/home/alice")];
+        assert!(!home_is_disposable(Path::new("/root"), &others));
+        assert!(!home_is_disposable(Path::new("/root/"), &[]));
+        assert!(!home_is_disposable(Path::new("/"), &[]));
+        assert!(!home_is_disposable(Path::new("/var/www"), &[]));
+        assert!(!home_is_disposable(Path::new("/home/alice"), &others));
+        assert!(!home_is_disposable(Path::new("/home"), &others));
+        assert!(!home_is_disposable(Path::new("relative"), &[]));
+        assert!(home_is_disposable(Path::new("/home/toor"), &others));
+        assert!(home_is_disposable(Path::new("/var/lib/.sysd"), &others));
+    }
 
     #[test]
     fn nologin_shells_are_recognised() {

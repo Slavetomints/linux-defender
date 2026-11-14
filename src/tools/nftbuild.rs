@@ -41,6 +41,25 @@ pub struct NftbuildResult {
     pub config_path: &'static str,
 }
 
+/// Modification time of [`NFT_CONFIG_PATH`], if it exists.
+fn config_mtime() -> Option<std::time::SystemTime> {
+    std::fs::metadata(NFT_CONFIG_PATH)
+        .and_then(|m| m.modified())
+        .ok()
+}
+
+/// Whether the config was (re)written between two mtime samples.
+fn config_was_written(
+    before: Option<std::time::SystemTime>,
+    after: Option<std::time::SystemTime>,
+) -> bool {
+    match (before, after) {
+        (_, None) => false,
+        (None, Some(_)) => true,
+        (Some(b), Some(a)) => a != b,
+    }
+}
+
 /// Run nftbuild for `box_type`, applying the ruleset immediately.
 ///
 /// **This modifies the active firewall.** Only call after explicit operator
@@ -66,16 +85,24 @@ pub fn run(box_type: BoxType, opts: &RunOptions) -> Result<NftbuildResult> {
         cmd.arg("-ntp");
     }
 
+    let before = config_mtime();
     let output = cmd
         .output()
         .map_err(|e| DefenderError::Command(format!("nftbuild exec: {}", e)))?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let config_exists = Path::new(NFT_CONFIG_PATH).exists();
-
-    if stderr.contains("Error") && !config_exists {
+    if !output.status.success() {
         return Err(DefenderError::Command(format!(
-            "nftbuild failed: {}",
+            "nftbuild exited with {}: {}",
+            output.status,
+            stderr.trim()
+        )));
+    }
+    // An unchanged file is a config from an earlier run, not this one.
+    if !config_was_written(before, config_mtime()) {
+        return Err(DefenderError::Command(format!(
+            "nftbuild exited 0 but did not write {}: {}",
+            NFT_CONFIG_PATH,
             stderr.trim()
         )));
     }
@@ -91,4 +118,21 @@ pub fn run(box_type: BoxType, opts: &RunOptions) -> Result<NftbuildResult> {
         config,
         config_path: NFT_CONFIG_PATH,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_or_missing_config_is_not_success() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let t0 = UNIX_EPOCH + Duration::from_secs(100);
+        let t1 = UNIX_EPOCH + Duration::from_secs(200);
+        assert!(config_was_written(None, Some(t1)));
+        assert!(config_was_written(Some(t0), Some(t1)));
+        assert!(!config_was_written(Some(t0), Some(t0)));
+        assert!(!config_was_written(Some(t0), None));
+        assert!(!config_was_written(None, None));
+    }
 }

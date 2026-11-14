@@ -179,14 +179,66 @@ const SCORED_UNITS: &[&str] = &[
 /// backs a scored service and must never be auto-remediated.
 pub fn is_scored_unit(unit: &str) -> bool {
     let lower = unit.to_ascii_lowercase();
-    let base = lower.strip_suffix(".service").unwrap_or(&lower);
-    // Template instances: postfix@-  ->  postfix
-    let base = base.split('@').next().unwrap_or(base);
-    if SCORED_UNITS.contains(&base) {
+    let name = lower.strip_suffix(".service").unwrap_or(&lower);
+
+    // Template instances are only accepted in the forms the real packages
+    // use; otherwise an implant named `sshd@backdoor.service` would inherit
+    // sshd's protection.
+    if let Some((template, instance)) = name.split_once('@') {
+        return match template {
+            // Debian's multi-instance postfix: postfix@-, postfix@postfix-out
+            "postfix" => true,
+            // Socket-activated per-connection instances: sshd@3-10.0.0.1:22-10.0.0.5:51234
+            "ssh" | "sshd" => is_socket_connection_instance(instance),
+            _ => false,
+        };
+    }
+
+    SCORED_UNITS.contains(&name) || is_php_fpm_unit(name)
+}
+
+/// `N-<local>-<remote>` instance names systemd gives per-connection units.
+fn is_socket_connection_instance(instance: &str) -> bool {
+    let Some((n, rest)) = instance.split_once('-') else {
+        return false;
+    };
+    !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) && rest.contains('-')
+}
+
+/// Real PHP-FPM unit names: `php-fpm`, `php8.1-fpm` (Debian/Ubuntu),
+/// `php-fpm8.2`, and Remi's `php82-php-fpm`. Not "anything with php and fpm in
+/// it", which an implant could pick.
+fn is_php_fpm_unit(name: &str) -> bool {
+    let is_version = |v: &str| {
+        !v.is_empty()
+            && v.split('.').count() <= 2
+            && v.split('.')
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+    };
+    if name == "php-fpm" {
         return true;
     }
-    // Versioned PHP-FPM units: php8.1-fpm, php-fpm8.2, php82-php-fpm
-    base.starts_with("php") && base.contains("fpm")
+    if let Some(v) = name
+        .strip_prefix("php")
+        .and_then(|r| r.strip_suffix("-fpm"))
+        && is_version(v)
+    {
+        return true;
+    }
+    if let Some(v) = name.strip_prefix("php-fpm")
+        && is_version(v)
+    {
+        return true;
+    }
+    if let Some(v) = name
+        .strip_prefix("php")
+        .and_then(|r| r.strip_suffix("-php-fpm"))
+        && !v.is_empty()
+        && v.chars().all(|c| c.is_ascii_digit())
+    {
+        return true;
+    }
+    false
 }
 
 /// Probe the filesystem to guess what kind of box this is.
@@ -199,7 +251,11 @@ pub fn detect_box_type() -> BoxType {
     {
         return BoxType::Router;
     }
-    if Path::new("/opt/splunk").exists() || Path::new("/opt/splunkforwarder").exists() {
+    // Only Splunk Enterprise makes this the Splunk box. The universal
+    // forwarder (/opt/splunkforwarder) gets installed on every box we want
+    // logs from, and treating those as Splunk boxes picks the wrong firewall
+    // profile and service allow-list.
+    if Path::new("/opt/splunk/bin/splunk").exists() || Path::new("/opt/splunk/etc").is_dir() {
         return BoxType::Splunk;
     }
     let has_postfix = Path::new("/usr/sbin/postfix").exists() || Path::new("/etc/postfix").exists();
@@ -235,6 +291,31 @@ mod scored_unit_tests {
             "NetworkManager.service",
             "networking.service",
             "httpd",
+        ] {
+            assert!(is_scored_unit(u), "{} should be protected", u);
+        }
+    }
+
+    #[test]
+    fn spoofed_template_and_php_names_are_not_scored() {
+        for u in [
+            "sshd@backdoor.service",
+            "ssh@x",
+            "dovecot@evil.service",
+            "php-fpm-backdoor.service",
+            "phpfpm",
+            "php-evil-fpm-loader",
+            "php8.1-fpm-helper",
+            "php-fpm..1",
+        ] {
+            assert!(!is_scored_unit(u), "{} must not be protected", u);
+        }
+        for u in [
+            "sshd@3-10.0.0.1:22-10.0.0.5:51234.service",
+            "postfix@postfix-out.service",
+            "php-fpm8.2",
+            "php82-php-fpm.service",
+            "php7.4-fpm",
         ] {
             assert!(is_scored_unit(u), "{} should be protected", u);
         }

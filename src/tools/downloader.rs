@@ -75,13 +75,26 @@ pub fn download(tool: &ToolDef) -> Result<DownloadResult> {
 
     let _ = std::fs::create_dir_all(HASH_DIR);
     let hash_file = Path::new(HASH_DIR).join(format!("{}.sha256", tool.name));
+    let stored = std::fs::read_to_string(&hash_file)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
-    let (hash_changed, hash_new) = if hash_file.exists() {
-        let stored = std::fs::read_to_string(&hash_file).unwrap_or_default();
-        (stored.trim() != sha256.as_str(), false)
-    } else {
-        (false, true)
-    };
+    // Verify BEFORE anything touches disk: this binary is about to be
+    // installed root-owned and executable in /usr/local/bin.
+    let skip = std::env::var_os(SKIP_HASH_CHECK_ENV).is_some();
+    if let Err(reason) = verify_hash(tool.known_sha256, stored.as_deref(), &sha256)
+        && !skip
+    {
+        return Err(DefenderError::Command(format!(
+            "refusing to install {}: {reason}. Nothing was written. If you have verified \
+             the new file yourself, re-run with {SKIP_HASH_CHECK_ENV}=1.",
+            tool.name
+        )));
+    }
+
+    let hash_new = stored.is_none();
+    let hash_changed = stored.as_deref().is_some_and(|s| s != sha256);
 
     std::fs::write(&hash_file, &sha256)?;
 
@@ -99,6 +112,35 @@ pub fn download(tool: &ToolDef) -> Result<DownloadResult> {
         hash_changed,
         hash_new,
     })
+}
+
+/// Set to any value to install a download whose hash does not match. For the
+/// case where upstream legitimately changed and the operator has checked it.
+pub const SKIP_HASH_CHECK_ENV: &str = "LINUX_DEFENDER_SKIP_HASH_CHECK";
+
+/// Decide whether a download with digest `actual` may be installed.
+///
+/// A tool with a pinned hash must match the pin. A tool without one is
+/// trust-on-first-use: it must match the hash recorded the first time it was
+/// downloaded on this box.
+pub fn verify_hash(
+    pinned: Option<&str>,
+    stored: Option<&str>,
+    actual: &str,
+) -> std::result::Result<(), String> {
+    if let Some(pin) = pinned {
+        return if pin.eq_ignore_ascii_case(actual) {
+            Ok(())
+        } else {
+            Err(format!("SHA-256 {actual} does not match the pinned {pin}"))
+        };
+    }
+    match stored {
+        Some(prev) if !prev.eq_ignore_ascii_case(actual) => Err(format!(
+            "SHA-256 {actual} differs from the {prev} recorded on first download"
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// Return `true` if `name` is already present in `INSTALL_DIR`.
@@ -142,5 +184,26 @@ fn fetch_bytes(url: &str) -> std::result::Result<Vec<u8>, String> {
         Ok(wget.stdout)
     } else {
         Err(String::from_utf8_lossy(&wget.stderr).into_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pinned_hash_must_match() {
+        assert!(verify_hash(Some("abc"), None, "abc").is_ok());
+        assert!(verify_hash(Some("ABC"), None, "abc").is_ok());
+        assert!(verify_hash(Some("abc"), None, "def").is_err());
+        // A pin wins over whatever was stored earlier.
+        assert!(verify_hash(Some("abc"), Some("def"), "def").is_err());
+    }
+
+    #[test]
+    fn unpinned_tools_are_trust_on_first_use() {
+        assert!(verify_hash(None, None, "abc").is_ok());
+        assert!(verify_hash(None, Some("abc"), "abc").is_ok());
+        assert!(verify_hash(None, Some("abc"), "def").is_err());
     }
 }

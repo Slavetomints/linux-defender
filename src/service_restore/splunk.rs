@@ -14,7 +14,6 @@
 //! The pinned default URL targets Splunk 10.0.2 (the competition VM version).
 //! Pass `--splunk-url` to override for a different build.
 
-use std::env;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -24,7 +23,7 @@ use crate::core::{
 };
 
 use super::distro::{Distro, restore_config_from_backup};
-use super::webserver::{download_file, verify_site_insecure, verify_tcp_service};
+use super::webserver::{DOWNLOAD_DIR, download_file, verify_site_insecure, verify_tcp_service};
 
 /// Path to the Splunk CLI binary.
 const SPLUNK_BIN: &str = "/opt/splunk/bin/splunk";
@@ -125,7 +124,7 @@ fn fresh_install(
     let download_url = url.unwrap_or(default_url);
     ctx.progress(&format!("[+] Downloading Splunk from {}...", download_url));
 
-    let tmp_path = env::temp_dir().join(format!("splunk-installer.{pkg_ext}"));
+    let tmp_path = Path::new(DOWNLOAD_DIR).join(format!("splunk-installer.{pkg_ext}"));
     download_file(download_url, &tmp_path, &distro, ctx)?;
 
     // Validate the download before handing it to dpkg/rpm — Splunk's CDN can
@@ -251,40 +250,22 @@ fn wipe_local(ctx: &DefenderContext) -> Result {
     ctx.debug(&format!("wiping {LOCAL_DIR}"));
     ctx.progress(&format!("[+] Clearing {LOCAL_DIR}..."));
 
-    let mut wiped = 0usize;
-    let mut failed = 0usize;
-    for entry in fs::read_dir(local)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        let result = if path.is_dir() {
-            fs::remove_dir_all(&path).map_err(|e| e.to_string())
-        } else {
-            fs::remove_file(&path).map_err(|e| e.to_string())
-        };
-
-        match result {
-            Ok(()) => {
-                ctx.debug(&format!("removed {}", path.display()));
-                wiped += 1;
-            }
-            Err(e) => {
-                ctx.progress(&format!(
-                    "[!] could not remove {}: {e} (chattr +i?)",
-                    path.display()
-                ));
-                failed += 1;
-            }
-        }
-    }
-
-    if failed > 0 {
+    // Moved, not deleted: the local layer holds the admin's real config too
+    // (inputs, auth, indexes), so it has to be recoverable.
+    let (saved, failed) = crate::core::context::quarantine_dir_contents(local)?;
+    for (path, e) in &failed {
         ctx.progress(&format!(
-            "[!] Removed {wiped} entries from {LOCAL_DIR}; {failed} could not be removed"
+            "[!] could not move {}: {e} (chattr +i?)",
+            path.display()
         ));
-    } else {
-        ctx.progress(&format!("[✓] Removed {wiped} entries from {LOCAL_DIR}"));
     }
+    ctx.progress(&format!(
+        "[✓] Moved the contents of {LOCAL_DIR} to {} ({} could not be moved). \
+         Put them back with: cp -a '{}/.' '{LOCAL_DIR}/'",
+        saved.display(),
+        failed.len(),
+        saved.display()
+    ));
     Ok(())
 }
 

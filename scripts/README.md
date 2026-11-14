@@ -8,7 +8,9 @@ Installs and configures fail2ban on Debian/Ubuntu/RHEL-family systems. Interacti
 
 ## firewall_assessment.sh
 
-Assesses the current firewall posture (iptables/nftables/ufw/firewalld). Reports active rules, open ports, and known risky exposures. Does not modify firewall state — audit only.
+Written for inject 35 (FW01). Option 1 assesses the current IPv4 firewall posture (iptables/nftables/ufw/firewalld) and option 3 prints verification evidence; both are read-only. **Option 2 changes live firewall rules**: it flushes the IPv4 INPUT chain (or updates the active firewalld zones), allows the ports for the profiles you pick, and sets default deny. Changes are runtime-only and are not persisted.
+
+Inbound SSH (TCP 22) stays allowed by default. Option 2 asks whether to block it; answer `y` only if the inject requires it and you have VM console access, because it drops scored SSH checks and new remote sessions.
 
 ## deploy_ipv6.sh
 

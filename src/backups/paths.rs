@@ -4,12 +4,9 @@
 ///
 /// Not exhaustive, but covers the services that typically carry scored config.
 pub const ALL_PATHS: &[&str] = &[
-    // SSH
-    "/etc/ssh/sshd_config",
-    "/etc/ssh/ssh_config",
-    "/etc/ssh/ssh_host_rsa_key.pub",
-    "/etc/ssh/ssh_host_ecdsa_key.pub",
-    "/etc/ssh/ssh_host_ed25519_key.pub",
+    // SSH: the whole directory, host keys included. Service restore puts
+    // /etc/ssh back as a unit so the scoring engine sees the same fingerprint.
+    "/etc/ssh",
     // PAM
     "/etc/pam.conf",
     "/etc/pam.d",
@@ -43,6 +40,19 @@ pub const ALL_PATHS: &[&str] = &[
     "/etc/dovecot",
     "/etc/dovecot/conf.d",
     "/etc/aliases",
+    "/etc/mailname",
+    // Webmail
+    "/etc/roundcube",
+    "/etc/roundcubemail",
+    // AD / LDAP / Kerberos join state behind postfix and dovecot auth.
+    // Service restore re-applies these; without them a reinstall loses AD auth.
+    "/etc/sssd",
+    "/etc/krb5.conf",
+    "/etc/krb5.keytab",
+    "/etc/nsswitch.conf",
+    "/etc/ldap",
+    "/etc/openldap",
+    "/etc/sasl2",
     // DNS / host identity
     "/etc/hostname",
     "/etc/hosts",

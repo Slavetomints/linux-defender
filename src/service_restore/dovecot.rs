@@ -13,10 +13,10 @@
 //!   - openSUSE:      `dovecot dovecot-ldap`
 //!   - Alpine:        `dovecot dovecot-ldap dovecot-lmtpd`
 
-use crate::core::{DefenderContext, DefenderError, Result, prompt_yes};
+use crate::core::{DefenderContext, Result, prompt_yes};
 
 use super::distro::{
-    Distro, enable_and_restart, restore_ad_integration, restore_config_from_backup,
+    Distro, enable_and_restart, reinstall_from_scratch, restore_ad_integration, restore_config,
 };
 use super::webserver::verify_tcp_service;
 
@@ -57,35 +57,12 @@ pub fn run(ctx: &DefenderContext) -> Result {
         return Ok(());
     }
 
-    // Purge the full package set so no stale configs or binaries remain.
-    ctx.progress(&format!(
-        "[+] Removing existing packages ({})...",
-        distro.name()
-    ));
-    let _ = distro.remove_cmd(pkgs).output();
-    ctx.progress("[✓] Removed (or were not present)");
+    // Prove the packages can be fetched and save the live config before the
+    // purge, so a dead mirror or a missing baseline cannot cost us the service.
+    let snapshot = reinstall_from_scratch(distro, pkgs, &["/etc/dovecot"], ctx)?;
 
-    // Install the full set in one pass.
-    ctx.progress(&format!(
-        "[+] Installing {} ({})...",
-        pkgs.join(" "),
-        distro.name()
-    ));
-    let output = distro
-        .install_cmd(pkgs)
-        .output()
-        .map_err(|e| DefenderError::Command(format!("package manager: {e}")))?;
-
-    if !output.status.success() {
-        return Err(DefenderError::Command(format!(
-            "install failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    ctx.progress(&format!("[✓] Installed {}", pkgs.join(", ")));
-
-    // Restore AD/LDAP auth config from backup (covers conf.d/, dovecot.conf, etc.).
-    restore_config_from_backup("/etc/dovecot", ctx)?;
+    // Restore AD/LDAP auth config (covers conf.d/, dovecot.conf, etc.).
+    restore_config("/etc/dovecot", snapshot.as_deref(), ctx)?;
     // Re-apply AD/LDAP/Kerberos join state so AD auth survives a from-scratch reinstall.
     restore_ad_integration(ctx)?;
 

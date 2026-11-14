@@ -8,9 +8,9 @@
 //! `/etc/ssh/` is restored from backup so the scoring engine's known-hosts
 //! fingerprint stays valid — regenerating host keys would break it.
 
-use crate::core::{DefenderContext, DefenderError, Result, prompt_yes};
+use crate::core::{DefenderContext, Result, prompt_yes};
 
-use super::distro::{Distro, enable_and_restart, restore_config_from_backup};
+use super::distro::{Distro, enable_and_restart, reinstall_from_scratch, restore_config};
 
 /// Remove any existing OpenSSH install, install fresh, and bring it up.
 pub fn run(ctx: &DefenderContext) -> Result {
@@ -29,30 +29,13 @@ pub fn run(ctx: &DefenderContext) -> Result {
         return Ok(());
     }
 
-    ctx.progress(&format!(
-        "[+] Removing existing {package} ({})...",
-        distro.name()
-    ));
-    let _ = distro.remove_cmd(&[package]).output();
-    ctx.progress("[✓] Removed (or was not present)");
-
-    ctx.progress(&format!("[+] Installing {package} ({})...", distro.name()));
-    let output = distro
-        .install_cmd(&[package])
-        .output()
-        .map_err(|e| DefenderError::Command(format!("package manager: {e}")))?;
-
-    if !output.status.success() {
-        return Err(DefenderError::Command(format!(
-            "install failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    ctx.progress(&format!("[✓] Installed {package}"));
+    // Prove the package can be fetched and save the live /etc/ssh (config and
+    // host keys) before anything is removed.
+    let snapshot = reinstall_from_scratch(distro, &[package], &["/etc/ssh"], ctx)?;
 
     // Restoring /etc/ssh preserves sshd_config AND the host keys — critical
     // so the scoring engine's cached fingerprint stays valid after reinstall.
-    restore_config_from_backup("/etc/ssh", ctx)?;
+    restore_config("/etc/ssh", snapshot.as_deref(), ctx)?;
 
     enable_and_restart(service, ctx)?;
 

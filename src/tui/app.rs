@@ -364,8 +364,35 @@ pub enum Tab {
 }
 
 impl Tab {
-    /// All tabs in display order — used to render the tab bar.
-    const ALL: &'static [Tab] = &[
+    /// All tabs for non-router boxes (Web, Mail, Splunk, General):
+    /// Router tab is omitted, leaving 8 active tabs.
+    pub const NON_ROUTER: &'static [Tab] = &[
+        Tab::Dashboard,
+        Tab::Logs,
+        Tab::Scan,
+        Tab::Hardening,
+        Tab::Backups,
+        Tab::Monitor,
+        Tab::Tools,
+        Tab::ServiceRestore,
+    ];
+
+    /// All tabs for Router box type:
+    /// Router is placed at tab 2, and Svc Restore is hidden,
+    /// keeping all 8 remaining tabs accessible.
+    pub const ROUTER: &'static [Tab] = &[
+        Tab::Dashboard,
+        Tab::Router,
+        Tab::Logs,
+        Tab::Scan,
+        Tab::Hardening,
+        Tab::Backups,
+        Tab::Monitor,
+        Tab::Tools,
+    ];
+
+    /// All tabs in default display order — used as a complete list of known tabs.
+    pub const ALL: &'static [Tab] = &[
         Tab::Dashboard,
         Tab::Logs,
         Tab::Scan,
@@ -377,8 +404,16 @@ impl Tab {
         Tab::Router,
     ];
 
+    /// Return the slice of tabs displayed for the given box type.
+    pub fn for_box_type(box_type: BoxType) -> &'static [Tab] {
+        match box_type {
+            BoxType::Router => Self::ROUTER,
+            _ => Self::NON_ROUTER,
+        }
+    }
+
     /// Human-readable name shown in the tab bar.
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Tab::Dashboard => "Dashboard",
             Tab::Logs => "Logs",
@@ -392,20 +427,11 @@ impl Tab {
         }
     }
 
-    /// Map a `1`–`9` digit keypress to the corresponding tab, or `None` for anything else.
-    fn from_digit(d: char) -> Option<Tab> {
-        match d {
-            '1' => Some(Tab::Dashboard),
-            '2' => Some(Tab::Logs),
-            '3' => Some(Tab::Scan),
-            '4' => Some(Tab::Hardening),
-            '5' => Some(Tab::Backups),
-            '6' => Some(Tab::Monitor),
-            '7' => Some(Tab::Tools),
-            '8' => Some(Tab::ServiceRestore),
-            '9' => Some(Tab::Router),
-            _ => None,
-        }
+    /// Map a `1`–`9` digit keypress to the corresponding tab for the given box type, or `None` if out of range.
+    pub fn from_digit(d: char, box_type: BoxType) -> Option<Tab> {
+        let tabs = Self::for_box_type(box_type);
+        let idx = d.to_digit(10)?.checked_sub(1)? as usize;
+        tabs.get(idx).copied()
     }
 }
 
@@ -1023,6 +1049,11 @@ impl App {
             router_active_step: None,
             router_active_args: None,
         }
+    }
+
+    /// Return the slice of active tabs for this app instance based on its box type.
+    pub fn tabs(&self) -> &'static [Tab] {
+        Tab::for_box_type(self.box_type)
     }
 
     /// Return true if any backup directory exists under the known roots.
@@ -1901,7 +1932,7 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
             match key.code {
                 KeyCode::Char('q') => break,
                 KeyCode::Char(d @ '1'..='9') => {
-                    if let Some(tab) = Tab::from_digit(d) {
+                    if let Some(tab) = Tab::from_digit(d, app.box_type) {
                         app.tab = tab;
                     }
                 }
@@ -2330,7 +2361,14 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
         .split(size);
 
     let sessions_flagged = app.sessions.iter().any(|s| s.flagged);
-    render_tabbar(f, rows[0], app.tab, &app.findings, sessions_flagged);
+    render_tabbar(
+        f,
+        rows[0],
+        app.tab,
+        &app.findings,
+        sessions_flagged,
+        app.tabs(),
+    );
 
     match app.tab {
         Tab::Dashboard => {
@@ -2417,13 +2455,14 @@ fn render_tabbar(
     active: Tab,
     findings: &[Finding],
     sessions_flagged: bool,
+    tabs: &[Tab],
 ) {
     let crit_count = findings
         .iter()
         .filter(|f| !f.resolved && f.severity == Severity::Critical)
         .count();
 
-    let spans: Vec<Span> = Tab::ALL
+    let spans: Vec<Span> = tabs
         .iter()
         .enumerate()
         .flat_map(|(i, &tab)| {
@@ -2583,7 +2622,22 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
 
     // global quit + tab switch always shown
     right.extend(kb("q", "quit", key_color));
-    right.extend(kb("1-9", "tabs", key_color));
+    let tab_hint: Option<&'static str> = match app.tabs().len() {
+        0 => None,
+        1 => Some("1"),
+        2 => Some("1-2"),
+        3 => Some("1-3"),
+        4 => Some("1-4"),
+        5 => Some("1-5"),
+        6 => Some("1-6"),
+        7 => Some("1-7"),
+        8 => Some("1-8"),
+        9 => Some("1-9"),
+        _ => Some("1-9"),
+    };
+    if let Some(hint) = tab_hint {
+        right.extend(kb(hint, "tabs", key_color));
+    }
 
     // tab-specific binds
     match app.tab {
@@ -4101,5 +4155,88 @@ fn render_router(f: &mut ratatui::Frame, area: Rect, app: &App) {
             .collect();
 
         f.render_widget(Paragraph::new(lines), inner);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::BoxType;
+
+    #[test]
+    fn non_router_tabs_exclude_router_and_include_service_restore() {
+        for bt in [
+            BoxType::Web,
+            BoxType::Mail,
+            BoxType::Splunk,
+            BoxType::General,
+        ] {
+            let tabs = Tab::for_box_type(bt);
+            assert_eq!(tabs.len(), 8, "Expected 8 tabs for {:?}", bt);
+            assert_eq!(
+                tabs,
+                &[
+                    Tab::Dashboard,
+                    Tab::Logs,
+                    Tab::Scan,
+                    Tab::Hardening,
+                    Tab::Backups,
+                    Tab::Monitor,
+                    Tab::Tools,
+                    Tab::ServiceRestore,
+                ]
+            );
+            assert!(!tabs.contains(&Tab::Router));
+            assert_eq!(tabs[0], Tab::Dashboard);
+            assert_eq!(tabs[1], Tab::Logs);
+            assert_eq!(tabs[7], Tab::ServiceRestore);
+
+            assert_eq!(Tab::from_digit('1', bt), Some(Tab::Dashboard));
+            assert_eq!(Tab::from_digit('2', bt), Some(Tab::Logs));
+            assert_eq!(Tab::from_digit('3', bt), Some(Tab::Scan));
+            assert_eq!(Tab::from_digit('4', bt), Some(Tab::Hardening));
+            assert_eq!(Tab::from_digit('5', bt), Some(Tab::Backups));
+            assert_eq!(Tab::from_digit('6', bt), Some(Tab::Monitor));
+            assert_eq!(Tab::from_digit('7', bt), Some(Tab::Tools));
+            assert_eq!(Tab::from_digit('8', bt), Some(Tab::ServiceRestore));
+            assert_eq!(Tab::from_digit('9', bt), None);
+            assert_eq!(Tab::from_digit('0', bt), None);
+        }
+    }
+
+    #[test]
+    fn router_tabs_move_router_to_tab_2_and_hide_service_restore() {
+        let tabs = Tab::for_box_type(BoxType::Router);
+        assert_eq!(tabs.len(), 8, "Router should have 8 total accessible tabs");
+        assert_eq!(
+            tabs,
+            &[
+                Tab::Dashboard,
+                Tab::Router,
+                Tab::Logs,
+                Tab::Scan,
+                Tab::Hardening,
+                Tab::Backups,
+                Tab::Monitor,
+                Tab::Tools,
+            ]
+        );
+        assert!(!tabs.contains(&Tab::ServiceRestore));
+        assert_eq!(tabs[0], Tab::Dashboard);
+        assert_eq!(tabs[1], Tab::Router);
+        assert_eq!(tabs[2], Tab::Logs);
+        assert_eq!(tabs[7], Tab::Tools);
+
+        assert_eq!(Tab::from_digit('1', BoxType::Router), Some(Tab::Dashboard));
+        assert_eq!(Tab::from_digit('2', BoxType::Router), Some(Tab::Router));
+        assert_eq!(Tab::from_digit('3', BoxType::Router), Some(Tab::Logs));
+        assert_eq!(Tab::from_digit('4', BoxType::Router), Some(Tab::Scan));
+        assert_eq!(Tab::from_digit('5', BoxType::Router), Some(Tab::Hardening));
+        assert_eq!(Tab::from_digit('6', BoxType::Router), Some(Tab::Backups));
+        assert_eq!(Tab::from_digit('7', BoxType::Router), Some(Tab::Monitor));
+        assert_eq!(Tab::from_digit('8', BoxType::Router), Some(Tab::Tools));
+        assert_eq!(Tab::from_digit('9', BoxType::Router), None);
+        assert_eq!(Tab::from_digit('0', BoxType::Router), None);
+        assert_eq!(Tab::from_digit('a', BoxType::Router), None);
     }
 }

@@ -699,68 +699,61 @@ impl SplunkForwarderWizard {
 
 /// Build an `inputs.conf` content string with log monitors appropriate for `bt`.
 fn build_inputs_conf(bt: SplunkBoxType) -> String {
+    build_inputs_conf_with(bt, |p| std::path::Path::new(p).exists())
+}
+
+/// Debian/Ubuntu and RHEL/Rocky names for the same system logs. Every one
+/// that exists is monitored, so the profile works on either family.
+const SYSTEM_LOGS: &[(&str, &str)] = &[
+    ("/var/log/auth.log", "linux_secure"),
+    ("/var/log/secure", "linux_secure"),
+    ("/var/log/syslog", "syslog"),
+    ("/var/log/messages", "syslog"),
+];
+
+/// [`build_inputs_conf`] with an injectable existence check, for tests.
+fn build_inputs_conf_with(bt: SplunkBoxType, exists: impl Fn(&str) -> bool) -> String {
     let mut out = String::new();
-    macro_rules! monitor {
-        ($path:expr, $stype:expr) => {
+    let mut monitor = |path: &str, sourcetype: &str| {
+        if exists(path) {
             out.push_str(&format!(
-                "[monitor://{}]\nindex = main\nsourcetype = {}\n\n",
-                $path, $stype
+                "[monitor://{path}]\nindex = main\nsourcetype = {sourcetype}\n\n"
             ));
-        };
+        }
+    };
+
+    for (path, st) in SYSTEM_LOGS {
+        monitor(path, st);
     }
+
     match bt {
         SplunkBoxType::Web => {
-            // Apache
-            if std::path::Path::new("/var/log/apache2").exists() {
-                monitor!("/var/log/apache2/access.log", "access_combined");
-                monitor!("/var/log/apache2/error.log", "apache_error");
-            }
-            if std::path::Path::new("/var/log/httpd").exists() {
-                monitor!("/var/log/httpd/access_log", "access_combined");
-                monitor!("/var/log/httpd/error_log", "apache_error");
-            }
-            if std::path::Path::new("/var/log/nginx").exists() {
-                monitor!("/var/log/nginx/access.log", "nginx_access");
-                monitor!("/var/log/nginx/error.log", "nginx_error");
-            }
-            monitor!("/var/log/auth.log", "linux_secure");
-            monitor!("/var/log/syslog", "syslog");
+            monitor("/var/log/apache2/access.log", "access_combined");
+            monitor("/var/log/apache2/error.log", "apache_error");
+            monitor("/var/log/httpd/access_log", "access_combined");
+            monitor("/var/log/httpd/error_log", "apache_error");
+            monitor("/var/log/httpd/ssl_access_log", "access_combined");
+            monitor("/var/log/httpd/ssl_error_log", "apache_error");
+            monitor("/var/log/nginx/access.log", "nginx_access");
+            monitor("/var/log/nginx/error.log", "nginx_error");
+            monitor("/var/log/audit/audit.log", "linux_audit");
         }
         SplunkBoxType::Mail => {
-            monitor!("/var/log/mail.log", "syslog");
-            monitor!("/var/log/auth.log", "linux_secure");
-            monitor!("/var/log/syslog", "syslog");
-            if std::path::Path::new("/var/log/maillog").exists() {
-                monitor!("/var/log/maillog", "syslog");
-            }
-            for rc in &[
-                "/var/log/roundcube/errors.log",
-                "/var/log/roundcubemail/errors.log",
-            ] {
-                if std::path::Path::new(rc).exists() {
-                    monitor!(rc, "php");
-                }
-            }
+            monitor("/var/log/mail.log", "syslog");
+            monitor("/var/log/maillog", "syslog");
+            monitor("/var/log/roundcube/errors.log", "php");
+            monitor("/var/log/roundcubemail/errors.log", "php");
         }
         SplunkBoxType::Splunk => {
-            monitor!("/opt/splunk/var/log/splunk/splunkd.log", "splunk_splunkd");
-            monitor!(
+            monitor("/opt/splunk/var/log/splunk/splunkd.log", "splunk_splunkd");
+            monitor(
                 "/opt/splunk/var/log/splunk/web_access.log",
-                "splunk_web_access"
+                "splunk_web_access",
             );
-            monitor!("/opt/splunk/var/log/splunk/metrics.log", "splunk_metrics");
-            monitor!("/var/log/auth.log", "linux_secure");
+            monitor("/opt/splunk/var/log/splunk/metrics.log", "splunk_metrics");
         }
         SplunkBoxType::General => {
-            monitor!("/var/log/auth.log", "linux_secure");
-            monitor!("/var/log/syslog", "syslog");
-            monitor!("/var/log/kern.log", "syslog");
-            if std::path::Path::new("/var/log/secure").exists() {
-                monitor!("/var/log/secure", "linux_secure");
-            }
-            if std::path::Path::new("/var/log/messages").exists() {
-                monitor!("/var/log/messages", "syslog");
-            }
+            monitor("/var/log/kern.log", "syslog");
         }
     }
     out
@@ -821,6 +814,39 @@ fn find_packages() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_profile_on_rocky_monitors_secure_messages_and_httpd() {
+        let rocky = |p: &str| {
+            matches!(
+                p,
+                "/var/log/secure"
+                    | "/var/log/messages"
+                    | "/var/log/httpd/access_log"
+                    | "/var/log/httpd/error_log"
+            )
+        };
+        let conf = build_inputs_conf_with(SplunkBoxType::Web, rocky);
+        assert!(conf.contains("[monitor:///var/log/secure]"));
+        assert!(conf.contains("[monitor:///var/log/messages]"));
+        assert!(conf.contains("[monitor:///var/log/httpd/access_log]"));
+        assert!(!conf.contains("auth.log"));
+        assert!(!conf.contains("apache2"));
+    }
+
+    #[test]
+    fn mail_profile_on_ubuntu_monitors_auth_and_mail_log() {
+        let ubuntu = |p: &str| {
+            matches!(
+                p,
+                "/var/log/auth.log" | "/var/log/syslog" | "/var/log/mail.log"
+            )
+        };
+        let conf = build_inputs_conf_with(SplunkBoxType::Mail, ubuntu);
+        assert!(conf.contains("[monitor:///var/log/auth.log]"));
+        assert!(conf.contains("[monitor:///var/log/mail.log]"));
+        assert!(!conf.contains("/var/log/secure"));
+    }
 
     #[test]
     fn only_root_owned_unwritable_packages_pass() {

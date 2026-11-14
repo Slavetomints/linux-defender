@@ -10,6 +10,8 @@
 
 use std::path::Path;
 
+use chrono::{DateTime, Datelike, FixedOffset, Local, NaiveDate, NaiveTime, TimeZone};
+
 use crate::core::{DefenderContext, Finding, Result, Severity};
 
 /// Candidate auth log paths, tried in order.
@@ -20,7 +22,7 @@ const AUTH_LOG_CANDIDATES: &[&str] = &[
 ];
 
 /// How far back to look, in seconds.
-const WINDOW_SECS: u64 = 3600;
+const WINDOW_SECS: i64 = 3600;
 
 /// A recent auth event of interest.
 pub struct RecentEvent {
@@ -32,55 +34,54 @@ pub struct RecentEvent {
     pub detail: String,
 }
 
-/// Derive the current year as a string for timestamp parsing.
-fn current_year() -> String {
-    // Rely on the system clock; avoids a heavy date library dependency.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    // Rough year calculation (good enough for log timestamp matching)
-    let year = 1970 + now / 31_557_600;
-    year.to_string()
-}
+/// Month abbreviations as classic syslog writes them.
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
 
-/// Parse a syslog-style `"Mon DD HH:MM:SS"` timestamp from the start of a
-/// line and return the number of seconds since Unix epoch, or `None`.
+/// Unix timestamp of a log line, or `None` if it carries no recognisable one.
 ///
-/// This handles the ambiguity of syslog timestamps that omit the year by
-/// assuming the current year.
-pub fn parse_syslog_timestamp(line: &str, year: &str) -> Option<u64> {
-    // Syslog: "Jan  1 00:00:00" or "Jan 10 12:34:56"
-    let months = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let parts: Vec<&str> = line.splitn(5, ' ').collect();
-    if parts.len() < 3 {
-        return None;
-    }
-    let month_idx = months.iter().position(|m| *m == parts[0])? as u64;
-    let day: u64 = parts[1].trim().parse().ok()?;
-    let time_parts: Vec<&str> = parts[2].splitn(3, ':').collect();
-    if time_parts.len() != 3 {
-        return None;
-    }
-    let hour: u64 = time_parts[0].parse().ok()?;
-    let min: u64 = time_parts[1].parse().ok()?;
-    let sec: u64 = time_parts[2].parse().ok()?;
-    let year_n: u64 = year.parse().ok()?;
+/// Two formats are understood:
+///
+/// - RFC 3339 / ISO 8601 (`2026-11-13T12:34:56.123456-06:00`), the default on
+///   Debian 12 and Ubuntu 24.04. The line carries its own UTC offset.
+/// - Classic syslog (`Jan  1 00:00:00`, `Jan 10 12:34:56`). It has no year
+///   and no zone, so it is read in the zone and year of `now`. A result more
+///   than a day in the future means the line is from last December.
+pub fn parse_log_timestamp(line: &str, now: DateTime<FixedOffset>) -> Option<i64> {
+    let mut fields = line.split_whitespace();
+    let first = fields.next()?;
 
-    // Days elapsed to start of this month (approximate, ignores leap years for simplicity)
-    let days_per_month = [31u64, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let days_in_year: u64 = days_per_month[..month_idx as usize].iter().sum();
-    let total_days = (year_n - 1970) * 365 + days_in_year + (day - 1);
+    if let Ok(ts) = DateTime::parse_from_rfc3339(first) {
+        return Some(ts.timestamp());
+    }
 
-    Some(total_days * 86400 + hour * 3600 + min * 60 + sec)
+    // split_whitespace collapses the double space syslog pads single-digit
+    // days with ("Jan  1").
+    let month = MONTHS.iter().position(|m| *m == first)? as u32 + 1;
+    let day: u32 = fields.next()?.parse().ok()?;
+    let time = NaiveTime::parse_from_str(fields.next()?, "%H:%M:%S").ok()?;
+
+    let resolve = |year: i32| -> Option<i64> {
+        let naive = NaiveDate::from_ymd_opt(year, month, day)?.and_time(time);
+        now.timezone()
+            .from_local_datetime(&naive)
+            .single()
+            .map(|dt| dt.timestamp())
+    };
+
+    let ts = resolve(now.year())?;
+    if ts > now.timestamp() + 86_400 {
+        resolve(now.year() - 1)
+    } else {
+        Some(ts)
+    }
 }
 
-/// Return `true` if `line` is within the specified window relative to `now`.
-pub fn is_within_window(line: &str, now_secs: u64, window_secs: u64, year: &str) -> bool {
-    match parse_syslog_timestamp(line, year) {
-        Some(ts) => ts >= now_secs.saturating_sub(window_secs),
+/// Return `true` if the log line's timestamp is within `window_secs` before `now`.
+pub fn is_within_window(line: &str, now: DateTime<FixedOffset>, window_secs: i64) -> bool {
+    match parse_log_timestamp(line, now) {
+        Some(ts) => ts >= now.timestamp() - window_secs,
         None => false,
     }
 }
@@ -149,10 +150,10 @@ pub fn classify_line(line: &str) -> Option<RecentEvent> {
 }
 
 /// Scan `contents` for recent high-value events within `window_secs` of `now_secs`.
-pub fn analyse(contents: &str, now_secs: u64, window_secs: u64, year: &str) -> Vec<RecentEvent> {
+pub fn analyse(contents: &str, now: DateTime<FixedOffset>, window_secs: i64) -> Vec<RecentEvent> {
     contents
         .lines()
-        .filter(|line| is_within_window(line, now_secs, window_secs, year))
+        .filter(|line| is_within_window(line, now, window_secs))
         .filter_map(classify_line)
         .collect()
 }
@@ -179,13 +180,10 @@ pub fn run(ctx: &DefenderContext) -> Result {
         }
     };
 
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let year = current_year();
-    let events = analyse(&contents, now_secs, WINDOW_SECS, &year);
+    // Classic syslog timestamps are local time, so "now" must carry the local
+    // UTC offset.
+    let now = Local::now().fixed_offset();
+    let events = analyse(&contents, now, WINDOW_SECS);
     let count = events.len();
 
     for ev in events {
@@ -209,10 +207,12 @@ mod tests {
     use super::*;
 
     /// A timestamp for "Jan 10 12:00:00 <year>" as seconds since epoch (approximate).
-    fn jan10_noon(year: u64) -> u64 {
-        // 9 full days of January + 12 hours
-        let days_since_1970 = (year - 1970) * 365 + 9;
-        days_since_1970 * 86400 + 12 * 3600
+    /// A fixed "now" in a non-UTC zone: 2026-11-13 12:30:00 -06:00.
+    fn now() -> DateTime<FixedOffset> {
+        FixedOffset::west_opt(6 * 3600)
+            .unwrap()
+            .with_ymd_and_hms(2026, 11, 13, 12, 30, 0)
+            .unwrap()
     }
 
     #[test]
@@ -254,53 +254,75 @@ mod tests {
     }
 
     #[test]
-    fn parse_syslog_timestamp_basic() {
-        // Jan 10 12:00:00 of a known year
-        let line = "Jan 10 12:00:00 host sshd[1]: blah";
-        let ts = parse_syslog_timestamp(line, "2024").unwrap();
-        // Just verify it's a plausible unix timestamp in 2024
-        assert!(ts > 1_700_000_000, "timestamp should be in 2024 range");
+    fn syslog_timestamp_is_exact_including_leap_days_and_zone() {
+        // 12:00:00 local at -06:00 is 18:00:00 UTC.
+        let ts = parse_log_timestamp("Nov 13 12:00:00 host sshd[1]: blah", now()).unwrap();
+        assert_eq!(ts, now().timestamp() - 1800);
     }
 
     #[test]
-    fn parse_syslog_timestamp_bad_line_returns_none() {
-        assert!(parse_syslog_timestamp("not a syslog line", "2024").is_none());
+    fn single_digit_days_with_double_space_parse() {
+        let n = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 11, 1, 0, 10, 0)
+            .unwrap();
+        let ts = parse_log_timestamp("Nov  1 00:00:00 host sshd[1]: blah", n).unwrap();
+        assert_eq!(ts, n.timestamp() - 600);
+    }
+
+    #[test]
+    fn iso_timestamps_carry_their_own_offset() {
+        let line = "2026-11-13T19:15:00.123456+01:00 host sshd[1]: blah";
+        // 19:15 +01:00 == 12:15 -06:00, i.e. 15 minutes before `now()`.
+        assert_eq!(
+            parse_log_timestamp(line, now()).unwrap(),
+            now().timestamp() - 900
+        );
+        assert!(is_within_window(line, now(), WINDOW_SECS));
+    }
+
+    #[test]
+    fn december_lines_read_in_january_belong_to_last_year() {
+        let jan = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2027, 1, 1, 0, 30, 0)
+            .unwrap();
+        let line = "Dec 31 23:45:00 host sshd[1]: blah";
+        assert_eq!(
+            parse_log_timestamp(line, jan).unwrap(),
+            jan.timestamp() - 45 * 60
+        );
+        assert!(is_within_window(line, jan, WINDOW_SECS));
+    }
+
+    #[test]
+    fn unparseable_line_returns_none() {
+        assert!(parse_log_timestamp("not a syslog line", now()).is_none());
+        assert!(parse_log_timestamp("", now()).is_none());
     }
 
     #[test]
     fn is_within_window_recent_line() {
-        let year = 2025u64;
-        let now = jan10_noon(year) + 100; // 100 seconds after noon
-        let line = "Jan 10 12:00:00 host sshd[1]: test";
-        // The line is 100 seconds old — within 1 hour
-        assert!(is_within_window(line, now, WINDOW_SECS, &year.to_string()));
+        let line = "Nov 13 12:28:20 host sshd[1]: test";
+        assert!(is_within_window(line, now(), WINDOW_SECS));
     }
 
     #[test]
     fn is_within_window_old_line_excluded() {
-        let year = 2025u64;
-        let now = jan10_noon(year) + 7200; // 2 hours after noon
-        let line = "Jan 10 12:00:00 host sshd[1]: test";
-        // The line is 2 hours old — outside the 1-hour window
-        assert!(!is_within_window(line, now, WINDOW_SECS, &year.to_string()));
+        let line = "Nov 13 10:29:00 host sshd[1]: test";
+        assert!(!is_within_window(line, now(), WINDOW_SECS));
     }
 
     #[test]
     fn analyse_empty_returns_nothing() {
-        let results = analyse("", 0, WINDOW_SECS, "2024");
-        assert!(results.is_empty());
+        assert!(analyse("", now(), WINDOW_SECS).is_empty());
     }
 
     #[test]
     fn analyse_filters_to_window() {
-        // Two useradd lines: one recent, one old.
-        // We pass a fake "now" so both are in 2025.
-        let year = 2025u64;
-        let noon = jan10_noon(year);
-        let log = "Jan 10 12:00:00 host useradd[1]: new user: name=recent\n\
-             Jan  1 00:00:00 host useradd[2]: new user: name=old\n";
-        // now = noon + 30 minutes — recent is in window, Jan 1 is not
-        let results = analyse(log, noon + 1800, WINDOW_SECS, &year.to_string());
+        let log = "Nov 13 12:00:00 host useradd[1]: new user: name=recent\n\
+             Nov  1 00:00:00 host useradd[2]: new user: name=old\n";
+        let results = analyse(log, now(), WINDOW_SECS);
         assert_eq!(results.len(), 1);
         assert!(results[0].summary.contains("recent"));
     }

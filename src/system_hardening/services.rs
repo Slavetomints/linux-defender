@@ -295,10 +295,22 @@ pub fn run(ctx: &DefenderContext) -> Result {
         );
     }
 
-    check_masked_scored_units(ctx);
+    check_masked_scored_units(ctx, box_type);
 
     ctx.log_msg("[✓] Service hardening complete");
     Ok(())
+}
+
+/// Whether a masked unit `svc` should be unmasked and started automatically:
+/// it must back one of `box_type`'s scored checks, and no other unit for that
+/// check may already be active (nginx masked while apache serves port 80).
+fn should_auto_unmask(svc: &str, box_type: BoxType, is_active: impl Fn(&str) -> bool) -> bool {
+    let base = |u: &str| u.trim_end_matches(".service").to_ascii_lowercase();
+    let svc = base(svc);
+    box_type.checks().iter().any(|check| {
+        check.units.iter().any(|u| base(u) == svc)
+            && !check.units.iter().any(|u| base(u) != svc && is_active(u))
+    })
 }
 
 /// Detect scored services that have been masked and unmask them.
@@ -306,9 +318,12 @@ pub fn run(ctx: &DefenderContext) -> Result {
 /// `systemctl mask <svc>` symlinks the unit to /dev/null, so the service can't
 /// start and never shows up as "enabled". It's a one-command way to take a
 /// scored service offline, and nothing else in the hardening loop catches it
-/// (masked units aren't enabled). We list masked units, and for any that back a
-/// scored service we unmask it and flag Critical.
-fn check_masked_scored_units(ctx: &DefenderContext) {
+/// (masked units aren't enabled). We list masked units; one that backs a scored
+/// check on this box type is unmasked and started, unless another unit is
+/// already serving that check. Other masked scored-adjacent units (networkd,
+/// resolved, databases, FTP) may have been masked on purpose and are only
+/// reported.
+fn check_masked_scored_units(ctx: &DefenderContext, box_type: BoxType) {
     ctx.log_msg("[+] Checking for masked scored services...");
     let output = Command::new("systemctl")
         .args([
@@ -330,6 +345,39 @@ fn check_masked_scored_units(ctx: &DefenderContext) {
             continue;
         }
         ctx.log_evidence_line("systemctl list-unit-files --state=masked", &svc);
+        if !should_auto_unmask(&svc, box_type, check_active) {
+            ctx.emit(
+                Finding::new(
+                    Severity::High,
+                    "services",
+                    format!("Scored-adjacent service '{}' is MASKED (left as is)", svc),
+                    format!(
+                        "service: {}\nwas: masked\nunmasked: false\nbox_type: {}",
+                        svc,
+                        box_type.label()
+                    ),
+                )
+                .with_context("service", svc.as_str())
+                .with_verdict(
+                    Verdict::Investigate,
+                    format!(
+                        "'{}' is masked. It does not back a scored check on a {} box, or \
+                         another unit already serves that check, so it may have been masked \
+                         on purpose and was not touched. If it should run: \
+                         `systemctl unmask {} && systemctl enable --now {}`.",
+                        svc,
+                        box_type.label(),
+                        svc,
+                        svc
+                    ),
+                )
+                .with_action(Action::Manual(format!(
+                    "systemctl unmask {} && systemctl enable --now {}",
+                    svc, svc
+                ))),
+            );
+            continue;
+        }
         let unmasked = ctx.run_remediation(&["systemctl", "unmask", &svc]);
         // Bring it back up after unmasking.
         let started = unmasked && ctx.run_remediation(&["systemctl", "enable", "--now", &svc]);
@@ -538,6 +586,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn only_units_behind_this_boxs_scored_checks_are_auto_unmasked() {
+        let none_active = |_: &str| false;
+        assert!(should_auto_unmask("postfix", BoxType::Mail, none_active));
+        assert!(should_auto_unmask("sshd", BoxType::General, none_active));
+        assert!(!should_auto_unmask(
+            "systemd-networkd",
+            BoxType::Mail,
+            none_active
+        ));
+        assert!(!should_auto_unmask(
+            "systemd-resolved",
+            BoxType::Web,
+            none_active
+        ));
+        assert!(!should_auto_unmask("mysql", BoxType::Web, none_active));
+        assert!(!should_auto_unmask("vsftpd", BoxType::Web, none_active));
+        assert!(!should_auto_unmask("postfix", BoxType::Splunk, none_active));
+    }
+
+    #[test]
+    fn a_masked_alternative_is_left_alone_when_another_unit_serves() {
+        let apache_up = |u: &str| u == "apache2";
+        assert!(!should_auto_unmask("nginx", BoxType::Web, apache_up));
+        assert!(should_auto_unmask("nginx", BoxType::Web, |_| false));
     }
 
     #[test]

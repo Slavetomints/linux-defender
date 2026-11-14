@@ -52,7 +52,7 @@ impl Profile {
             BoxType::Web => Profile::Web,
             BoxType::Mail => Profile::Mail,
             BoxType::Splunk => Profile::Splunk,
-            BoxType::General => Profile::General,
+            BoxType::General | BoxType::Router => Profile::General,
         }
     }
     /// All available profiles in display order.

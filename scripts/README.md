@@ -19,3 +19,13 @@ Hardens IPv6 configuration. Optionally disables IPv6 entirely, or restricts it t
 ## splunk_forwarder.sh
 
 Installs the Splunk Universal Forwarder and configures it to forward logs to a team indexer. Auto-detects box type (Web/Mail/Splunk/General) and writes a matching `inputs.conf`. Because Splunk does not allow unauthenticated downloads, place the `.deb` or `.rpm` package in `/tmp/` before running this script.
+
+## VyOS_LockdownAndFirewall.sh
+
+Consolidated CCDC VyOS defense, hardening, and forensic audit script (VyOS 1.4.0 Sagitta or newer).
+Features:
+- `--audit`: 12-section non-destructive forensic persistence audit and baseline capture.
+- `--diff <baseline>`: Compares current system state against a previous audit baseline.
+- `--harden`: Phase 1 hardening: rotates `vyos` password, configures SSH dynamic brute-force rate-limiting restricted to the Workstation network (`172.17.0.0/24`), applies control-plane firewall, preserves scored transit traffic, and uses `commit-confirm 5` rollback protection. Supports `--team <1-20>` to auto-calculate WAN and Core routing subnets.
+- `--console-lockdown`: Phase 2 console-only lockdown: removes SSH entirely, drops inbound TCP/22 on the firewall, and terminates running SSH daemons.
+- `--interactive`: Interactive prompt wizard.

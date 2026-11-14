@@ -5,4 +5,4 @@ pub mod dashboard;
 pub mod logs;
 pub mod tools_view;
 
-pub use app::run;
+pub use app::{App, Tab, run};

@@ -19,6 +19,7 @@ fn help_lists_every_subcommand() {
         "backups",
         "monitoring",
         "system-hardening",
+        "router",
     ] {
         assert!(
             text.contains(subcommand),
@@ -53,6 +54,12 @@ fn a_subcommand_with_no_flags_shows_help_and_fails() {
     assert!(
         !out.status.success(),
         "arg_required_else_help should make a bare subcommand an error"
+    );
+
+    let out_router = run_in(dir.path(), &["router"]);
+    assert!(
+        !out_router.status.success(),
+        "bare router subcommand should also show help and fail"
     );
 }
 
@@ -140,4 +147,30 @@ fn a_failing_module_does_not_abort_the_run() {
 
     assert!(out.status.success(), "run should survive a module failure");
     assert!(stdout(&out).contains("prompt_command module complete"));
+}
+
+#[test]
+fn router_confirm_flag_is_accepted_and_maps_to_confirm_mode() {
+    let dir = TempDir::new().unwrap();
+    let out = run_in(dir.path(), &["router", "--confirm", "--dry-run"]);
+
+    assert!(
+        out.status.success(),
+        "router --confirm --dry-run should succeed"
+    );
+    let text = stdout(&out);
+    assert!(
+        text.contains("--confirm"),
+        "stdout should show script execution with --confirm, got: {}",
+        text
+    );
+    assert!(
+        text.contains("Dry run enabled"),
+        "script in --confirm --dry-run should report dry run enabled, got: {}",
+        text
+    );
+
+    let out_help = run_in(dir.path(), &["router", "--help"]);
+    assert!(out_help.status.success());
+    assert!(stdout(&out_help).contains("--confirm"));
 }

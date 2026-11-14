@@ -20,6 +20,7 @@ export default {
         "docs",
         "deps",
         "tests",
+        "router",
       ],
     ],
     // Subject wording is a style preference, not something worth failing a

@@ -49,7 +49,7 @@ impl SplunkBoxType {
             BoxType::Web => SplunkBoxType::Web,
             BoxType::Mail => SplunkBoxType::Mail,
             BoxType::Splunk => SplunkBoxType::Splunk,
-            BoxType::General => SplunkBoxType::General,
+            BoxType::General | BoxType::Router => SplunkBoxType::General,
         }
     }
     /// All box types in display order.

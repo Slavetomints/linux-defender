@@ -13,7 +13,7 @@ use nix::unistd::Uid;
 
 use linux_defender::core::DefenderContext;
 use linux_defender::{
-    anti_persistence, backups, monitoring, router, service_restore, system_hardening,
+    anti_persistence, backups, monitoring, router, service_restore, system_hardening, tools,
 };
 
 /// CCDC Helper Program
@@ -46,6 +46,9 @@ enum Mode {
 
     /// VyOS router hardening, firewalling, and forensic audit operations
     Router(router::CliArgs),
+
+    /// Palo Alto firewall API keygen, XML config audit, and drift remediation
+    PaloAlto(tools::palo_alto::CliArgs),
 }
 
 impl Mode {
@@ -57,6 +60,7 @@ impl Mode {
             Mode::SystemHardening(_) => "system-hardening",
             Mode::ServiceRestore(_) => "service-restore",
             Mode::Router(_) => "router",
+            Mode::PaloAlto(_) => "palo-alto",
         }
     }
 }
@@ -110,6 +114,9 @@ fn main() -> anyhow::Result<()> {
             service_restore::run(&ctx, &args, None).context("Couldn't run Service Restore mode")?
         }
         Mode::Router(args) => router::run(&ctx, &args).context("Couldn't run Router mode")?,
+        Mode::PaloAlto(args) => {
+            tools::palo_alto::run(&ctx, &args).context("Couldn't run Palo Alto mode")?
+        }
     }
 
     let elapsed = ctx.elapsed();

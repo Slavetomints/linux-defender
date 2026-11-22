@@ -6,3 +6,5 @@ pub mod catalog;
 pub mod downloader;
 /// Wrapper around the `nftbuild` firewall generator.
 pub mod nftbuild;
+/// Palo Alto PA-VM firewall XML config audit, API keygen, and drift remediation.
+pub mod palo_alto;

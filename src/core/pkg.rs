@@ -19,15 +19,37 @@ pub enum PkgManager {
     Unknown,
 }
 
-/// Detect the system package manager by probing for its binary.
-pub fn detect_package_manager() -> PkgManager {
-    if Path::new("/usr/bin/rpm").exists() || Path::new("/bin/rpm").exists() {
-        PkgManager::Rpm
-    } else if Path::new("/usr/bin/dpkg").exists() {
-        PkgManager::Dpkg
-    } else {
-        PkgManager::Unknown
+impl PkgManager {
+    /// Detect the system package manager by probing for filesystem markers and binaries.
+    ///
+    /// On VyOS routers (indicated by `/config/config.boot` or `/opt/vyatta`), returns
+    /// [`PkgManager::Dpkg`] to prevent misdetection if RPM tools are present.
+    pub fn detect() -> Self {
+        Self::detect_from_root(Path::new("/"))
     }
+
+    /// Internal detection helper probing paths relative to `root`.
+    ///
+    /// Enables isolated, mock-root unit testing without host system modifications.
+    pub fn detect_from_root(root: &Path) -> Self {
+        if root.join("config/config.boot").exists() || root.join("opt/vyatta").exists() {
+            PkgManager::Dpkg
+        } else if root.join("usr/bin/rpm").exists() || root.join("bin/rpm").exists() {
+            PkgManager::Rpm
+        } else if root.join("usr/bin/dpkg").exists() || root.join("bin/dpkg").exists() {
+            PkgManager::Dpkg
+        } else {
+            PkgManager::Unknown
+        }
+    }
+}
+
+/// Detect the system package manager by probing for its binary or filesystem markers.
+///
+/// Retained for backwards compatibility across existing monitoring modules;
+/// delegates to [`PkgManager::detect`].
+pub fn detect_package_manager() -> PkgManager {
+    PkgManager::detect()
 }
 
 /// Return true if the file at `path_str` is registered with the package manager.
@@ -212,5 +234,75 @@ mod tests {
     fn unknown_manager_is_never_pristine() {
         let v = PkgVerifier::with_manager(PkgManager::Unknown);
         assert!(!v.is_pristine(Path::new("/bin/sh")));
+    }
+
+    #[test]
+    fn detect_from_root_prefers_config_boot_marker_over_rpm() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        std::fs::write(dir.path().join("config/config.boot"), "# VyOS config").unwrap();
+        std::fs::create_dir_all(dir.path().join("usr/bin")).unwrap();
+        std::fs::write(dir.path().join("usr/bin/rpm"), "").unwrap();
+
+        assert_eq!(
+            PkgManager::detect_from_root(dir.path()),
+            PkgManager::Dpkg,
+            "VyOS /config/config.boot must force Dpkg even if rpm binary exists"
+        );
+    }
+
+    #[test]
+    fn detect_from_root_prefers_opt_vyatta_marker_over_rpm() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("opt/vyatta")).unwrap();
+        std::fs::create_dir_all(dir.path().join("bin")).unwrap();
+        std::fs::write(dir.path().join("bin/rpm"), "").unwrap();
+
+        assert_eq!(
+            PkgManager::detect_from_root(dir.path()),
+            PkgManager::Dpkg,
+            "VyOS /opt/vyatta must force Dpkg even if rpm binary exists"
+        );
+    }
+
+    #[test]
+    fn detect_from_root_detects_rpm_when_no_vyos_markers() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("usr/bin")).unwrap();
+        std::fs::write(dir.path().join("usr/bin/rpm"), "").unwrap();
+
+        assert_eq!(
+            PkgManager::detect_from_root(dir.path()),
+            PkgManager::Rpm,
+            "Standard RPM system without VyOS markers must detect Rpm"
+        );
+    }
+
+    #[test]
+    fn detect_from_root_detects_dpkg_when_no_rpm_and_no_vyos_markers() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("usr/bin")).unwrap();
+        std::fs::write(dir.path().join("usr/bin/dpkg"), "").unwrap();
+
+        assert_eq!(
+            PkgManager::detect_from_root(dir.path()),
+            PkgManager::Dpkg,
+            "Standard Debian/Ubuntu system must detect Dpkg"
+        );
+    }
+
+    #[test]
+    fn detect_from_root_returns_unknown_when_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert_eq!(
+            PkgManager::detect_from_root(dir.path()),
+            PkgManager::Unknown,
+            "Empty root directory must detect Unknown"
+        );
+    }
+
+    #[test]
+    fn detect_package_manager_equals_pkgmanager_detect() {
+        assert_eq!(detect_package_manager(), PkgManager::detect());
     }
 }

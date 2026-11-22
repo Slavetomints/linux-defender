@@ -14,7 +14,7 @@
 use std::process::Command;
 
 use crate::core::pkg::{PkgManager, detect_package_manager, is_package_owned};
-use crate::core::{Action, DefenderContext, Finding, Result, Severity, Verdict};
+use crate::core::{Action, BoxType, DefenderContext, Finding, Result, Severity, Verdict};
 
 /// Critical packages to verify on RPM-based systems.
 const RPM_PACKAGES: &[&str] = &[
@@ -47,7 +47,11 @@ const DEB_PACKAGES: &[&str] = &[
 pub fn run(ctx: &DefenderContext) -> Result {
     ctx.log_msg("[+] Checking for malicious/modified binaries...");
 
-    let pkg_manager = detect_package_manager();
+    let pkg_manager = if ctx.box_type() == BoxType::Router {
+        PkgManager::Dpkg
+    } else {
+        detect_package_manager()
+    };
     check_package_integrity(ctx, pkg_manager);
     check_php_extensions(ctx, pkg_manager);
 
@@ -59,7 +63,13 @@ pub fn run(ctx: &DefenderContext) -> Result {
 
 /// Verify critical package file checksums via the package manager.
 fn check_package_integrity(ctx: &DefenderContext, pm: PkgManager) {
-    match pm {
+    let effective_pm = if ctx.box_type() == BoxType::Router {
+        PkgManager::Dpkg
+    } else {
+        pm
+    };
+
+    match effective_pm {
         PkgManager::Rpm => check_rpm_integrity(ctx),
         PkgManager::Dpkg => check_dpkg_integrity(ctx),
         PkgManager::Unknown => {
@@ -70,6 +80,10 @@ fn check_package_integrity(ctx: &DefenderContext, pm: PkgManager) {
 
 /// Run `rpm -V <pkg>` for each critical package and emit findings for modified files.
 fn check_rpm_integrity(ctx: &DefenderContext) {
+    if ctx.box_type() == BoxType::Router {
+        ctx.debug("Skipping RPM integrity check on Router box type");
+        return;
+    }
     for &pkg in RPM_PACKAGES {
         // Check if the package is installed first; rpm -V on a missing package
         // prints an error and exits non-zero without useful output.
@@ -323,4 +337,82 @@ fn get_php_extension_dir() -> String {
             }
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::mpsc::channel;
+
+    use super::*;
+    use crate::core::BoxType;
+
+    #[test]
+    fn check_rpm_integrity_bypassed_on_router() {
+        let (tx, rx) = channel();
+        let mut ctx = DefenderContext::new(PathBuf::from("/dev/null"), false)
+            .with_box_type(BoxType::Router);
+        ctx.finding_tx = Some(tx);
+
+        check_rpm_integrity(&ctx);
+
+        assert!(
+            rx.try_recv().is_err(),
+            "check_rpm_integrity must not emit any findings on Router"
+        );
+    }
+
+    #[test]
+    fn check_package_integrity_forces_dpkg_on_router() {
+        let (tx, rx) = channel();
+        let mut ctx = DefenderContext::new(PathBuf::from("/dev/null"), false)
+            .with_box_type(BoxType::Router);
+        ctx.finding_tx = Some(tx);
+
+        check_package_integrity(&ctx, PkgManager::Rpm);
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn parse_rpm_verify_line_detects_checksum_and_size() {
+        let (tx, rx) = channel();
+        let mut ctx = DefenderContext::new(PathBuf::from("/dev/null"), false);
+        ctx.finding_tx = Some(tx);
+
+        // Checksum mismatch
+        parse_rpm_verify_line(&ctx, "postfix", "S5......  /usr/sbin/postfix");
+        let f1 = rx.try_recv().expect("should emit critical finding");
+        assert_eq!(f1.severity, Severity::Critical);
+        assert_eq!(f1.module, "malicious_binaries");
+        assert_eq!(f1.context.get("package").map(String::as_str), Some("postfix"));
+        assert_eq!(f1.context.get("file").map(String::as_str), Some("/usr/sbin/postfix"));
+
+        // Size changed only
+        parse_rpm_verify_line(&ctx, "dovecot", "S.......  /usr/sbin/dovecot");
+        let f2 = rx.try_recv().expect("should emit high finding");
+        assert_eq!(f2.severity, Severity::High);
+
+        // Config file marker 'c' must be ignored
+        parse_rpm_verify_line(&ctx, "postfix", "S5...... c /etc/postfix/main.cf");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn parse_dpkg_verify_line_detects_checksum() {
+        let (tx, rx) = channel();
+        let mut ctx = DefenderContext::new(PathBuf::from("/dev/null"), false);
+        ctx.finding_tx = Some(tx);
+
+        parse_dpkg_verify_line(&ctx, "openssh-server", "??5?????? /usr/sbin/sshd");
+        let f = rx.try_recv().expect("should emit critical finding");
+        assert_eq!(f.severity, Severity::Critical);
+        assert_eq!(f.module, "malicious_binaries");
+        assert_eq!(f.context.get("package").map(String::as_str), Some("openssh-server"));
+        assert_eq!(f.context.get("file").map(String::as_str), Some("/usr/sbin/sshd"));
+
+        // Clean line with no '5' at index 2
+        parse_dpkg_verify_line(&ctx, "openssh-server", "......... /usr/sbin/sshd");
+        assert!(rx.try_recv().is_err());
+    }
 }

@@ -1658,18 +1658,12 @@ impl App {
             audit: step_id == "audit",
             diff: if step_id == "diff" { Some(None) } else { None },
             harden: step_id == "harden",
+            restore_nat: matches!(step_id, "router_nat" | "restore_nat"),
+            rotate_passwords: step_id == "rotate_passwords",
             console_lockdown: step_id == "console_lockdown",
             confirm: step_id == "confirm",
-            interactive: false,
-            team: None,
-            mgmt_subnet: None,
-            user: None,
-            pass: None,
-            ssh_key: None,
-            commit_timeout: None,
-            no_confirm: false,
-            force: false,
-            dry_run: false,
+            team: self.team,
+            ..Default::default()
         });
 
         self.router_active_step = Some(step_id);

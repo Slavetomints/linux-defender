@@ -34,7 +34,7 @@ impl BoxType {
             }
             Self::Splunk => "Debian Splunk — Web :8000  Mgmt :8089  SSH :22",
             Self::General => "SSH :22 + general system services",
-            Self::Router => "VyOS 1.4 Router — SSH :22, Control Plane & Transit Firewall",
+            Self::Router => "VyOS 1.4 Router — Routes, NAT, Host Firewall",
         }
     }
 

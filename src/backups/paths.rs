@@ -60,6 +60,10 @@ pub const ALL_PATHS: &[&str] = &[
     // Cron
     "/etc/crontab",
     "/var/spool/cron/crontabs/",
+    // VyOS Router configuration & boot scripts
+    "/config/config.boot",
+    "/config/scripts",
+    "/config/auth",
     // Splunk: configuration layers only. Never list /opt/splunk or
     // /opt/splunk/etc themselves; that drags in var/lib/splunk (the indexes,
     // easily many GB) and the whole install tree.
@@ -145,5 +149,22 @@ mod tests {
                 "{path} would copy the whole Splunk tree"
             );
         }
+    }
+
+    /// ALL_PATHS must include VyOS router configuration and script paths.
+    #[test]
+    fn all_paths_include_vyos_router_configs() {
+        assert!(ALL_PATHS.contains(&"/config/config.boot"));
+        assert!(ALL_PATHS.contains(&"/config/scripts"));
+        assert!(ALL_PATHS.contains(&"/config/auth"));
+    }
+
+    /// without_nested preserves router configuration paths without accidental deduplication.
+    #[test]
+    fn without_nested_preserves_router_paths() {
+        let kept = without_nested(ALL_PATHS);
+        assert!(kept.contains(&"/config/config.boot"));
+        assert!(kept.contains(&"/config/scripts"));
+        assert!(kept.contains(&"/config/auth"));
     }
 }

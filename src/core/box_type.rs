@@ -118,6 +118,38 @@ impl BoxType {
             Self::General | Self::Router => GENERAL_CHECKS,
         }
     }
+
+    /// Backup operations available for this box type: `(step_id, display_label)`.
+    ///
+    /// On [`BoxType::Router`], server stacks (mail, splunk, ecomm) are strictly omitted,
+    /// exposing only router-relevant backups (`router`, `users`, `all`).
+    /// On non-router systems, standard server stacks are exposed and `router` is hidden.
+    pub fn backup_steps(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Router => &[
+                ("router", "Router Config (/config/config.boot)"),
+                ("users", "User/Group/Shadow DBs"),
+                ("all", "Full Config Backup"),
+            ],
+            _ => &[
+                ("all", "Full Config Backup"),
+                ("mail", "Mail Stack"),
+                ("splunk", "Splunk Config"),
+                ("users", "User/Group/Shadow DBs"),
+                ("ecomm", "E-Commerce Stack"),
+            ],
+        }
+    }
+
+    /// Hardening operations available for this box type: `(step_id, display_label)`.
+    pub fn hardening_steps(self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("user_permissions", "User & File Permissions"),
+            ("services", "Disable Unnecessary Services"),
+            ("programs", "Restrict Dangerous Programs"),
+            ("configs", "Deploy Hardened Configs"),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -330,6 +362,48 @@ mod scored_unit_tests {
             "cups",
         ] {
             assert!(!is_scored_unit(u), "{} should not be protected", u);
+        }
+    }
+
+    /// Router backup steps must include router, users, and all, and exclude server stacks.
+    #[test]
+    fn router_backup_steps_scoping() {
+        let steps = BoxType::Router.backup_steps();
+        let ids: Vec<&str> = steps.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec!["router", "users", "all"]);
+        assert!(!ids.contains(&"mail"));
+        assert!(!ids.contains(&"splunk"));
+        assert!(!ids.contains(&"ecomm"));
+        assert_eq!(steps.len(), 3);
+    }
+
+    /// Non-router backup steps must contain standard server stacks and exclude router.
+    #[test]
+    fn non_router_backup_steps_scoping() {
+        for bt in [
+            BoxType::Web,
+            BoxType::Mail,
+            BoxType::Splunk,
+            BoxType::General,
+        ] {
+            let steps = bt.backup_steps();
+            let ids: Vec<&str> = steps.iter().map(|(id, _)| *id).collect();
+            assert_eq!(ids, vec!["all", "mail", "splunk", "users", "ecomm"]);
+            assert!(
+                !ids.contains(&"router"),
+                "non-router {:?} must not contain router backup",
+                bt
+            );
+            assert_eq!(steps.len(), 5);
+        }
+    }
+
+    /// Hardening steps must be defined and non-empty for all box types.
+    #[test]
+    fn hardening_steps_defined_for_all_box_types() {
+        for bt in BoxType::ALL {
+            let steps = bt.hardening_steps();
+            assert!(!steps.is_empty());
         }
     }
 }

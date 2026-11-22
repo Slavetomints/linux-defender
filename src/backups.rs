@@ -22,6 +22,7 @@ pub mod hash;
 pub mod mail;
 pub mod paths;
 pub mod restore;
+pub mod router;
 pub mod splunk;
 pub mod users;
 
@@ -60,6 +61,10 @@ pub struct CliArgs {
     /// Back up the user and group databases
     #[arg(long)]
     pub users: bool,
+
+    /// Back up VyOS router configuration (/config/config.boot, scripts, auth)
+    #[arg(long)]
+    pub router: bool,
 
     /// Directory to write the backup into, or read a previous one from
     #[arg(long)]
@@ -103,6 +108,10 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
     if args.users {
         println!("[+] Backing up user databases");
         users::run(ctx, &args.save_location)?;
+    }
+    if args.router {
+        println!("[+] Backing up router configuration");
+        router::run(ctx, &args.save_location)?;
     }
 
     Ok(())

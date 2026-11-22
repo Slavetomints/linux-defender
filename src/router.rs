@@ -1,10 +1,13 @@
 //! VyOS router hardening, firewalling, and forensic audit tooling.
 
+pub mod scan;
+
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use clap::Args;
@@ -109,11 +112,30 @@ pub fn remaining_time(
     deadline.saturating_duration_since(now)
 }
 
+/// Check if text contains VyOS configuration commit failure markers.
+pub fn has_commit_failure(output: &str) -> bool {
+    output.contains("Commit failed")
+        || output.contains("commit-confirm failed")
+        || (output.contains("[[") && output.contains("]] failed"))
+}
+
 /// Determine whether a completed router operation should transition into pending-confirmation state.
 ///
-/// Only a successful Phase 1 harden run without `--no-confirm` enters pending confirmation.
+/// Only a successful Phase 1 harden or NAT restore run without `--no-confirm` enters pending confirmation.
 pub fn should_enter_pending_state(step_id: &str, no_confirm: bool, success: bool) -> bool {
     matches!(step_id, "harden" | "router_nat" | "restore_nat") && !no_confirm && success
+}
+
+/// Extended pending-state check verifying exit status and commit output logs.
+pub fn should_enter_pending_state_checked(
+    step_id: &str,
+    no_confirm: bool,
+    exit_code: i32,
+    output: &str,
+) -> bool {
+    exit_code == 0
+        && !has_commit_failure(output)
+        && should_enter_pending_state(step_id, no_confirm, true)
 }
 
 /// Command-line arguments for router mode.
@@ -199,6 +221,14 @@ pub struct CliArgs {
     /// Bypass safety checks (e.g. running --console-lockdown over SSH)
     #[arg(long)]
     pub force: bool,
+
+    /// Restore mode for --restore-nat: 'baseline', 'detected', or 'backup'
+    #[arg(long)]
+    pub restore_mode: Option<String>,
+
+    /// Path to detected or backup config file for restore
+    #[arg(long)]
+    pub config_source: Option<String>,
 
     /// Display commands without applying changes
     #[arg(long)]
@@ -303,17 +333,26 @@ pub fn run_script(
         Err(e) => return Err(DefenderError::Io(e)),
     };
 
+    let commit_failed = Arc::new(AtomicBool::new(false));
+    let commit_failed_err = commit_failed.clone();
+
     let log_file_err = log_file.clone();
     let ctx_err = ctx.clone();
     let stderr_handle = child.stderr.take().map(|stderr| {
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(std::result::Result::ok) {
-                ctx_err.progress(&format!("[err] {}", line));
+                let clean = crate::core::utils::sanitize_cr(&line);
+                if has_commit_failure(clean) {
+                    commit_failed_err.store(true, Ordering::SeqCst);
+                }
+                if !clean.is_empty() {
+                    ctx_err.progress(&format!("[err] {}", clean));
+                }
                 if let Some(ref f) = log_file_err
                     && let Ok(mut file) = f.lock()
                 {
-                    let _ = writeln!(file, "[err] {}", line);
+                    let _ = writeln!(file, "[err] {}", clean);
                 }
             }
         })
@@ -322,11 +361,17 @@ pub fn run_script(
     if let Some(stdout) = child.stdout.take() {
         let reader = BufReader::new(stdout);
         for line in reader.lines().map_while(std::result::Result::ok) {
-            ctx.progress(&line);
+            let clean = crate::core::utils::sanitize_cr(&line);
+            if has_commit_failure(clean) {
+                commit_failed.store(true, Ordering::SeqCst);
+            }
+            if !clean.is_empty() {
+                ctx.progress(clean);
+            }
             if let Some(ref f) = log_file
                 && let Ok(mut file) = f.lock()
             {
-                let _ = writeln!(file, "{}", line);
+                let _ = writeln!(file, "{}", clean);
             }
         }
     }
@@ -340,7 +385,9 @@ pub fn run_script(
         Err(e) => return Err(DefenderError::Io(e)),
     };
 
-    if status.success() {
+    let had_commit_failure = commit_failed.load(Ordering::SeqCst);
+
+    if status.success() && !had_commit_failure {
         ctx.progress("✓ Execution completed successfully.");
         if let Some(ref f) = log_file
             && let Ok(mut file) = f.lock()
@@ -349,7 +396,11 @@ pub fn run_script(
         }
         Ok(())
     } else {
-        let code = status.code().unwrap_or(-1);
+        let code = if had_commit_failure && status.success() {
+            1
+        } else {
+            status.code().unwrap_or(-1)
+        };
         ctx.progress(&format!("✗ Execution failed with exit code {}.", code));
         if let Some(ref f) = log_file
             && let Ok(mut file) = f.lock()
@@ -429,6 +480,14 @@ pub fn build_script_args(args: &CliArgs) -> Vec<String> {
     }
     if args.force {
         script_args.push("--force".into());
+    }
+    if let Some(ref rm) = args.restore_mode {
+        script_args.push("--restore-mode".into());
+        script_args.push(rm.clone());
+    }
+    if let Some(ref cs) = args.config_source {
+        script_args.push("--config-source".into());
+        script_args.push(cs.clone());
     }
     if args.dry_run {
         script_args.push("--dry-run".into());

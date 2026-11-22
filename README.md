@@ -40,7 +40,10 @@ Tagged pushes (`v*`) build and attach both gnu and static musl binaries to a Git
 
 ## Interactive TUI
 
-Launch with no subcommand. Eight tabs, `1`–`8` to switch:
+Launch with no subcommand. The tab bar adapts dynamically based on detected box type.
+
+### Standard Box Types (Web, Mail, Splunk, General)
+Eight tabs, `1`–`8` to switch:
 
 ```
 ┌─[1] Dashboard──[2] Logs──[3] Scan──[4] Hardening──[5] Backups──[6] Monitor──[7] Tools──[8] Svc Restore─┐
@@ -60,11 +63,42 @@ Launch with no subcommand. Eight tabs, `1`–`8` to switch:
 | **Hardening** | `4` | Apply hardening steps (user perms, disable services, restrict programs, deploy configs) |
 | **Backups** | `5` | Run targeted backups; live output log |
 | **Monitor** | `6` | Run any of 26 monitoring modules on demand |
-| **Tools** | `7` | Download and run companion tools |
+| **Tools** | `7` | Download and run companion tools and interactive wizards |
 | **Svc Restore** | `8` | Reinstall scored services from scratch (Postfix, Dovecot, Splunk, OpenCart, PrestaShop) |
 
-The status bar shows box type, finding count, services-down alert, scan/watchdog state, and context-sensitive keybinds — all color-coded.
+### VyOS Router (`BoxType::Router`)
+On VyOS routers, generic Linux services and package reinstalls are omitted. The tab bar dynamically presents 7 streamlined tabs with **Tab 2 (Router)** dedicated to active operational remediations and **Tab 4 (Scan)** dedicated to non-destructive VyOS audit checks:
 
+```
+┌─[1] Dashboard──[2] Router──[3] Logs──[4] Scan──[5] Backups──[6] Monitor──[7] Tools──────────────────────┐
+│                                                                                                           │
+│  ...                                                                                                      │
+│                                                                                                           │
+├───────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Router │  0 findings  │  WATCHDOG   [q] quit  [1-7] tabs  [↑↓] select  [Enter] run operation            │
+└───────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+| Tab | Key | What it does |
+|---|---|---|
+| **Dashboard** | `1` | Scored SSH status, NAT Rules status, Transit Routing status, last backup timestamp |
+| **Router** | `2` | VyOS operations: Phase 1 Hardening, Restore NAT Baseline, Dual Password Rotation, Console Lockdown |
+| **Logs** | `3` | Full-width stacked syslog and auth streams |
+| **Scan** | `4` | 8 modular VyOS audit checks emitting structured `Finding` alerts to Dashboard and Findings view |
+| **Backups** | `5` | Targeted router configuration backups (`/config/config.boot`, scripts, credentials) |
+| **Monitor** | `6` | Forensic inspection tools (process spy, network watch, binary integrity) |
+| **Tools** | `7` | Interactive wizards with stateful list navigation and scrollable active firewall ruleset |
+
+#### Dedicated VyOS Audit Modules (Tab 4)
+When running on `Router`, Tab 4 executes 8 non-destructive audit modules tailored to VyOS 1.4+ configuration and topology:
+- **`router_nat`**: Audits DNAT rules (10-14) and outbound source NAT (rule 100); validates destination mappings against CCDC servers DMZ (`172.20.240.x`). Records live configured rules to `/etc/linux-defender/vyos/detected_nat_routes.json`.
+- **`router_services`**: Checks running services against the VyOS baseline allow-list (SSH, LLDP, SNMP, NTP); flags unauthorized daemons and reverse shells.
+- **`router_firewall`**: Audits control-plane firewall rulesets, default drop policies, and stateful inspection.
+- **`router_users`**: Audits local user accounts in VyOS configuration, checks root superuser status, and inspects `/home/*/.ssh/authorized_keys` for unauthorized access.
+- **`router_scripts`**: Scans `/config/scripts/` (`vyos-postconfig-bootup.script`, commit hooks) and quarantine directories for persistence.
+- **`router_tasks`**: Inspects scheduled tasks (`system task-scheduler`) and underlying Linux crontabs for periodic implants.
+- **`router_boot`**: Verifies boot configuration integrity (`/config/config.boot`) and bootloader hooks.
+- **`router_interfaces`**: Validates interface addressing (`eth0` WAN: `172.31.(20+Team).2/29`, Gateway: `172.31.(20+Team).1`, `eth1` LAN: `172.16.0.254/24`, `eth2` DMZ) and link parameters.
 ---
 
 ## CLI reference
@@ -165,6 +199,7 @@ Applies hardening in one shot. Steps that require root say so and exit cleanly i
 | `--splunk` | Backs up Splunk local config and apps |
 | `--users` | Backs up `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/sudoers`, and related files |
 | `--ecomm` | Backs up OpenCart + PrestaShop config |
+| `--router` | Backs up VyOS router configuration (`/config/config.boot`, scripts, credentials, hash manifest) |
 | `--custom <PATH>` | Backs up an arbitrary path with a hash manifest |
 | `--restore` | Restores files from a backup directory using its `H@shes.txt` manifest |
 | `--save-location <DIR>` | Where to write (or read) the backup. Defaults to `/etc/ccdc-b@ckup-<timestamp>` |
@@ -173,11 +208,55 @@ Applies hardening in one shot. Steps that require root say so and exit cleanly i
 # At competition start — snapshot the whole system
 sudo linux-defender backups --all --save-location /root/baseline
 
+# On VyOS router — snapshot configuration and scripts
+sudo linux-defender backups --router --save-location /etc/ccdc-b@ckup-router
+
 # Later — see what Red Team touched
 sudo linux-defender backups --compare-hashes --save-location /root/baseline
 
 # Restore from snapshot
 sudo linux-defender backups --restore --save-location /root/baseline
+```
+
+### `router`
+
+VyOS router hardening, forensic audit, firewall deployment, and NAT restoration grounded in CCDC topology
+
+| Flag | Mode | What it does |
+|---|---|---|
+| `--audit` | read-only | 14-section forensic audit of VyOS configuration, services, NAT, firewall, and tasks |
+| `--diff [BASE]` | read-only | Compares live VyOS state against last captured baseline |
+| `--harden` | prompts / commit-confirm | Phase 1: Cleans and deploys DNAT rules 10-14, transit routing, control-plane firewall, quenches hooks |
+| `--restore-nat` | prompts / commit-confirm | Restores scored DNAT rules 10-14 and static routes using selected restore strategy |
+| `--restore-mode <MODE>` | option | Restore strategy: `baseline` (clean-slate wipe & topology baseline), `detected` (re-apply from Tab 4 scan), or `backup` |
+| `--config-source <PATH>` | option | File path to detected JSON (`/etc/linux-defender/vyos/detected_nat_routes.json`) or backup for restore |
+| `--rotate-passwords` | prompts | Separately updates `vyos` and Linux `root` passwords; sanitizes `authorized_keys` |
+| `--console-lockdown` | prompts | Phase 2: Removes SSH service and drops port 22 (Console-Only Administration) |
+| `--confirm` | commit | Persists pending `commit-confirm` configuration permanently |
+| `--interactive` | wizard | Interactive configuration wizard |
+| `--team <NUM>` | option | CCDC team number (1–20) used to derive WAN subnet `172.31.(20+T).2/29` |
+| `--dnat-target <IP>` | option | Target internal host for port forwarding / DNAT (e.g. `172.20.240.10`) |
+| `--enable-outbound-pat` | option | Deploys source NAT (rule 100) masquerading internal traffic out WAN interface |
+| `--mgmt-subnet <CIDR>` | option | Trusted management subnet (default: `172.17.0.0/24`) |
+| `--commit-timeout <MIN>` | option | Rollback timer for `commit-confirm` in minutes (default: 5) |
+| `--no-confirm` | dangerous | Commits immediately without `commit-confirm` rollback safety |
+| `--force` | dangerous | Bypasses safety checks (e.g. executing console lockdown over SSH) |
+
+```sh
+# Run VyOS forensic audit
+sudo linux-defender router --audit
+
+# Deploy Phase 1 baseline hardening with 10-minute commit-confirm rollback safety
+sudo linux-defender router --harden --team 1 --commit-timeout 10
+
+# Confirm pending configuration after verifying connectivity
+sudo linux-defender router --confirm
+
+# Restore NAT and routes from clean-slate baseline grounded in topology
+sudo linux-defender router --restore-nat --team 1 --restore-mode baseline
+
+# Restore NAT and routes from detected JSON recorded by Tab 4 scan
+sudo linux-defender router --restore-nat --restore-mode detected --config-source /etc/linux-defender/vyos/detected_nat_routes.json
 ```
 
 ### `service-restore`
@@ -272,9 +351,9 @@ src/                                tests/
 ├── core.rs                         ├── anti_persistence.rs
 │   └── core/                       ├── backups.rs
 │       ├── box_type.rs             ├── monitoring.rs
-│       ├── context.rs              ├── system_hardening.rs
-│       ├── error.rs                └── service_restore.rs
-│       ├── scan.rs
+│       ├── context.rs              ├── router.rs
+│       ├── error.rs                ├── system_hardening.rs
+│       ├── scan.rs                 └── service_restore.rs
 │       └── utils.rs
 ├── anti_persistence.rs             (one file per technique)
 │   └── anti_persistence/
@@ -282,12 +361,16 @@ src/                                tests/
 │   └── backups/
 │       ├── all.rs, compare_hashes.rs, custom.rs
 │       ├── ecomm.rs, hash.rs, mail.rs
-│       ├── paths.rs, restore.rs, splunk.rs, users.rs
+│       ├── paths.rs, restore.rs, router.rs
+│       └── splunk.rs, users.rs
 ├── monitoring.rs
 │   └── monitoring/
 │       ├── access_log.rs, auth_log_watch.rs, error_log.rs
 │       ├── network_watch.rs, php_modules.rs, pspy.rs
 │       └── (20+ other modules)
+├── router.rs
+│   └── router/
+│       └── scan.rs
 ├── system_hardening.rs
 │   └── system_hardening/
 │       ├── configs.rs, programs.rs, services.rs, user_perms.rs
@@ -299,6 +382,8 @@ src/                                tests/
 └── tui/
     ├── app.rs          (main TUI loop, all tab rendering)
     ├── dashboard.rs
+    ├── tools_view.rs
+    ├── wizards.rs
     └── logs/
 ```
 

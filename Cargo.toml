@@ -66,7 +66,15 @@ path = "tests/service_restore.rs"
 name = "router"
 path = "tests/router.rs"
 
+[[test]]
+name = "palo_alto"
+path = "tests/palo_alto.rs"
+
 # Drives the built binary end to end; covers src/main.rs.
 [[test]]
 name = "cli"
 path = "tests/cli.rs"
+
+[[test]]
+name = "e2e_tests"
+path = "tests/e2e_tests.rs"

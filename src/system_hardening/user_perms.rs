@@ -26,7 +26,7 @@ use crate::core::{
 };
 
 /// Accounts that must never be locked, regardless of their UID or shell.
-const ESSENTIAL_USERS: &[&str] = &["root", "sysadmin"];
+pub const ESSENTIAL_USERS: &[&str] = &["root", "sysadmin", "vyos"];
 
 /// Operator-maintained list of accounts to keep, one name per line. Lines
 /// starting with `#` are comments.
@@ -480,6 +480,13 @@ mod tests {
     fn essential_users_does_not_skip_attacker() {
         assert!(!ESSENTIAL_USERS.contains(&"attacker"));
         assert!(!ESSENTIAL_USERS.contains(&"backdoor"));
+    }
+
+    #[test]
+    fn essential_users_contains_vyos() {
+        assert!(ESSENTIAL_USERS.contains(&"vyos"));
+        assert!(ESSENTIAL_USERS.contains(&"root"));
+        assert!(ESSENTIAL_USERS.contains(&"sysadmin"));
     }
 
     #[test]

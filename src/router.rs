@@ -29,22 +29,47 @@ pub const ROUTER_STEPS: &[RouterStepDef] = &[
     RouterStepDef {
         id: "audit",
         label: "Forensic Audit & Baseline",
-        description: "12-section non-destructive persistence check & baseline capture",
+        description: "14-section persistence, NAT baseline, and service whitelist check",
     },
     RouterStepDef {
         id: "diff",
         label: "Diff Against Baseline",
-        description: "Compare current router configuration/state against last baseline",
+        description: "Compare live VyOS state against last captured baseline",
     },
     RouterStepDef {
         id: "harden",
-        label: "Phase 1: Hardening & Password Rotation",
-        description: "Rotate vyos password, lock SSH to Workstations (172.17.0.0/24), firewall",
+        label: "Phase 1: Hardening & Init Config",
+        description: "Deploy NAT rules 10-14, apply control-plane firewall, quarantine hooks",
+    },
+    RouterStepDef {
+        id: "router_nat",
+        label: "Restore NAT Baseline on Router",
+        description: "Deploy scored 1:1 DNAT (Rules 10-14) and optional outbound PAT",
+    },
+    RouterStepDef {
+        id: "rotate_passwords",
+        label: "Update VyOS & Linux Root Passwords",
+        description: "Separately update 'vyos' and 'root' passwords; sanitize authorized_keys",
+    },
+    RouterStepDef {
+        id: "services",
+        label: "Disable Unnecessary Services",
+        description: "Apply VyOS 1.4.0 service whitelist; flag unknown daemons",
+    },
+    RouterStepDef {
+        id: "user_permissions",
+        label: "User & File Permissions",
+        description: "Sanitize /config/scripts/, secure /etc/shadow, add vyos to essential users",
     },
     RouterStepDef {
         id: "console_lockdown",
         label: "Phase 2: Console Lockdown (Nuke SSH)",
-        description: "Pull SSH service from vyos, drop port 22, terminate running daemons",
+        description: "Remove SSH service, drop port 22, terminate daemons (Console Only)",
+    },
+    RouterStepDef {
+        id: "confirm",
+        label: "Confirm Pending Commit",
+        description: "Confirm and save pending commit-confirm changes permanently",
     },
 ];
 
@@ -88,7 +113,7 @@ pub fn remaining_time(
 ///
 /// Only a successful Phase 1 harden run without `--no-confirm` enters pending confirmation.
 pub fn should_enter_pending_state(step_id: &str, no_confirm: bool, success: bool) -> bool {
-    step_id == "harden" && !no_confirm && success
+    matches!(step_id, "harden" | "router_nat" | "restore_nat") && !no_confirm && success
 }
 
 /// Command-line arguments for router mode.
@@ -107,6 +132,14 @@ pub struct CliArgs {
     #[arg(long)]
     pub harden: bool,
 
+    /// Restore CCDC DNAT Rules 10-14 & configure outbound PAT without full hardening
+    #[arg(long)]
+    pub restore_nat: bool,
+
+    /// Separately rotate vyos and root passwords; sanitize authorized_keys
+    #[arg(long)]
+    pub rotate_passwords: bool,
+
     /// Phase 2: Pull SSH from vyos (Console-Only Administration)
     #[arg(long)]
     pub console_lockdown: bool,
@@ -123,6 +156,14 @@ pub struct CliArgs {
     #[arg(long)]
     pub team: Option<u8>,
 
+    /// DNAT destination target: 'private' (172.20.240.x) or 'public' (172.25.x.x)
+    #[arg(long)]
+    pub dnat_target: Option<String>,
+
+    /// Enable Outbound PAT masquerade for workstations
+    #[arg(long)]
+    pub enable_outbound_pat: bool,
+
     /// Trusted management subnet (default: 172.17.0.0/24)
     #[arg(long)]
     pub mgmt_subnet: Option<String>,
@@ -134,6 +175,14 @@ pub struct CliArgs {
     /// New password for vyos (prompted securely if omitted)
     #[arg(long)]
     pub pass: Option<String>,
+
+    /// New password for Linux root superuser
+    #[arg(long)]
+    pub root_pass: Option<String>,
+
+    /// New password for vyos (synonym for --pass)
+    #[arg(long)]
+    pub vyos_pass: Option<String>,
 
     /// SSH public key string (e.g. 'AAAAC3NzaC1...')
     #[arg(long)]
@@ -195,7 +244,7 @@ pub fn run_script(
             if skip_next {
                 out.push("******".to_string());
                 skip_next = false;
-            } else if *arg == "--pass" {
+            } else if *arg == "--pass" || *arg == "--vyos-pass" || *arg == "--root-pass" {
                 out.push(arg.to_string());
                 skip_next = true;
             } else {
@@ -329,6 +378,10 @@ pub fn build_script_args(args: &CliArgs) -> Vec<String> {
         }
     } else if args.harden {
         script_args.push("--harden".into());
+    } else if args.restore_nat {
+        script_args.push("--restore-nat".into());
+    } else if args.rotate_passwords {
+        script_args.push("--rotate-passwords".into());
     } else if args.console_lockdown {
         script_args.push("--console-lockdown".into());
     } else if args.interactive {
@@ -339,6 +392,13 @@ pub fn build_script_args(args: &CliArgs) -> Vec<String> {
         script_args.push("--team".into());
         script_args.push(t.to_string());
     }
+    if let Some(ref dnat) = args.dnat_target {
+        script_args.push("--dnat-target".into());
+        script_args.push(dnat.clone());
+    }
+    if args.enable_outbound_pat {
+        script_args.push("--enable-outbound-pat".into());
+    }
     if let Some(ref m) = args.mgmt_subnet {
         script_args.push("--mgmt-subnet".into());
         script_args.push(m.clone());
@@ -346,6 +406,15 @@ pub fn build_script_args(args: &CliArgs) -> Vec<String> {
     if let Some(ref u) = args.user {
         script_args.push("--user".into());
         script_args.push(u.clone());
+    }
+    let vyos_pw = args.vyos_pass.as_ref().or(args.pass.as_ref());
+    if let Some(p) = vyos_pw {
+        script_args.push("--vyos-pass".into());
+        script_args.push(p.clone());
+    }
+    if let Some(ref rp) = args.root_pass {
+        script_args.push("--root-pass".into());
+        script_args.push(rp.clone());
     }
     if let Some(ref k) = args.ssh_key {
         script_args.push("--ssh-key".into());
@@ -373,8 +442,12 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
     let script_args = build_script_args(args);
     let mut env_vars: Vec<(&str, &str)> = Vec::new();
 
-    if let Some(ref p) = args.pass {
+    let vyos_pw = args.vyos_pass.as_ref().or(args.pass.as_ref());
+    if let Some(p) = vyos_pw {
         env_vars.push(("DEFENDER_ADMIN_PASS", p.as_str()));
+    }
+    if let Some(ref rp) = args.root_pass {
+        env_vars.push(("DEFENDER_ROOT_PASS", rp.as_str()));
     }
 
     let str_args: Vec<&str> = script_args.iter().map(|s| s.as_str()).collect();

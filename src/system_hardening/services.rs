@@ -19,6 +19,7 @@
 //! | Mail     | postfix, dovecot, roundcubemail, apache2/nginx, php-fpm, spamassassin, amavis |
 //! | Splunk   | splunk, SplunkForwarder |
 //! | General  | mysql/mariadb/postgresql, named/bind9 |
+//! | Router   | vyos-router/vyos-configd, frr/zebra/bgpd/ospfd, nftables, snmpd, chrony |
 
 use std::path::Path;
 use std::process::Command;
@@ -180,13 +181,64 @@ const GENERAL_ALLOW: &[&str] = &[
     "bind9",
 ];
 
+/// Services allowed on a VyOS 1.4.0 (Sagitta) router.
+pub const ROUTER_ALLOW: &[&str] = &[
+    // VyOS core daemons
+    "vyos-router",
+    "vyos-configd",
+    "vyos-hostkey",
+    "vyos-telegraf",
+    // FRRouting suite
+    "frr",
+    "zebra",
+    "bgpd",
+    "ospfd",
+    "ospf6d",
+    "ripd",
+    "ripngd",
+    "staticd",
+    "bfdd",
+    "isisd",
+    "fabricd",
+    "vrrpd",
+    "pimd",
+    "pim6d",
+    "eigrpd",
+    // Netfilter & Packet Filtering
+    "nftables",
+    "conntrackd",
+    // Redundancy & Discovery
+    "keepalived",
+    "lldpd",
+    // DHCP & DNS
+    "isc-dhcp-server",
+    "dhcpd",
+    "kea-dhcp4",
+    "kea-dhcp6",
+    "dhclient",
+    "dhcpcd",
+    "pdns-recursor",
+    "dnsmasq",
+    "ddclient",
+    // Monitoring & Time
+    "snmpd",
+    "chrony",
+    "chronyd",
+    "ntp",
+    "ntpd",
+    // Remote access
+    "ssh",
+    "sshd",
+];
+
 /// Return the allow-list for the given `box_type`.
 pub fn allow_list(box_type: BoxType) -> &'static [&'static str] {
     match box_type {
         BoxType::Web => WEB_ALLOW,
         BoxType::Mail => MAIL_ALLOW,
         BoxType::Splunk => SPLUNK_ALLOW,
-        BoxType::General | BoxType::Router => GENERAL_ALLOW,
+        BoxType::General => GENERAL_ALLOW,
+        BoxType::Router => ROUTER_ALLOW,
     }
 }
 
@@ -220,9 +272,8 @@ pub fn is_allowed(service_name: &str, box_type: BoxType) -> bool {
     if is_vendor_systemd_unit(service_name, VENDOR_UNIT_DIRS, OVERRIDE_UNIT_DIRS) {
         return true;
     }
-    // Scored services and their dependencies (Splunkd, mariadb, NetworkManager,
-    // sssd, ...) are never disabled, whatever box type we think this is.
-    if is_scored_unit(service_name) {
+    // Scored services on other boxes are protected, but routers should never run server stacks.
+    if box_type != BoxType::Router && is_scored_unit(service_name) {
         return true;
     }
     // `systemctl list-unit-files` reports templates as `getty@` and instances
@@ -236,6 +287,18 @@ pub fn is_allowed(service_name: &str, box_type: BoxType) -> bool {
     }
     // Box-specific services.
     allow_list(box_type)
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(base))
+}
+
+/// Return `true` if `service_name` is an allowed router service or baseline service.
+pub fn is_router_allowed(service_name: &str) -> bool {
+    let lower = service_name.to_ascii_lowercase();
+    let base = lower.split('@').next().unwrap_or(&lower);
+    if BASELINE_ALLOW.contains(&base) {
+        return true;
+    }
+    ROUTER_ALLOW
         .iter()
         .any(|allowed| allowed.eq_ignore_ascii_case(base))
 }
@@ -266,14 +329,29 @@ pub fn run(ctx: &DefenderContext) -> Result {
         box_type.label()
     ));
 
-    let enabled = list_enabled_services(ctx)?;
+    let mut services_to_check = list_enabled_services(ctx)?;
+    if box_type == BoxType::Router {
+        let running = list_running_services(ctx)?;
+        for svc in running {
+            if !services_to_check.contains(&svc) {
+                services_to_check.push(svc);
+            }
+        }
+    }
     ctx.log_msg(&format!(
-        "[+] {} enabled service units found",
-        enabled.len()
+        "[+] {} service units to inspect",
+        services_to_check.len()
     ));
 
-    for svc in &enabled {
-        if is_allowed(svc, box_type) {
+    for svc in &services_to_check {
+        let is_ok = if box_type == BoxType::Router {
+            is_vendor_systemd_unit(svc, VENDOR_UNIT_DIRS, OVERRIDE_UNIT_DIRS)
+                || is_router_allowed(svc)
+        } else {
+            is_allowed(svc, box_type)
+        };
+
+        if is_ok {
             ctx.emit(Finding::new(
                 Severity::Info,
                 "services",
@@ -292,32 +370,61 @@ pub fn run(ctx: &DefenderContext) -> Result {
         let still_active = check_active(svc);
         ctx.log_msg(&format!("PROOF: {} still active: {}", svc, still_active));
 
-        ctx.emit(
-            Finding::new(
-                Severity::High,
-                "services",
-                format!("Service '{}' is not on the allow-list — disabled", svc),
-                format!(
-                    "service: {}\ndisabled: {}\nstill_active: {}",
-                    svc, disabled, still_active
-                ),
-            )
-            .with_context("service", svc.as_str())
-            .with_context("box_type", box_type.label())
-            .with_context("disabled", disabled.to_string())
-            .with_context("still_active", still_active.to_string())
-            .with_verdict(
-                Verdict::Disable,
-                format!(
-                    "Service '{}' is not required on a {} box. \
-                     It has been disabled. Confirm with `systemctl status {}`.",
-                    svc,
-                    box_type.label(),
-                    svc
-                ),
-            )
-            .with_action(Action::Manual(format!("systemctl disable --now {}", svc))),
-        );
+        if box_type == BoxType::Router {
+            ctx.emit(
+                Finding::new(
+                    Severity::High,
+                    "services",
+                    format!("Unknown service on VyOS router: {}", svc),
+                    format!(
+                        "Service '{}' is enabled or running but is not in the VyOS 1.4.0 baseline (ROUTER_ALLOW).\n\
+                         disabled: {}\nstill_active: {}",
+                        svc, disabled, still_active
+                    ),
+                )
+                .with_context("service", svc.as_str())
+                .with_context("box_type", box_type.label())
+                .with_context("disabled", disabled.to_string())
+                .with_context("still_active", still_active.to_string())
+                .with_verdict(
+                    Verdict::Disable,
+                    format!(
+                        "Service '{}' is not part of the standard VyOS 1.4.0 (Sagitta) router baseline. \
+                         It has been disabled and stopped to eliminate unauthorized services or backdoors. \
+                         Confirm with `systemctl status {}`.",
+                        svc, svc
+                    ),
+                )
+                .with_action(Action::Manual(format!("systemctl disable --now {}", svc))),
+            );
+        } else {
+            ctx.emit(
+                Finding::new(
+                    Severity::High,
+                    "services",
+                    format!("Service '{}' is not on the allow-list — disabled", svc),
+                    format!(
+                        "service: {}\ndisabled: {}\nstill_active: {}",
+                        svc, disabled, still_active
+                    ),
+                )
+                .with_context("service", svc.as_str())
+                .with_context("box_type", box_type.label())
+                .with_context("disabled", disabled.to_string())
+                .with_context("still_active", still_active.to_string())
+                .with_verdict(
+                    Verdict::Disable,
+                    format!(
+                        "Service '{}' is not required on a {} box. \
+                         It has been disabled. Confirm with `systemctl status {}`.",
+                        svc,
+                        box_type.label(),
+                        svc
+                    ),
+                )
+                .with_action(Action::Manual(format!("systemctl disable --now {}", svc))),
+            );
+        }
     }
 
     check_masked_scored_units(ctx, box_type);
@@ -471,12 +578,39 @@ fn list_enabled_services(ctx: &DefenderContext) -> Result<Vec<String>> {
     }
 }
 
-/// Parse one line from `systemctl list-unit-files --no-legend --plain`.
+/// Return the list of running service *base names* (without the `.service` suffix)
+/// by running `systemctl list-units --type=service --state=running`.
+fn list_running_services(ctx: &DefenderContext) -> Result<Vec<String>> {
+    let output = Command::new("systemctl")
+        .args([
+            "list-units",
+            "--type=service",
+            "--state=running",
+            "--no-legend",
+            "--plain",
+        ])
+        .output();
+
+    match output {
+        Err(e) => {
+            ctx.log_msg(&format!("[!] Could not run systemctl list-units: {}", e));
+            Ok(Vec::new())
+        }
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let services = stdout.lines().filter_map(parse_unit_line).collect();
+            Ok(services)
+        }
+    }
+}
+
+/// Parse one line from `systemctl list-unit-files --no-legend --plain` or
+/// `systemctl list-units --type=service --state=running --no-legend --plain`.
 ///
-/// Lines look like `sshd.service   enabled   enabled`.  Returns the base name
-/// (e.g. `sshd`) or `None` if the line does not name a `.service` unit.
+/// Lines look like `sshd.service   enabled   enabled` or `● ssh.service loaded active running ...`.
+/// Returns the base name (e.g. `sshd`) or `None` if the line does not name a `.service` unit.
 fn parse_unit_line(line: &str) -> Option<String> {
-    let unit = line.split_whitespace().next()?;
+    let unit = line.split_whitespace().find(|p| *p != "●")?;
     let name = unit.strip_suffix(".service")?;
     Some(name.to_string())
 }
@@ -724,5 +858,59 @@ mod tests {
     #[test]
     fn avahi_not_allowed_on_web_box() {
         assert!(!is_allowed("avahi-daemon", BoxType::Web));
+    }
+
+    #[test]
+    fn router_allow_list_contains_expected_services() {
+        let list = allow_list(BoxType::Router);
+        assert_eq!(list, ROUTER_ALLOW);
+        assert!(list.contains(&"vyos-router"));
+        assert!(list.contains(&"vyos-configd"));
+        assert!(list.contains(&"frr"));
+        assert!(list.contains(&"zebra"));
+        assert!(list.contains(&"staticd"));
+        assert!(list.contains(&"bgpd"));
+        assert!(list.contains(&"ospfd"));
+        assert!(list.contains(&"nftables"));
+        assert!(list.contains(&"conntrackd"));
+        assert!(list.contains(&"snmpd"));
+        assert!(list.contains(&"chrony"));
+        assert!(list.contains(&"ssh"));
+        assert!(list.contains(&"sshd"));
+    }
+
+    #[test]
+    fn router_allow_list_excludes_database_engines() {
+        let list = allow_list(BoxType::Router);
+        assert!(!list.contains(&"mysql"), "mysql must NOT be in ROUTER_ALLOW");
+        assert!(!list.contains(&"mariadb"), "mariadb must NOT be in ROUTER_ALLOW");
+        assert!(!list.contains(&"postgresql"), "postgresql must NOT be in ROUTER_ALLOW");
+        assert!(!list.contains(&"mongod"), "mongod must NOT be in ROUTER_ALLOW");
+    }
+
+    #[test]
+    fn router_is_allowed_checks() {
+        assert!(is_allowed("vyos-router", BoxType::Router));
+        assert!(is_allowed("frr", BoxType::Router));
+        assert!(is_allowed("zebra", BoxType::Router));
+        assert!(is_allowed("nftables", BoxType::Router));
+        assert!(is_allowed("ssh", BoxType::Router));
+        assert!(!is_allowed("telnet", BoxType::Router));
+        assert!(!is_allowed("cups", BoxType::Router));
+    }
+
+    #[test]
+    fn is_router_allowed_distinguishes_baseline_and_unknowns() {
+        assert!(is_router_allowed("vyos-router"));
+        assert!(is_router_allowed("frr"));
+        assert!(is_router_allowed("zebra"));
+        assert!(is_router_allowed("nftables"));
+        assert!(is_router_allowed("ssh"));
+        assert!(!is_router_allowed("mysql"));
+        assert!(!is_router_allowed("mariadb"));
+        assert!(!is_router_allowed("postgresql"));
+        assert!(!is_router_allowed("apache2"));
+        assert!(!is_router_allowed("telnet"));
+        assert!(!is_router_allowed("backdoor-c2"));
     }
 }

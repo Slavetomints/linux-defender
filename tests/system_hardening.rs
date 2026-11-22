@@ -59,3 +59,58 @@ fn no_flags_is_an_error() {
     let dir = TempDir::new().unwrap();
     assert!(!run_cli(dir.path(), &["system-hardening"]).status.success());
 }
+
+#[test]
+fn router_allow_list_matches_router_allow_constant() {
+    use linux_defender::core::BoxType;
+    use linux_defender::system_hardening::services::{ROUTER_ALLOW, allow_list};
+
+    assert_eq!(allow_list(BoxType::Router), ROUTER_ALLOW);
+}
+
+#[test]
+fn router_allow_list_contains_vyos_and_frr() {
+    use linux_defender::core::BoxType;
+    use linux_defender::system_hardening::services::allow_list;
+
+    let list = allow_list(BoxType::Router);
+    assert!(list.contains(&"vyos-router"), "vyos-router must be in ROUTER_ALLOW");
+    assert!(list.contains(&"frr"), "frr must be in ROUTER_ALLOW");
+    assert!(list.contains(&"zebra"), "zebra must be in ROUTER_ALLOW");
+    assert!(list.contains(&"staticd"), "staticd must be in ROUTER_ALLOW");
+    assert!(list.contains(&"bgpd"), "bgpd must be in ROUTER_ALLOW");
+    assert!(list.contains(&"ospfd"), "ospfd must be in ROUTER_ALLOW");
+    assert!(list.contains(&"nftables"), "nftables must be in ROUTER_ALLOW");
+    assert!(list.contains(&"snmpd"), "snmpd must be in ROUTER_ALLOW");
+    assert!(list.contains(&"chrony"), "chrony must be in ROUTER_ALLOW");
+}
+
+#[test]
+fn router_allow_list_excludes_databases() {
+    use linux_defender::core::BoxType;
+    use linux_defender::system_hardening::services::allow_list;
+
+    let list = allow_list(BoxType::Router);
+    assert!(!list.contains(&"mysql"), "mysql must NOT be in ROUTER_ALLOW");
+    assert!(!list.contains(&"mariadb"), "mariadb must NOT be in ROUTER_ALLOW");
+    assert!(!list.contains(&"postgresql"), "postgresql must NOT be in ROUTER_ALLOW");
+    assert!(!list.contains(&"mongod"), "mongod must NOT be in ROUTER_ALLOW");
+}
+
+#[test]
+fn essential_users_protects_vyos_user() {
+    use linux_defender::system_hardening::user_perms::ESSENTIAL_USERS;
+
+    assert!(
+        ESSENTIAL_USERS.contains(&"vyos"),
+        "vyos must be in ESSENTIAL_USERS to protect against lockout"
+    );
+    assert!(
+        ESSENTIAL_USERS.contains(&"root"),
+        "root must be in ESSENTIAL_USERS"
+    );
+    assert!(
+        ESSENTIAL_USERS.contains(&"sysadmin"),
+        "sysadmin must be in ESSENTIAL_USERS"
+    );
+}

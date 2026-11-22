@@ -24,7 +24,7 @@ LATEST_LINK="${BASELINE_DIR}/latest.log"
 LOG_DIR="${DEFENDER_DIR}/vyos"
 
 mkdir -p "$LOG_DIR" "$BASELINE_DIR" 2>/dev/null
-SAFE_ARGS=$(printf '%s ' "$@" | sed -E 's/--pass +[^ ]+/--pass ******/g')
+SAFE_ARGS=$(printf '%s ' "$@" | sed -E 's/--(pass|vyos-pass|root-pass) +[^ ]+/--\1 ******/g')
 echo "[$(date)] vbash PID=$$ GID=$(id -g -n 2>/dev/null) ARGC=$# ARGS: '$SAFE_ARGS' DIR='$DEFENDER_DIR'" >> "${LOG_DIR}/debug_run.log"
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
@@ -41,6 +41,9 @@ die()       { log_error "$*"; builtin exit 1; }
 TEAM=""
 ADMIN_USER="vyos"
 ADMIN_PASS="${DEFENDER_ADMIN_PASS:-}"
+ROOT_PASS="${DEFENDER_ROOT_PASS:-}"
+DNAT_TARGET="private"
+ENABLE_OUTBOUND_PAT=false
 SSH_PUB_KEY=""
 SSH_KEY_TYPE="ssh-ed25519"
 SSH_KEY_ID="ccdc_admin_key"
@@ -70,18 +73,24 @@ usage() {
 Usage: ./VyOS_LockdownAndFirewall.sh [MODE] [OPTIONS]
 
 MODES:
-  --audit                 Run non-destructive forensic audit and save baseline
+  --audit                 Run non-destructive forensic audit (14 sections) and save baseline
   --diff [log_file]       Diff current state against previous baseline
-  --harden                Phase 1: Rotate vyos password, harden SSH, apply firewall
+  --harden                Phase 1: Hardening & Init Config (passwords, SSH, firewall, NAT rules 10-14)
+  --restore-nat           Restore CCDC DNAT Rules 10-14 & configure outbound PAT without full hardening
+  --rotate-passwords      Separately rotate vyos and root passwords; sanitize authorized_keys
   --console-lockdown      Phase 2: Pull SSH from vyos (Console-Only Administration)
   --confirm               Confirm and save pending commit-confirm changes
   --interactive           Interactive configuration wizard
 
 OPTIONS:
-  --team <1-20>           CCDC Team number (derives WAN subnet 172.31.{20+T}.2/29)
+  --team <0-20>           CCDC Team number (0=practice 172.31.20.2/29, 1-20=competition 172.31.{20+T}.2/29)
+  --dnat-target <tgt>     DNAT destination target: 'private' (172.20.240.x) or 'public' (172.25.x.x) [default: private]
+  --enable-outbound-pat   Enable Outbound PAT masquerade for workstations (default: false, reverse-shell defense)
   --mgmt-subnet <cidr>    Trusted management subnet (default: 172.17.0.0/24)
   --user <username>       Target admin username (default: vyos, per CCDC rules)
-  --pass <password>       New password for vyos (prompted securely if omitted)
+  --pass <password>       New password for vyos (synonym for --vyos-pass)
+  --vyos-pass <password>  New password for vyos operator account
+  --root-pass <password>  New password for Linux superuser root account
   --ssh-key '<key>'       SSH public key string (e.g. 'AAAAC3NzaC1...')
   --commit-timeout <min>  Rollback timer for commit-confirm (default: 5)
   --no-confirm            Bypass commit-confirm rollback (Instant commit; DANGEROUS)
@@ -117,6 +126,14 @@ while [[ $# -gt 0 ]]; do
             MODE="harden"
             shift
             ;;
+        --restore-nat)
+            MODE="restore-nat"
+            shift
+            ;;
+        --rotate-passwords)
+            MODE="rotate-passwords"
+            shift
+            ;;
         --console-lockdown)
             MODE="console-lockdown"
             shift
@@ -133,6 +150,17 @@ while [[ $# -gt 0 ]]; do
             TEAM="$2"
             shift 2
             ;;
+        --dnat-target)
+            DNAT_TARGET="$2"
+            if [ "$DNAT_TARGET" != "private" ] && [ "$DNAT_TARGET" != "public" ]; then
+                die "Invalid --dnat-target '$DNAT_TARGET'. Must be 'private' or 'public'."
+            fi
+            shift 2
+            ;;
+        --enable-outbound-pat)
+            ENABLE_OUTBOUND_PAT=true
+            shift
+            ;;
         --mgmt-subnet)
             MGMT_SUBNET="$2"
             shift 2
@@ -143,6 +171,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --pass)
             ADMIN_PASS="$2"
+            shift 2
+            ;;
+        --vyos-pass)
+            ADMIN_PASS="$2"
+            shift 2
+            ;;
+        --root-pass)
+            ROOT_PASS="$2"
             shift 2
             ;;
         --ssh-key)
@@ -169,7 +205,7 @@ while [[ $# -gt 0 ]]; do
             usage 0
             ;;
         *)
-            SAFE_ARGV=$(printf '%s ' "$*" | sed -E 's/--pass +[^ ]+/--pass ******/g')
+            SAFE_ARGV=$(printf '%s ' "$*" | sed -E 's/--(pass|vyos-pass|root-pass) +[^ ]+/--\1 ******/g')
             echo "[-] Unknown parameter: '$1' (Full ARGV: '$SAFE_ARGV')" >&2
             echo "[$(date)] ERROR Unknown parameter: '$1' ARGS: '$SAFE_ARGV'" >> "${LOG_DIR}/debug_run.log"
             usage 1
@@ -182,7 +218,7 @@ if [ -z "$MODE" ]; then
     if [ -t 0 ]; then
         MODE="interactive"
     else
-        SAFE_ARGV=$(printf '%s ' "$*" | sed -E 's/--pass +[^ ]+/--pass ******/g')
+        SAFE_ARGV=$(printf '%s ' "$*" | sed -E 's/--(pass|vyos-pass|root-pass) +[^ ]+/--\1 ******/g')
         echo "[-] Error: No operation mode specified and non-interactive input detected. (ARGC=$#, ARGS='$SAFE_ARGV')" >&2
         echo "[$(date)] ERROR No operation mode specified (ARGC=$#, ARGS='$SAFE_ARGV')" >> "${LOG_DIR}/debug_run.log"
         usage 1
@@ -212,22 +248,29 @@ if [ "$MODE" == "interactive" ]; then
     echo "======================================================================"
     echo "1) Forensic Audit & Baseline (Read-Only)"
     echo "2) Diff Against Last Audit Baseline"
-    echo "3) Phase 1: Hardened SSH + Password Rotation + Firewall"
-    echo "4) Phase 2: Console-Only Lockdown (Nuke SSH)"
-    echo "5) Exit"
-    read -r -p "Select an action [1-5]: " choice
+    echo "3) Phase 1: Hardened SSH + Password Rotation + Firewall + NAT"
+    echo "4) Restore CCDC DNAT Rules 10-14 & Outbound PAT"
+    echo "5) Dual Password Rotation & SSH Key Sanitization"
+    echo "6) Phase 2: Console-Only Lockdown (Nuke SSH)"
+    echo "7) Exit"
+    read -r -p "Select an action [1-7]: " choice
     case "$choice" in
         1) MODE="audit" ;;
         2) MODE="diff" ;;
         3) MODE="harden" ;;
-        4) MODE="console-lockdown" ;;
+        4) MODE="restore-nat" ;;
+        5) MODE="rotate-passwords" ;;
+        6) MODE="console-lockdown" ;;
         *) builtin exit 0 ;;
     esac
 
-    if [ "$MODE" == "harden" ]; then
+    if [ "$MODE" == "harden" ] || [ "$MODE" == "restore-nat" ]; then
         if [ -z "$TEAM" ]; then
-            read -r -p "Enter Team Number [1-20]: " TEAM
+            read -r -p "Enter Team Number [0-20] (0=practice, 1-20=competition): " TEAM
         fi
+    fi
+
+    if [ "$MODE" == "harden" ]; then
         read -r -p "Management Subnet [$MGMT_SUBNET]: " input_mgmt
         MGMT_SUBNET="${input_mgmt:-$MGMT_SUBNET}"
         read -r -s -p "Enter NEW password for '$ADMIN_USER': " input_pass
@@ -239,14 +282,37 @@ fi
 
 # ─── Auto-Derive Team Subnets ─────────────────────────────────────────────────
 if [ -n "$TEAM" ]; then
-    if ! [[ "$TEAM" =~ ^[0-9]+$ ]] || [ "$TEAM" -lt 1 ] || [ "$TEAM" -gt 20 ]; then
-        die "Invalid team number '$TEAM'. Must be between 1 and 20."
+    if ! [[ "$TEAM" =~ ^[0-9]+$ ]] || [ "$TEAM" -lt 0 ] || [ "$TEAM" -gt 20 ]; then
+        die "Invalid team number '$TEAM'. Must be between 0 (practice) and 20 (real competition)."
     fi
     OCTET=$((20 + TEAM))
     WAN_ROUTER_IP="172.31.${OCTET}.2/29"
     CORE_GATEWAY_IP="172.31.${OCTET}.1"
     PUBLIC_POOL="172.25.${OCTET}.0/24"
-    log_info "Team $TEAM Subnets: WAN Router=${WAN_ROUTER_IP}, Core Gateway=${CORE_GATEWAY_IP}, Public Pool=${PUBLIC_POOL}"
+    if [ "$TEAM" -eq 0 ]; then
+        log_info "Team 0 (Practice Environment): WAN Router=${WAN_ROUTER_IP}, Core Gateway=${CORE_GATEWAY_IP}, Public Pool=${PUBLIC_POOL}"
+    else
+        log_info "Team $TEAM Subnets: WAN Router=${WAN_ROUTER_IP}, Core Gateway=${CORE_GATEWAY_IP}, Public Pool=${PUBLIC_POOL}"
+    fi
+fi
+
+# Mandatory team validation for modes configuring network subnets
+if [ "$MODE" == "harden" ] || [ "$MODE" == "restore-nat" ]; then
+    if [ -z "$TEAM" ]; then
+        if [ -t 0 ]; then
+            read -r -p "Enter CCDC Team Number [0-20] (0=practice, 1-20=competition): " input_team
+            if ! [[ "$input_team" =~ ^[0-9]+$ ]] || [ "$input_team" -lt 0 ] || [ "$input_team" -gt 20 ]; then
+                die "Invalid team number '$input_team'. Must be between 0 (practice) and 20 (real competition)."
+            fi
+            TEAM="$input_team"
+            OCTET=$((20 + TEAM))
+            WAN_ROUTER_IP="172.31.${OCTET}.2/29"
+            CORE_GATEWAY_IP="172.31.${OCTET}.1"
+            PUBLIC_POOL="172.25.${OCTET}.0/24"
+        else
+            die "Team number is required for --${MODE}. Pass --team <0-20> (0=practice, 1-20=competition)."
+        fi
+    fi
 fi
 
 # ─── Version Information ──────────────────────────────────────────────────────
@@ -281,7 +347,7 @@ if [ "$MODE" == "diff" ]; then
         echo -e "${GREEN}[ OK ] CLEAN AUDIT: NO SYSTEM OR CONFIGURATION DRIFT DETECTED!        ${RESET}"
         echo -e "${GREEN}======================================================================${RESET}"
         echo "  Baseline Reference : $PREV_LOG"
-        echo "  Live System State  : Verified identical across all 12 audit sections."
+        echo "  Live System State  : Verified identical across all 14 audit sections."
         echo ""
         echo "  ✓ No unauthorized users in /etc/passwd or VyOS config"
         echo "  ✓ No rogue SSH keys in ~/.ssh/authorized_keys"
@@ -290,6 +356,8 @@ if [ "$MODE" == "diff" ]; then
         echo "  ✓ No rogue interfaces or VPN tunnels (WireGuard, OpenVPN)"
         echo "  ✓ No unexpected listening ports or container services"
         echo "  ✓ No SUID binaries or /etc/ld.so.preload rootkits"
+        echo "  ✓ Scored 1:1 DNAT Rules 10-14 & Outbound PAT intact"
+        echo "  ✓ Systemd services match VyOS curated whitelist"
         echo -e "${GREEN}======================================================================${RESET}"
     else
         echo -e "${RED}======================================================================${RESET}"
@@ -423,6 +491,115 @@ if [ "$MODE" == "audit" ]; then
     echo -e "\n[+] SECTION 12: Commit History & Config Revisions"
     echo "----------------------------------------------------------------------"
     run_op show system commit || echo "No commit history found."
+
+    echo -e "\n[+] SECTION 13: NAT Configuration & Rules (CCDC Baseline Audit)"
+    echo "----------------------------------------------------------------------"
+    echo "[-] Active VyOS NAT Configuration Commands:"
+    run_op show configuration commands | grep -E "^set nat" || echo "No NAT commands configured in VyOS."
+
+    echo -e "\n[-] Scored 1:1 DNAT Rules 10-14 Verification:"
+    for r in 10 11 12 13 14; do
+        if run_op show configuration commands | grep -q "nat destination rule $r "; then
+            r_desc=$(run_op show configuration commands | grep "nat destination rule $r description" | awk '{print $NF}' | tr -d "'\"")
+            r_trans=$(run_op show configuration commands | grep "nat destination rule $r translation address" | awk '{print $NF}' | tr -d "'\"")
+            r_port=$(run_op show configuration commands | grep "nat destination rule $r destination port" | awk '{print $NF}' | tr -d "'\"")
+            r_proto=$(run_op show configuration commands | grep "nat destination rule $r protocol" | awk '{print $NF}' | tr -d "'\"")
+            echo "  [OK] Rule $r (${r_desc:-unnamed}): proto=${r_proto:-any} port=${r_port:-any} -> translation=${r_trans:-none}"
+        else
+            echo "  [WARN] Scored DNAT Rule $r is NOT configured in active ruleset!"
+        fi
+    done
+
+    echo -e "\n[-] Outbound PAT (Masquerade Rule 100) Status:"
+    if run_op show configuration commands | grep -q "nat source rule 100 "; then
+        echo "  [WARN] Outbound PAT (Rule 100) is ACTIVE on eth0 (LAN masquerade enabled)."
+    else
+        echo "  [OK] Outbound PAT (Rule 100) is DISABLED (anti-reverse-shell lockdown)."
+    fi
+
+    echo -e "\n[-] Persistent Boot Configuration NAT Section (/config/config.boot):"
+    if [ -f /config/config.boot ]; then
+        grep -n -A 35 "nat {" /config/config.boot 2>/dev/null || echo "No nat block found in /config/config.boot."
+    else
+        echo "/config/config.boot not accessible."
+    fi
+
+    echo -e "\n[-] Kernel Live NAT Tables (nftables / iptables):"
+    if command -v nft >/dev/null 2>&1; then
+        nft list table ip nat 2>/dev/null || nft list table inet nat 2>/dev/null || echo "No nftables nat table active."
+    elif command -v iptables >/dev/null 2>&1; then
+        iptables -t nat -L -n -v 2>/dev/null || echo "No iptables nat table active."
+    else
+        echo "No nft or iptables command found."
+    fi
+
+    echo -e "\n[+] SECTION 14: Systemd Services vs. VyOS Curated Whitelist"
+    echo "----------------------------------------------------------------------"
+    ROUTER_WHITELIST=(
+        "vyos-router" "vyos-configd" "vyos-hostkey" "vyos-telegraf"
+        "frr" "zebra" "bgpd" "ospfd" "ospf6d" "ripd" "ripngd" "staticd"
+        "bfdd" "isisd" "fabricd" "vrrpd" "pimd" "pim6d" "eigrpd"
+        "nftables" "conntrackd" "keepalived" "lldpd"
+        "isc-dhcp-server" "dhcpd" "kea-dhcp4" "kea-dhcp6" "dhclient" "dhcpcd"
+        "pdns-recursor" "dnsmasq" "ddclient"
+        "snmpd" "chrony" "chronyd" "ntp" "ntpd" "rsyslog" "syslog"
+        "systemd-journald" "systemd-udevd" "udev" "kmod" "irqbalance"
+        "haveged" "rngd" "open-vm-tools" "vmtoolsd" "qemu-guest-agent"
+        "ssh" "sshd" "getty" "serial-getty" "autovt" "console-getty"
+    )
+
+    ROUTER_BLACKLIST=(
+        "telnet" "telnetd" "tftp" "tftpd-hpa" "rsh" "rlogin" "rexec"
+        "apache2" "nginx" "httpd" "vyos-http-api" "lighttpd"
+        "mysql" "mariadb" "postgresql" "mongod" "redis" "redis-server"
+        "cups" "cups-browsed" "avahi-daemon" "bluetooth"
+        "smbd" "nmbd" "nfs-server" "rpcbind"
+    )
+
+    echo "[-] Checking for Blacklisted Daemons on Router:"
+    blacklisted_found=0
+    for bad_svc in "${ROUTER_BLACKLIST[@]}"; do
+        if systemctl is-active --quiet "$bad_svc" 2>/dev/null; then
+            echo -e "  ${RED}[!] DANGEROUS / ROGUE SERVICE ACTIVE: ${bad_svc}${RESET}"
+            blacklisted_found=$((blacklisted_found + 1))
+        fi
+    done
+    if [ "$blacklisted_found" -eq 0 ]; then
+        echo "  [OK] No blacklisted service daemons active."
+    fi
+
+    echo -e "\n[-] Running Systemd Services Audit against Whitelist:"
+    unapproved_found=0
+    if command -v systemctl >/dev/null 2>&1; then
+        while read -r svc; do
+            [ -z "$svc" ] && continue
+            svc_name="${svc%.service}"
+            svc_base="${svc_name%%@*}"
+
+            # Check whitelist or standard systemd prefix
+            is_whitelisted=0
+            if [[ "$svc_name" =~ ^systemd- ]]; then
+                is_whitelisted=1
+            fi
+            for allowed in "${ROUTER_WHITELIST[@]}"; do
+                if [ "$svc_name" == "$allowed" ] || [ "$svc_base" == "$allowed" ]; then
+                    is_whitelisted=1
+                    break
+                fi
+            done
+
+            if [ "$is_whitelisted" -eq 0 ]; then
+                echo -e "  ${YELLOW}[?] UNLISTED / SUSPICIOUS SERVICE RUNNING: ${svc}${RESET}"
+                unapproved_found=$((unapproved_found + 1))
+            fi
+        done < <(systemctl list-units --type=service --state=running --no-pager --no-legend 2>/dev/null | awk '{print $1}')
+    fi
+
+    if [ "$unapproved_found" -eq 0 ]; then
+        echo "  [OK] All running systemd units match curated VyOS 1.4.0 whitelist."
+    else
+        echo -e "  ${YELLOW}[!] Total unlisted services flagged: ${unapproved_found}${RESET}"
+    fi
 
     echo "======================================================================"
     echo "          FORENSIC AUDIT COMPLETE"
@@ -566,12 +743,201 @@ if [ "$MODE" == "confirm" ]; then
     builtin exit 0
 fi
 
+# ─── NAT Configuration Engine (Rules 10-14 DNAT & Rule 100 Outbound PAT) ───────
+apply_nat_configuration() {
+    log_info "Configuring Scored 1:1 DNAT Rules 10-14 (Target: $DNAT_TARGET)..."
+
+    local ECOM_TARGET EMAIL_TARGET SPLUNK_TARGET AD_TARGET MSSQL_TARGET
+    if [ "$DNAT_TARGET" == "private" ]; then
+        ECOM_TARGET="172.20.240.10"
+        EMAIL_TARGET="172.20.240.15"
+        SPLUNK_TARGET="172.20.240.20"
+        AD_TARGET="172.20.240.100"
+        MSSQL_TARGET="172.20.240.120"
+    else
+        ECOM_TARGET="172.25.${OCTET}.10"
+        EMAIL_TARGET="172.25.${OCTET}.15"
+        SPLUNK_TARGET="172.25.${OCTET}.20"
+        AD_TARGET="172.25.${OCTET}.100"
+        MSSQL_TARGET="172.25.${OCTET}.120"
+    fi
+
+    # Rule 10: Ecom (.10) - HTTP :80, HTTPS :443
+    set nat destination rule 10 description 'Ecom'
+    set nat destination rule 10 inbound-interface name 'eth0'
+    set nat destination rule 10 protocol 'tcp'
+    set nat destination rule 10 destination port '80,443'
+    set nat destination rule 10 translation address "$ECOM_TARGET"
+
+    # Rule 11: Email (.15) - SMTP :25, IMAP :143, SMTPS :587, IMAPS :993
+    set nat destination rule 11 description 'Email'
+    set nat destination rule 11 inbound-interface name 'eth0'
+    set nat destination rule 11 protocol 'tcp'
+    set nat destination rule 11 destination port '25,143,587,993'
+    set nat destination rule 11 translation address "$EMAIL_TARGET"
+
+    # Rule 12: Splunk (.20) - Web :8000, Mgmt :8089, Forwarder :9997
+    set nat destination rule 12 description 'Splunk'
+    set nat destination rule 12 inbound-interface name 'eth0'
+    set nat destination rule 12 protocol 'tcp'
+    set nat destination rule 12 destination port '8000,8089,9997'
+    set nat destination rule 12 translation address "$SPLUNK_TARGET"
+
+    # Rule 13: AD (.100) - DNS :53, WinRM :5985
+    set nat destination rule 13 description 'AD'
+    set nat destination rule 13 inbound-interface name 'eth0'
+    set nat destination rule 13 protocol 'tcp_udp'
+    set nat destination rule 13 destination port '53,5985'
+    set nat destination rule 13 translation address "$AD_TARGET"
+
+    # Rule 14: MSSQL (.120) - MSSQL :1433, SMB :445, RDP :3389
+    set nat destination rule 14 description 'MSSQL'
+    set nat destination rule 14 inbound-interface name 'eth0'
+    set nat destination rule 14 protocol 'tcp'
+    set nat destination rule 14 destination port '445,1433,3389'
+    set nat destination rule 14 translation address "$MSSQL_TARGET"
+
+    # Outbound PAT (Masquerade rule 100)
+    if [ "$ENABLE_OUTBOUND_PAT" = true ]; then
+        log_warn "Outbound PAT is ENABLED! Workstations and LAN hosts will masquerade to 172.31.${OCTET}.2."
+        set nat source rule 100 description 'workstation-outbound-pat'
+        set nat source rule 100 outbound-interface name 'eth0'
+        set nat source rule 100 source address '172.16.0.0/12'
+        set nat source rule 100 translation address 'masquerade'
+    else
+        log_ok "Outbound PAT is DISABLED by default (Anti-Reverse-Shell Protection)."
+        log_info "Workstations cannot establish direct outbound internet connections unless --enable-outbound-pat is set."
+        delete nat source rule 100 2>/dev/null || true
+    fi
+}
+
+# ==============================================================================
+# MODE: RESTORE NAT BASELINE (RULES 10-14 & PAT)
+# ==============================================================================
+if [ "$MODE" == "restore-nat" ]; then
+    echo "======================================================================"
+    echo "          VyOS RESTORE NAT BASELINE (RULES 10-14 & PAT)"
+    echo "======================================================================"
+
+    if [ "$DRY_RUN" = true ]; then
+        log_ok "Dry run enabled. Exiting before configuration modifications."
+        builtin exit 0
+    fi
+
+    log_info "Entering VyOS configuration mode to restore NAT baseline..."
+    configure
+
+    apply_nat_configuration
+
+    echo "======================================================================"
+    if [ "$NO_CONFIRM" = true ]; then
+        log_warn "--no-confirm specified. Committing immediately..."
+        commit
+        save
+        vyos_exit_cfg
+        log_ok "NAT configuration committed and saved permanently."
+    else
+        log_info "Applying NAT configuration with ${COMMIT_TIMEOUT}-minute failsafe rollback..."
+        if ! printf 'y\n' | commit-confirm "$COMMIT_TIMEOUT"; then
+            vyos_exit_cfg
+            log_error "commit-confirm failed! Rollback will not be initiated."
+            builtin exit 1
+        fi
+        echo ""
+        log_ok "NAT rules applied with commit-confirm ${COMMIT_TIMEOUT}!"
+        vyos_exit_cfg
+    fi
+    builtin exit 0
+fi
+
+# ==============================================================================
+# MODE: DUAL PASSWORD ROTATION & KEY SANITIZATION
+# ==============================================================================
+if [ "$MODE" == "rotate-passwords" ]; then
+    echo "======================================================================"
+    echo "      VyOS & LINUX ROOT DUAL PASSWORD ROTATION & KEY SANITIZATION"
+    echo "======================================================================"
+
+    # Prompt interactively if missing
+    if [ -z "$ADMIN_PASS" ]; then
+        if [ -t 0 ]; then
+            read -r -s -p "Enter NEW password for '$ADMIN_USER' (VyOS operator): " input_vyos_pass
+            echo ""
+            ADMIN_PASS="$input_vyos_pass"
+        else
+            die "No password supplied for '$ADMIN_USER' (pass --vyos-pass <secret> or --pass <secret>)"
+        fi
+    fi
+    if [ -z "$ADMIN_PASS" ]; then
+        die "VyOS password cannot be empty!"
+    fi
+
+    if [ -z "$ROOT_PASS" ]; then
+        if [ -t 0 ]; then
+            read -r -s -p "Enter NEW password for Linux 'root' superuser: " input_root_pass
+            echo ""
+            ROOT_PASS="$input_root_pass"
+        else
+            die "No password supplied for 'root' (pass --root-pass <secret>)"
+        fi
+    fi
+    if [ -z "$ROOT_PASS" ]; then
+        die "Root password cannot be empty!"
+    fi
+
+    BACKUP_DIR="${DEFENDER_DIR}/quarantine/quarantine_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$BACKUP_DIR"
+
+    if [ "$DRY_RUN" = true ]; then
+        log_ok "Dry run enabled. Halting before password update."
+        builtin exit 0
+    fi
+
+    # 1. Rotate VyOS operator password via VyOS CLI
+    log_info "Step 1: Updating VyOS operator user '$ADMIN_USER' password..."
+    configure
+    set system login user "$ADMIN_USER" authentication plaintext-password "$ADMIN_PASS"
+    commit
+    save
+    vyos_exit_cfg
+    log_ok "VyOS operator account '$ADMIN_USER' updated and saved."
+
+    # 2. Rotate Linux superuser root password via chpasswd / usermod
+    log_info "Step 2: Updating Linux 'root' superuser account password..."
+    if command -v chpasswd >/dev/null 2>&1; then
+        echo "root:${ROOT_PASS}" | chpasswd
+    elif command -v usermod >/dev/null 2>&1; then
+        usermod -p "$(openssl passwd -6 "$ROOT_PASS")" root
+    else
+        die "Neither chpasswd nor usermod available to update root password."
+    fi
+    log_ok "Linux 'root' password successfully updated in /etc/shadow."
+
+    # 3. Sanitize authorized_keys for root and vyos
+    log_info "Step 3: Sanitizing authorized_keys for 'root' and '$ADMIN_USER'..."
+    for auth_file in /root/.ssh/authorized_keys "/home/${ADMIN_USER}/.ssh/authorized_keys"; do
+        if [ -f "$auth_file" ]; then
+            cp "$auth_file" "${BACKUP_DIR}/$(echo "$auth_file" | tr '/' '_').bak"
+            > "$auth_file"
+            chmod 600 "$auth_file" 2>/dev/null || true
+            log_ok "Sanitized $auth_file (backup saved to ${BACKUP_DIR})"
+        else
+            log_info "No authorized_keys found at $auth_file (clean)"
+        fi
+    done
+
+    echo "======================================================================"
+    log_ok "Dual password rotation and authorized_keys sanitization COMPLETE."
+    echo "======================================================================"
+    builtin exit 0
+fi
+
 # ==============================================================================
 # MODE: PHASE 1 HARDENING & SSH SECURING
 # ==============================================================================
 if [ "$MODE" == "harden" ]; then
     echo "======================================================================"
-    echo "        VyOS PHASE 1: HARDENED SSH & PASSWORDS & FIREWALL"
+    echo "    VyOS PHASE 1: HARDENING & INIT CONFIG (NAT & FIREWALL)"
     echo "======================================================================"
 
     if [ -z "$ADMIN_PASS" ]; then
@@ -615,6 +981,28 @@ if [ "$MODE" == "harden" ]; then
         cp /etc/ld.so.preload "$BACKUP_DIR/"
         rm -f /etc/ld.so.preload
     fi
+
+    # Rotate Linux root password if supplied and sanitize authorized_keys
+    if [ -n "$ROOT_PASS" ]; then
+        log_info "Updating Linux 'root' superuser account password..."
+        if command -v chpasswd >/dev/null 2>&1; then
+            echo "root:${ROOT_PASS}" | chpasswd
+        elif command -v usermod >/dev/null 2>&1; then
+            usermod -p "$(openssl passwd -6 "$ROOT_PASS")" root
+        fi
+        log_ok "Linux 'root' password updated."
+    fi
+
+    # Sanitize authorized_keys for root and vyos
+    log_info "Sanitizing authorized_keys for 'root' and '$ADMIN_USER'..."
+    for auth_file in /root/.ssh/authorized_keys "/home/${ADMIN_USER}/.ssh/authorized_keys"; do
+        if [ -f "$auth_file" ]; then
+            cp "$auth_file" "${BACKUP_DIR}/$(echo "$auth_file" | tr '/' '_').bak"
+            > "$auth_file"
+            chmod 600 "$auth_file" 2>/dev/null || true
+            log_ok "Sanitized $auth_file (quarantined to ${BACKUP_DIR})"
+        fi
+    done
 
     if [ "$DRY_RUN" = true ]; then
         log_ok "Dry run enabled. Exiting before configuration modifications."
@@ -688,6 +1076,10 @@ if [ "$MODE" == "harden" ]; then
     set firewall ipv4 forward filter rule 10 state established
     set firewall ipv4 forward filter rule 10 state related
 
+    # Scored 1:1 DNAT and Outbound PAT
+    log_info "Step 7: Applying Scored 1:1 DNAT Rules 10-14 & Outbound PAT..."
+    apply_nat_configuration
+
     # 3. Apply changes with commit-confirm
     echo "======================================================================"
     if [ "$NO_CONFIRM" = true ]; then
@@ -700,7 +1092,7 @@ if [ "$MODE" == "harden" ]; then
         vyos_exit_cfg
         log_ok "Configuration committed and saved permanently."
     else
-        log_info "Step 7: Applying configuration with ${COMMIT_TIMEOUT}-minute failsafe rollback..."
+        log_info "Step 8: Applying configuration with ${COMMIT_TIMEOUT}-minute failsafe rollback..."
         if ! printf 'y\n' | commit-confirm "$COMMIT_TIMEOUT"; then
             vyos_exit_cfg
             log_error "commit-confirm failed! Rollback will not be initiated."

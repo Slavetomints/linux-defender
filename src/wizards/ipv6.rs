@@ -320,6 +320,9 @@ impl Ipv6Wizard {
             }
             Step::Executing => {
                 let done = *self.exec_done.lock().unwrap();
+                if done {
+                    return WizardAction::Close;
+                }
                 match key {
                     KeyCode::Up => {
                         if self.log_scroll > 0 {
@@ -328,9 +331,6 @@ impl Ipv6Wizard {
                     }
                     KeyCode::Down => {
                         self.log_scroll += 1;
-                    }
-                    _ if done => {
-                        return WizardAction::Close;
                     }
                     _ => {}
                 }

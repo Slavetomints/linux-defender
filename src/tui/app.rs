@@ -15,12 +15,13 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
 use chrono::Local;
 
 use crate::core::{
-    BoxType, DefenderContext, Finding, Severity, detect_box_type, execute_action, strip_ansi,
+    BoxType, DefenderContext, Finding, ScanInterval, Severity, detect_box_type, execute_action,
+    strip_ansi,
 };
 use crate::score_check::{ServiceHistory, build_histories, poll_all};
 use crate::tui::logs::dashboard::LogDashboard as LogDash;
@@ -44,17 +45,6 @@ pub(crate) enum RouterFocus {
     Operations,
     /// Right pane: Output log
     Log,
-}
-
-/// How often a module runs in auto-scan mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ScanInterval {
-    /// Re-runs every 30 seconds — ephemeral state an attacker can change in real time.
-    Continuous,
-    /// Re-runs every 5 minutes — filesystem changes that take time to appear.
-    Frequent,
-    /// Manual only — expensive filesystem walks or rarely-changing config.
-    OnDemand,
 }
 
 /// Registry of monitoring modules available from the Monitor tab: (id, display label).
@@ -102,249 +92,7 @@ const RESTORE_SERVICES: &[(&str, &str)] = &[
 /// Modules that change the system (quarantine files, rewrite crontabs or rc
 /// files, stop units) are `OnDemand`: they only run when the operator starts a
 /// scan, never from the background auto-scan. See `REMEDIATING_MODULES`.
-const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
-    // ── Anti-persistence ─────────────────────────────────────────────────
-    (
-        "ssh_keys",
-        "SSH authorized_keys",
-        true,
-        ScanInterval::OnDemand,
-    ),
-    ("cron", "Cron jobs", true, ScanInterval::OnDemand),
-    ("at_jobs", "AT job queue", true, ScanInterval::OnDemand),
-    ("users", "User accounts", true, ScanInterval::OnDemand),
-    (
-        "webshells",
-        "Web shells (PHP/ASP/ASPX/Python/Ruby)",
-        true,
-        ScanInterval::OnDemand,
-    ),
-    ("suid", "SUID binaries", true, ScanInterval::OnDemand),
-    (
-        "capabilities",
-        "Binary capabilities",
-        true,
-        ScanInterval::OnDemand,
-    ),
-    ("systemd", "Systemd services", true, ScanInterval::OnDemand),
-    (
-        "kernel_modules",
-        "Kernel modules",
-        true,
-        ScanInterval::OnDemand,
-    ),
-    (
-        "ld_preload",
-        "LD_PRELOAD hijacking",
-        true,
-        ScanInterval::OnDemand,
-    ),
-    (
-        "immutable",
-        "Immutable file flags",
-        true,
-        ScanInterval::OnDemand,
-    ),
-    (
-        "startup_scripts",
-        "Startup scripts + skel",
-        true,
-        ScanInterval::OnDemand,
-    ),
-    (
-        "rc_local",
-        "rc.local / rc.d scripts",
-        true,
-        ScanInterval::OnDemand,
-    ),
-    (
-        "prompt_command",
-        "PROMPT_COMMAND backdoors",
-        true,
-        ScanInterval::Frequent,
-    ),
-    ("pam", "PAM configuration", true, ScanInterval::OnDemand),
-    ("grub", "GRUB bootloader", true, ScanInterval::OnDemand),
-    (
-        "initramfs",
-        "initramfs integrity",
-        true,
-        ScanInterval::OnDemand,
-    ),
-    (
-        "logrotate",
-        "logrotate scripts",
-        true,
-        ScanInterval::OnDemand,
-    ),
-    ("udev", "udev rules", true, ScanInterval::OnDemand),
-    (
-        "xdg_autostart",
-        "XDG autostart entries",
-        true,
-        ScanInterval::OnDemand,
-    ),
-    (
-        "ssh_config",
-        "sshd_config audit",
-        true,
-        ScanInterval::Frequent,
-    ),
-    ("sudoers", "sudoers audit", true, ScanInterval::Frequent),
-    (
-        "cron_system",
-        "System cron dirs",
-        true,
-        ScanInterval::OnDemand,
-    ),
-    (
-        "systemd_timers",
-        "Systemd timers",
-        true,
-        ScanInterval::OnDemand,
-    ),
-    (
-        "shell_aliases",
-        "Shell alias backdoors",
-        true,
-        ScanInterval::OnDemand,
-    ),
-    ("polkit", "polkit rules audit", true, ScanInterval::OnDemand),
-    (
-        "mail_intercept",
-        "Mail intercept (postfix)",
-        true,
-        ScanInterval::OnDemand,
-    ),
-    // ── Monitoring ─────────────────────────────────────────────────────────
-    (
-        "hidden_elf",
-        "Hidden ELF binaries",
-        false,
-        ScanInterval::Frequent,
-    ),
-    (
-        "deleted_binaries",
-        "Deleted running binaries",
-        false,
-        ScanInterval::Continuous,
-    ),
-    (
-        "suspicious_services",
-        "Suspicious service units",
-        false,
-        ScanInterval::OnDemand,
-    ),
-    (
-        "auth_log",
-        "Auth log analysis",
-        false,
-        ScanInterval::Frequent,
-    ),
-    (
-        "process_tree",
-        "Process tree anomalies",
-        false,
-        ScanInterval::Continuous,
-    ),
-    (
-        "recently_modified",
-        "Recently-modified binaries",
-        false,
-        ScanInterval::Frequent,
-    ),
-    (
-        "world_writable",
-        "World-writable paths",
-        false,
-        ScanInterval::Frequent,
-    ),
-    (
-        "outbound_connections",
-        "Outbound svc-acct connections",
-        false,
-        ScanInterval::Continuous,
-    ),
-    ("fail2ban", "Fail2ban status", false, ScanInterval::Frequent),
-    (
-        "ai_artifacts",
-        "AI-generated script tells",
-        false,
-        ScanInterval::Frequent,
-    ),
-    (
-        "elf_disguise",
-        "ELF/script disguise check",
-        false,
-        ScanInterval::Frequent,
-    ),
-    (
-        "perm_anomalies",
-        "Permission/ownership anomalies",
-        false,
-        ScanInterval::OnDemand,
-    ),
-    (
-        "attacker_tools",
-        "Attacker tool detection",
-        false,
-        ScanInterval::Frequent,
-    ),
-    (
-        "c2_detection",
-        "C2/implant detection",
-        false,
-        ScanInterval::Continuous,
-    ),
-    (
-        "rootkit_cross_check",
-        "Rootkit PID/port cross-check",
-        false,
-        ScanInterval::Continuous,
-    ),
-    (
-        "proc_maps",
-        "RWX anonymous memory maps",
-        false,
-        ScanInterval::Frequent,
-    ),
-    (
-        "binary_integrity",
-        "Binary integrity baseline",
-        false,
-        ScanInterval::OnDemand,
-    ),
-    (
-        "git_hooks",
-        "Malicious git hooks",
-        false,
-        ScanInterval::OnDemand,
-    ),
-    (
-        "webserver_config",
-        "Webserver config audit",
-        false,
-        ScanInterval::Frequent,
-    ),
-    (
-        "apt_sources",
-        "APT source integrity",
-        false,
-        ScanInterval::Frequent,
-    ),
-    (
-        "bind_mounts",
-        "Bind/overlay mount detection",
-        false,
-        ScanInterval::Continuous,
-    ),
-    (
-        "malicious_binaries",
-        "Malicious/modified binaries",
-        false,
-        ScanInterval::OnDemand,
-    ),
-];
+pub const SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = crate::core::STANDARD_SCAN_MODULES;
 
 /// Hardening steps with their IDs and display labels.
 const HARDENING_STEPS: &[(&str, &str)] = &[
@@ -745,7 +493,7 @@ impl RouterConfigDialog {
                 [String::new(), "no".into(), String::new(), String::new()]
             }
             RouterDialogStep::RestoreNat => {
-                [team_str, "private".into(), "no".into(), String::new()]
+                [team_str, "private".into(), "baseline".into(), "no".into()]
             }
             RouterDialogStep::RotatePasswords => {
                 [String::new(), String::new(), "yes".into(), String::new()]
@@ -763,7 +511,7 @@ impl RouterConfigDialog {
         match self.step {
             RouterDialogStep::Harden => 4,
             RouterDialogStep::ConsoleLockdown => 2,
-            RouterDialogStep::RestoreNat => 3,
+            RouterDialogStep::RestoreNat => 4,
             RouterDialogStep::RotatePasswords => 3,
         }
     }
@@ -786,7 +534,8 @@ impl RouterConfigDialog {
             RouterDialogStep::RestoreNat => match idx {
                 0 => "CCDC Team Number [0-20]",
                 1 => "DNAT Target [private / public]",
-                2 => "Enable Outbound PAT? [yes / no]",
+                2 => "Restore Mode [baseline / detected / backup]",
+                3 => "Enable Outbound PAT? [yes / no]",
                 _ => "",
             },
             RouterDialogStep::RotatePasswords => match idx {
@@ -846,13 +595,19 @@ impl RouterConfigDialog {
                 } else {
                     Some(self.fields[1].trim().to_string())
                 };
-                let enable_outbound_pat = self.fields[2].trim().eq_ignore_ascii_case("yes");
+                let restore_mode = if self.fields[2].trim().is_empty() {
+                    Some("baseline".to_string())
+                } else {
+                    Some(self.fields[2].trim().to_string())
+                };
+                let enable_outbound_pat = self.fields[3].trim().eq_ignore_ascii_case("yes");
                 (
                     "router_nat",
                     crate::router::CliArgs {
                         restore_nat: true,
                         team,
                         dnat_target,
+                        restore_mode,
                         enable_outbound_pat,
                         ..Default::default()
                     },
@@ -915,6 +670,8 @@ pub struct App {
     nftbuild_result_rx: Receiver<Result<String, String>>,
     /// Flat cursor in the Tools tab (binaries first, then wizards).
     pub tools_cursor: usize,
+    /// Vertical scroll offset for active nftables configuration in the Tools tab.
+    pub tools_nft_scroll: usize,
     /// Currently open TUI wizard overlay, if any.
     pub active_wizard: Option<crate::wizards::ActiveWizard>,
     /// Currently logged-in sessions, polled every 5s.
@@ -1060,7 +817,7 @@ impl App {
         let (_download_result_tx_placeholder, download_result_rx) = mpsc::channel::<String>();
         let (_nftbuild_result_tx_placeholder, nftbuild_result_rx) =
             mpsc::channel::<Result<String, String>>();
-        let scan_selected = vec![true; SCAN_MODULES.len()];
+        let scan_selected = vec![true; box_type.scan_modules().len()];
         let authorized_users = vec!["root".to_string()];
         let sessions = poll_sessions(&authorized_users);
         Self {
@@ -1090,6 +847,7 @@ impl App {
             download_result_rx,
             nftbuild_result_rx,
             tools_cursor: 0,
+            tools_nft_scroll: 0,
             active_wizard: None,
             sessions,
             auth_events: poll_auth_events(),
@@ -1364,7 +1122,8 @@ impl App {
 
     /// Spawn background threads for any auto-scan module that is now due.
     fn tick_auto_scan(&mut self) {
-        for (id, _, is_ap, interval) in SCAN_MODULES {
+        let box_type = self.box_type;
+        for (id, _, is_ap, interval) in self.box_type.scan_modules() {
             let threshold = match interval {
                 ScanInterval::Continuous => Duration::from_secs(30),
                 ScanInterval::Frequent => Duration::from_secs(300),
@@ -1399,7 +1158,7 @@ impl App {
                 let (progress_sink_tx, progress_sink_rx) = mpsc::channel::<String>();
                 std::thread::spawn(move || while progress_sink_rx.recv().is_ok() {});
                 ctx.progress_tx = Some(progress_sink_tx);
-                run_scan_module(id_str, is_ap, &ctx);
+                run_scan_module(id_str, is_ap, &ctx, box_type);
                 let _ = done_tx.send(id_str);
             });
         }
@@ -1411,10 +1170,12 @@ impl App {
             return;
         }
 
-        let selected: Vec<(&'static str, bool)> = SCAN_MODULES
+        let selected: Vec<(&'static str, bool)> = self
+            .box_type
+            .scan_modules()
             .iter()
             .enumerate()
-            .filter(|(i, _)| self.scan_selected[*i])
+            .filter(|(i, _)| self.scan_selected.get(*i).copied().unwrap_or(false))
             .map(|(_, (id, _, is_ap, _))| (*id, *is_ap))
             .collect();
 
@@ -1430,6 +1191,7 @@ impl App {
 
         let finding_tx = self.finding_tx.clone();
         let progress_tx = self.scan_progress_tx.clone();
+        let box_type = self.box_type;
 
         std::thread::spawn(move || {
             let report = crate::core::log_path("scan.log");
@@ -1441,7 +1203,7 @@ impl App {
 
             for (id, is_ap) in selected {
                 let _ = progress_tx.send(id.to_string());
-                run_scan_module(id, is_ap, &ctx);
+                run_scan_module(id, is_ap, &ctx, box_type);
             }
             let _ = progress_tx.send(String::new()); // signal done
         });
@@ -1896,12 +1658,19 @@ const REMEDIATING_MODULES: &[&str] = &[
 /// one panics, the worker must still reach its "done" signal, otherwise the
 /// scan stays marked as running forever and an auto-scan module never runs
 /// again. The crash is surfaced as a finding instead.
-fn run_scan_module(id: &'static str, is_anti_persistence: bool, ctx: &DefenderContext) {
+fn run_scan_module(
+    id: &'static str,
+    is_anti_persistence: bool,
+    ctx: &DefenderContext,
+    box_type: BoxType,
+) {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if is_anti_persistence {
-            crate::anti_persistence::run_module(id, ctx)
+        if box_type == BoxType::Router {
+            crate::router::scan::run_module(id, ctx);
+        } else if is_anti_persistence {
+            let _ = crate::anti_persistence::run_module(id, ctx);
         } else {
-            crate::monitoring::run_module(id, ctx)
+            let _ = crate::monitoring::run_module(id, ctx);
         }
     }));
     if outcome.is_err() {
@@ -2170,10 +1939,11 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                     }
                     Tab::Scan => match app.scan_focus {
                         ScanFocus::Modules => {
+                            let len = app.box_type.scan_modules().len();
                             app.scan_cursor = app
                                 .scan_cursor
                                 .checked_sub(1)
-                                .unwrap_or(SCAN_MODULES.len() - 1);
+                                .unwrap_or(len.saturating_sub(1));
                         }
                         ScanFocus::Findings => {
                             let n = app.display_findings().len();
@@ -2242,7 +2012,10 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                     }
                     Tab::Scan => match app.scan_focus {
                         ScanFocus::Modules => {
-                            app.scan_cursor = (app.scan_cursor + 1) % SCAN_MODULES.len();
+                            let len = app.box_type.scan_modules().len();
+                            if len > 0 {
+                                app.scan_cursor = (app.scan_cursor + 1) % len;
+                            }
                         }
                         ScanFocus::Findings => {
                             let n = app.display_findings().len();
@@ -2556,6 +2329,13 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                         let max = app.restore_log.len().saturating_sub(1);
                         app.restore_log_scroll = (app.restore_log_scroll + 5).min(max);
                     }
+                    Tab::Router => {
+                        let max = app.router_log.len().saturating_sub(1);
+                        app.router_log_scroll = (app.router_log_scroll + 5).min(max);
+                    }
+                    Tab::Tools => {
+                        app.tools_nft_scroll = app.tools_nft_scroll.saturating_sub(5);
+                    }
                     _ => {}
                 },
                 KeyCode::PageDown | KeyCode::Char(']') => match app.tab {
@@ -2567,6 +2347,12 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                     }
                     Tab::ServiceRestore => {
                         app.restore_log_scroll = app.restore_log_scroll.saturating_sub(5);
+                    }
+                    Tab::Router => {
+                        app.router_log_scroll = app.router_log_scroll.saturating_sub(5);
+                    }
+                    Tab::Tools => {
+                        app.tools_nft_scroll = app.tools_nft_scroll.saturating_add(5);
                     }
                     _ => {}
                 },
@@ -2675,6 +2461,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
                 selected,
                 app.download_status.as_deref(),
                 app.nft_config.as_deref(),
+                app.tools_nft_scroll,
             );
         }
         Tab::Backups => {
@@ -3037,7 +2824,9 @@ fn render_scan(f: &mut ratatui::Frame, area: Rect, app: &App) {
         " Scan Modules ".to_string()
     };
 
-    let items: Vec<ListItem> = SCAN_MODULES
+    let items: Vec<ListItem> = app
+        .box_type
+        .scan_modules()
         .iter()
         .enumerate()
         .map(|(i, (id, label, _, interval))| {
@@ -3117,7 +2906,8 @@ fn render_scan(f: &mut ratatui::Frame, area: Rect, app: &App) {
         f.render_widget(
             Paragraph::new(msg)
                 .block(findings_block)
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(Color::DarkGray))
+                .wrap(Wrap { trim: false }),
             cols[1],
         );
     } else {
@@ -3356,7 +3146,7 @@ fn render_finding_detail(
         },
     ]));
 
-    f.render_widget(Paragraph::new(lines), inner);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// Very simple word-wrapper: splits on spaces, respects `width`.
@@ -3393,12 +3183,12 @@ fn render_logs(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    let cols_per_row = if area.width > 180 {
-        3
-    } else if area.width > 120 {
-        2
-    } else {
+    let cols_per_row = if app.box_type == BoxType::Router || area.width <= 140 {
         1
+    } else if area.width > 180 {
+        3
+    } else {
+        2
     };
 
     let rows_needed = pane_count.div_ceil(cols_per_row);
@@ -3473,7 +3263,7 @@ fn render_logs(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 .map(|ll| Line::from(Span::styled(ll.text.clone(), ll.style)))
                 .collect();
 
-            f.render_widget(Paragraph::new(lines), inner);
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
         }
     }
 }
@@ -3584,7 +3374,7 @@ fn render_hardening(f: &mut ratatui::Frame, area: Rect, app: &App) {
                 Line::from(Span::styled(s.clone(), style))
             })
             .collect();
-        f.render_widget(Paragraph::new(lines), inner);
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 }
 
@@ -3669,7 +3459,8 @@ fn render_monitor(f: &mut ratatui::Frame, area: Rect, app: &App) {
         f.render_widget(
             Paragraph::new(msg)
                 .block(log_block)
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(Color::DarkGray))
+                .wrap(Wrap { trim: false }),
             cols[1],
         );
     } else {
@@ -3718,7 +3509,7 @@ fn render_monitor(f: &mut ratatui::Frame, area: Rect, app: &App) {
             })
             .collect();
 
-        f.render_widget(Paragraph::new(lines), inner);
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 }
 
@@ -3793,7 +3584,8 @@ fn render_backups(f: &mut ratatui::Frame, area: Rect, app: &App) {
         f.render_widget(
             Paragraph::new(msg)
                 .block(log_block)
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(Color::DarkGray))
+                .wrap(Wrap { trim: false }),
             cols[1],
         );
     } else {
@@ -3821,7 +3613,7 @@ fn render_backups(f: &mut ratatui::Frame, area: Rect, app: &App) {
             })
             .collect();
 
-        f.render_widget(Paragraph::new(lines), inner);
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 }
 
@@ -3894,7 +3686,8 @@ fn render_service_restore(f: &mut ratatui::Frame, area: Rect, app: &App) {
         f.render_widget(
             Paragraph::new(msg)
                 .block(log_block)
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(Color::DarkGray))
+                .wrap(Wrap { trim: false }),
             cols[1],
         );
     } else {
@@ -3922,7 +3715,7 @@ fn render_service_restore(f: &mut ratatui::Frame, area: Rect, app: &App) {
             })
             .collect();
 
-        f.render_widget(Paragraph::new(lines), inner);
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 }
 
@@ -3963,7 +3756,7 @@ fn render_user_input_modal(f: &mut ratatui::Frame, area: Rect, buf: &str) {
             Style::default().fg(Color::DarkGray),
         )),
     ];
-    f.render_widget(Paragraph::new(lines), inner);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// Run an interactive selection loop to pick the competition box type.
@@ -4393,9 +4186,14 @@ fn render_router_confirm_modal(f: &mut ratatui::Frame, area: Rect, pending: &Rou
 
 /// Render the Router tab: operations list on the left, output log on the right.
 fn render_router(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let ratio = if area.width <= 130 {
+        [Constraint::Percentage(32), Constraint::Percentage(68)]
+    } else {
+        [Constraint::Percentage(38), Constraint::Percentage(62)]
+    };
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+        .constraints(ratio)
         .split(area);
 
     let (list_title, list_border) = if app.router_running {
@@ -4507,7 +4305,8 @@ fn render_router(f: &mut ratatui::Frame, area: Rect, app: &App) {
         f.render_widget(
             Paragraph::new(msg)
                 .block(log_block)
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(Color::DarkGray))
+                .wrap(Wrap { trim: false }),
             cols[1],
         );
     } else {
@@ -4539,7 +4338,7 @@ fn render_router(f: &mut ratatui::Frame, area: Rect, app: &App) {
             })
             .collect();
 
-        f.render_widget(Paragraph::new(lines), inner);
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 }
 

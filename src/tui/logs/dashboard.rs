@@ -167,7 +167,40 @@ fn pane_configs(box_type: BoxType) -> Vec<(&'static str, PaneSource)> {
                 },
             ),
         ],
-        BoxType::General | BoxType::Router => vec![
+        BoxType::Router => vec![
+            (
+                "auth",
+                PaneSource {
+                    paths: vec![
+                        "/var/log/auth.log".into(),
+                        "/var/log/secure".into(),
+                        "/var/log/messages".into(),
+                    ],
+                    filters: vec![],
+                },
+            ),
+            (
+                "syslog",
+                PaneSource {
+                    paths: vec![
+                        "/var/log/messages".into(),
+                        "/var/log/syslog".into(),
+                    ],
+                    filters: vec![],
+                },
+            ),
+            (
+                "journal",
+                PaneSource {
+                    paths: vec![
+                        "/var/log/messages".into(),
+                        "/var/log/syslog".into(),
+                    ],
+                    filters: vec![],
+                },
+            ),
+        ],
+        BoxType::General => vec![
             (
                 "auth",
                 PaneSource {

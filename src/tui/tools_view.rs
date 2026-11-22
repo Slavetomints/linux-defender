@@ -48,6 +48,7 @@ pub fn render(
     selected: SelectedTool,
     download_status: Option<&str>,
     nft_config: Option<&str>,
+    nft_scroll: usize,
 ) {
     // When a firewall config exists, split horizontally: tool list on left, config on right.
     let (list_area, config_area) = if nft_config.is_some() {
@@ -69,11 +70,11 @@ pub fn render(
     render_help(f, rows[1], selected);
 
     if let (Some(cfg_area), Some(cfg)) = (config_area, nft_config) {
-        render_nft_config(f, cfg_area, cfg);
+        render_nft_config(f, cfg_area, cfg, nft_scroll);
     }
 }
 
-/// Render the list of downloadable tools with download-status annotation.
+/// Render the list of downloadable tools with download-status annotation and stateful scrolling.
 fn render_tool_list(
     f: &mut Frame,
     area: Rect,
@@ -81,6 +82,10 @@ fn render_tool_list(
     download_status: Option<&str>,
 ) {
     let mut items: Vec<ListItem> = Vec::new();
+    let selected_flat_idx = match selected {
+        SelectedTool::Binary(idx) => 1 + idx,
+        SelectedTool::Wizard(idx) => 2 + ALL_TOOLS.len() + idx,
+    };
 
     // ── Binary tools ──────────────────────────────────────────────────────────
     items.push(ListItem::new(Line::from(Span::styled(
@@ -188,12 +193,24 @@ fn render_tool_list(
         items.push(maybe_highlight(ListItem::new(line), is_sel));
     }
 
+    let visible_height = area.height.saturating_sub(2) as usize;
+    let display_items: Vec<ListItem> = if items.len() > visible_height && visible_height > 0 {
+        let start = if selected_flat_idx >= visible_height {
+            (selected_flat_idx + 1).saturating_sub(visible_height)
+        } else {
+            0
+        };
+        items.into_iter().skip(start).take(visible_height).collect()
+    } else {
+        items
+    };
+
     let block = Block::default()
         .title(" Tools ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Blue));
 
-    f.render_widget(List::new(items).block(block), area);
+    f.render_widget(List::new(display_items).block(block), area);
 }
 
 /// Apply a highlight background to `item` if `selected` is true.
@@ -258,8 +275,8 @@ fn render_help(f: &mut Frame, area: Rect, selected: SelectedTool) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-/// Render the applied nftables ruleset in the right pane.
-fn render_nft_config(f: &mut Frame, area: Rect, config: &str) {
+/// Render the applied nftables ruleset in the right pane with scroll support.
+fn render_nft_config(f: &mut Frame, area: Rect, config: &str, scroll: usize) {
     let lines: Vec<Line> = config
         .lines()
         .map(|l| {
@@ -279,8 +296,9 @@ fn render_nft_config(f: &mut Frame, area: Rect, config: &str) {
         .collect();
 
     let block = Block::default()
-        .title(" Firewall Ruleset (active) ")
+        .title(" Firewall Ruleset (active) — [PgUp/PgDn] to scroll ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green));
-    f.render_widget(Paragraph::new(lines).block(block), area);
+    let p = Paragraph::new(lines).block(block).scroll((scroll as u16, 0));
+    f.render_widget(p, area);
 }

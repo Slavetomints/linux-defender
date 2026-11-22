@@ -6,7 +6,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 
 use crate::core::{BoxType, Finding, Severity};
 use crate::score_check::ServiceHistory;
@@ -69,15 +69,77 @@ pub fn render(
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
         .split(cols[2]);
 
-    render_services(f, left_rows[0], box_type, services);
+    render_services(f, left_rows[0], box_type, services, findings);
     render_sessions(f, left_rows[1], sessions, authorized_users);
     render_findings(f, cols[1], box_type, findings);
-    render_sysinfo(f, right_rows[0]);
+    render_sysinfo(f, right_rows[0], box_type);
     render_auth_events(f, right_rows[1], auth_events);
 
     if let (Some(area), Some(config)) = (firewall_area, nft_config) {
         render_firewall(f, area, config);
     }
+}
+
+/// Status of a router subsystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouterSubsystemStatus {
+    /// Subsystem is fully active and compliant with baseline.
+    Valid,
+    /// Subsystem has missing rules or drifted configuration.
+    Invalid,
+    /// Initial audit scan has not yet been executed.
+    PendingScan,
+}
+
+/// Inspect findings for router NAT status.
+pub fn get_router_nat_status(findings: &[Finding]) -> (RouterSubsystemStatus, String) {
+    let nat_findings: Vec<&Finding> = findings.iter().filter(|f| f.module == "router_nat").collect();
+    if nat_findings.is_empty() {
+        (RouterSubsystemStatus::PendingScan, "Pending scan — run [4]".into())
+    } else if let Some(bad) = nat_findings.iter().find(|f| f.severity >= Severity::High && !f.resolved) {
+        (RouterSubsystemStatus::Invalid, format!("Invalid: {}", bad.summary))
+    } else {
+        (RouterSubsystemStatus::Valid, "Configured & Valid (Rules 10-14 active)".into())
+    }
+}
+
+/// Inspect findings for router routing routes status.
+pub fn get_router_routes_status(findings: &[Finding]) -> (RouterSubsystemStatus, String) {
+    let route_findings: Vec<&Finding> = findings.iter().filter(|f| f.module == "router_interfaces").collect();
+    if route_findings.is_empty() {
+        (RouterSubsystemStatus::PendingScan, "Pending scan — run [4]".into())
+    } else if let Some(bad) = route_findings.iter().find(|f| f.severity >= Severity::High && !f.resolved) {
+        (RouterSubsystemStatus::Invalid, format!("Invalid: {}", bad.summary))
+    } else {
+        (RouterSubsystemStatus::Valid, "Configured & Valid (Transit routes OK)".into())
+    }
+}
+
+/// Query the dedicated router backup service for the latest backup timestamp.
+pub fn get_last_router_backup_timestamp() -> Option<String> {
+    let mut backups: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/etc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("ccdc-b@ckup-") {
+                let path = entry.path();
+                if path.join("_config_config.boot.bak").exists()
+                    || path.join("H@shes.txt").exists()
+                {
+                    let ts = name.strip_prefix("ccdc-b@ckup-").unwrap_or(&name);
+                    backups.push(ts.to_string());
+                }
+            }
+        }
+    }
+    backups.sort();
+    backups.last().map(|ts| {
+        if ts.len() >= 15 && ts.contains('T') {
+            format!("{}-{}-{} {}:{}:{} UTC", &ts[0..4], &ts[4..6], &ts[6..8], &ts[9..11], &ts[11..13], &ts[13..15])
+        } else {
+            ts.clone()
+        }
+    })
 }
 
 /// Render the service health list panel.
@@ -86,8 +148,9 @@ fn render_services(
     area: ratatui::layout::Rect,
     box_type: BoxType,
     services: &[ServiceHistory],
+    findings: &[Finding],
 ) {
-    let items: Vec<ListItem> = services
+    let mut items: Vec<ListItem> = services
         .iter()
         .map(|h| {
             let up = h.is_up();
@@ -121,6 +184,43 @@ fn render_services(
             ListItem::new(line)
         })
         .collect();
+
+    if box_type == BoxType::Router {
+        let (nat_st, nat_desc) = get_router_nat_status(findings);
+        let (nat_sym, nat_col) = match nat_st {
+            RouterSubsystemStatus::Valid => ("●", Color::Green),
+            RouterSubsystemStatus::Invalid => ("✖", Color::Red),
+            RouterSubsystemStatus::PendingScan => ("○", Color::Yellow),
+        };
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(nat_sym, Style::default().fg(nat_col)),
+            Span::styled(" NAT Rules     ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {}", nat_desc), Style::default().fg(nat_col)),
+        ])));
+
+        let (rt_st, rt_desc) = get_router_routes_status(findings);
+        let (rt_sym, rt_col) = match rt_st {
+            RouterSubsystemStatus::Valid => ("●", Color::Green),
+            RouterSubsystemStatus::Invalid => ("✖", Color::Red),
+            RouterSubsystemStatus::PendingScan => ("○", Color::Yellow),
+        };
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(rt_sym, Style::default().fg(rt_col)),
+            Span::styled(" Routing       ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {}", rt_desc), Style::default().fg(rt_col)),
+        ])));
+
+        let last_backup = get_last_router_backup_timestamp();
+        let (bk_sym, bk_col, bk_desc) = match last_backup {
+            Some(ref ts) => ("●", Color::Green, ts.as_str()),
+            None => ("○", Color::Yellow, "None taken — run [5] Backups"),
+        };
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(bk_sym, Style::default().fg(bk_col)),
+            Span::styled(" Last Backup   ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {}", bk_desc), Style::default().fg(bk_col)),
+        ])));
+    }
 
     let title = format!(" Scored Services — {} ", box_type.label());
     let block = Block::default()
@@ -276,7 +376,8 @@ fn render_findings(
         let prompt = format!("No findings yet — run a scan with [{scan_digit}]");
         let p = Paragraph::new(prompt)
             .block(block)
-            .style(Style::default().fg(Color::DarkGray));
+            .style(Style::default().fg(Color::DarkGray))
+            .wrap(Wrap { trim: false });
         f.render_widget(p, area);
     } else {
         let list = List::new(items).block(block);
@@ -284,8 +385,8 @@ fn render_findings(
     }
 }
 
-/// Render the system information panel (hostname, uptime, kernel).
-fn render_sysinfo(f: &mut Frame, area: ratatui::layout::Rect) {
+/// Render the system information panel (hostname, uptime, kernel, router backup).
+fn render_sysinfo(f: &mut Frame, area: ratatui::layout::Rect, box_type: BoxType) {
     let hostname = std::fs::read_to_string("/etc/hostname")
         .unwrap_or_else(|_| "unknown".into())
         .trim()
@@ -310,7 +411,7 @@ fn render_sysinfo(f: &mut Frame, area: ratatui::layout::Rect) {
         .collect::<Vec<_>>()
         .join("  ");
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::styled("host  ", Style::default().fg(Color::DarkGray)),
             Span::raw(&hostname),
@@ -325,11 +426,20 @@ fn render_sysinfo(f: &mut Frame, area: ratatui::layout::Rect) {
         ]),
     ];
 
+    if box_type == BoxType::Router {
+        let last_backup = get_last_router_backup_timestamp()
+            .unwrap_or_else(|| "None taken".into());
+        lines.push(Line::from(vec![
+            Span::styled("backup", Style::default().fg(Color::DarkGray)),
+            Span::raw(format!(" {}", last_backup)),
+        ]));
+    }
+
     let block = Block::default()
         .title(" System ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Blue));
-    let p = Paragraph::new(lines).block(block);
+    let p = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
     f.render_widget(p, area);
 }
 
@@ -420,7 +530,7 @@ fn render_firewall(f: &mut Frame, area: ratatui::layout::Rect, config: &str) {
         )));
     }
 
-    f.render_widget(Paragraph::new(display), inner);
+    f.render_widget(Paragraph::new(display).wrap(Wrap { trim: false }), inner);
 }
 
 /// Read currently logged-in sessions from `who`.

@@ -56,6 +56,8 @@ DRY_RUN=false
 STDOUT_ONLY=false
 MODE=""
 DIFF_LOG=""
+RESTORE_MODE="baseline"
+CONFIG_SOURCE=""
 
 run_op() {
     if [ -x /opt/vyatta/bin/vyatta-op-cmd-wrapper ]; then
@@ -85,6 +87,8 @@ MODES:
 OPTIONS:
   --team <0-20>           CCDC Team number (0=practice 172.31.20.2/29, 1-20=competition 172.31.{20+T}.2/29)
   --dnat-target <tgt>     DNAT destination target: 'private' (172.20.240.x) or 'public' (172.25.x.x) [default: private]
+  --restore-mode <mode>   Restore mode for --restore-nat: 'baseline', 'detected', or 'backup' [default: baseline]
+  --config-source <path>  Path to detected or backup config file for restore
   --enable-outbound-pat   Enable Outbound PAT masquerade for workstations (default: false, reverse-shell defense)
   --mgmt-subnet <cidr>    Trusted management subnet (default: 172.17.0.0/24)
   --user <username>       Target admin username (default: vyos, per CCDC rules)
@@ -155,6 +159,14 @@ while [[ $# -gt 0 ]]; do
             if [ "$DNAT_TARGET" != "private" ] && [ "$DNAT_TARGET" != "public" ]; then
                 die "Invalid --dnat-target '$DNAT_TARGET'. Must be 'private' or 'public'."
             fi
+            shift 2
+            ;;
+        --restore-mode)
+            RESTORE_MODE="$2"
+            shift 2
+            ;;
+        --config-source)
+            CONFIG_SOURCE="$2"
             shift 2
             ;;
         --enable-outbound-pat)
@@ -747,6 +759,13 @@ fi
 apply_nat_configuration() {
     log_info "Configuring Scored 1:1 DNAT Rules 10-14 (Target: $DNAT_TARGET)..."
 
+    # Clean-slate deletion of destination NAT rules 10 through 14
+    for r in 10 11 12 13 14; do
+        delete nat destination rule "$r" 2>/dev/null || true
+    done
+    # Clean-slate deletion of source NAT rule 100
+    delete nat source rule 100 2>/dev/null || true
+
     local ECOM_TARGET EMAIL_TARGET SPLUNK_TARGET AD_TARGET MSSQL_TARGET
     if [ "$DNAT_TARGET" == "private" ]; then
         ECOM_TARGET="172.20.240.10"
@@ -811,6 +830,227 @@ apply_nat_configuration() {
     fi
 }
 
+# ─── Routing Baseline Engine (Standard Transit Routes Grounded in Topology) ───
+apply_routing_baseline() {
+    log_info "Configuring Standard Transit Routes Grounded in Topology..."
+    local WAN_GW="172.31.${OCTET}.1"
+    local SERVERS_NEXTHOP="172.16.0.254"
+
+    delete protocols static route 0.0.0.0/0 2>/dev/null || true
+    delete protocols static route 172.20.240.0/24 2>/dev/null || true
+
+    set protocols static route 0.0.0.0/0 next-hop "$WAN_GW"
+    set protocols static route 172.20.240.0/24 next-hop "$SERVERS_NEXTHOP"
+}
+
+# ─── Detected State Restoration Engine (Parses Tab 4 JSON State) ─────────────
+apply_detected_configuration() {
+    local file="$1"
+    if [ ! -f "$file" ]; then
+        log_warn "Detected state file does not exist: $file"
+        return 1
+    fi
+
+    log_info "Parsing detected configuration state from: $file"
+
+    local ECOM_TARGET="" EMAIL_TARGET="" SPLUNK_TARGET="" AD_TARGET="" MSSQL_TARGET=""
+    local OUTBOUND_PAT="" DEF_GW="" SRV_NH=""
+    local PARSE_SUCCESS=false
+
+    # Strategy 1: Python3 JSON parser (preferred on VyOS / Debian)
+    if command -v python3 >/dev/null 2>&1; then
+        local PY_VARS
+        PY_VARS=$(python3 - "$file" <<'EOF' 2>/dev/null
+import json, sys
+
+try:
+    with open(sys.argv[1], "r") as f:
+        data = json.load(f)
+
+    nat_rules = {r.get("rule"): r.get("translation") for r in data.get("nat_rules", []) if isinstance(r, dict)}
+    routes = {rt.get("prefix"): rt.get("next_hop") for rt in data.get("static_routes", []) if isinstance(rt, dict)}
+    pat = data.get("outbound_pat", False)
+
+    # Require either at least one nat rule or static route
+    if not nat_rules and not routes:
+        sys.exit(1)
+
+    for r_num in (10, 11, 12, 13, 14):
+        trans = nat_rules.get(r_num, "")
+        if trans and trans != "unknown":
+            print(f"RULE_{r_num}={trans}")
+
+    print(f"PAT={'true' if pat else 'false'}")
+
+    for prefix, nh in routes.items():
+        if prefix == "0.0.0.0/0":
+            print(f"DEF_GW={nh}")
+        elif prefix == "172.20.240.0/24":
+            print(f"SRV_NH={nh}")
+
+    print("PARSED_OK=1")
+except Exception:
+    sys.exit(1)
+EOF
+)
+        if [ $? -eq 0 ] && echo "$PY_VARS" | grep -q "PARSED_OK=1"; then
+            PARSE_SUCCESS=true
+            while IFS='=' read -r key val; do
+                case "$key" in
+                    RULE_10) ECOM_TARGET="$val" ;;
+                    RULE_11) EMAIL_TARGET="$val" ;;
+                    RULE_12) SPLUNK_TARGET="$val" ;;
+                    RULE_13) AD_TARGET="$val" ;;
+                    RULE_14) MSSQL_TARGET="$val" ;;
+                    PAT) OUTBOUND_PAT="$val" ;;
+                    DEF_GW) DEF_GW="$val" ;;
+                    SRV_NH) SRV_NH="$val" ;;
+                esac
+            done <<< "$PY_VARS"
+        fi
+    fi
+
+    # Strategy 2: grep/sed fallback if python3 is unavailable or failed
+    if [ "$PARSE_SUCCESS" != true ]; then
+        if ! grep -qE "nat_rules|static_routes" "$file"; then
+            log_warn "State file contains no recognizable nat_rules or static_routes: $file"
+            return 1
+        fi
+
+        ECOM_TARGET=$(grep -E '"rule"[[:space:]]*:[[:space:]]*10[[:space:]]*,' "$file" | sed -n 's/.*"translation"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+        EMAIL_TARGET=$(grep -E '"rule"[[:space:]]*:[[:space:]]*11[[:space:]]*,' "$file" | sed -n 's/.*"translation"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+        SPLUNK_TARGET=$(grep -E '"rule"[[:space:]]*:[[:space:]]*12[[:space:]]*,' "$file" | sed -n 's/.*"translation"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+        AD_TARGET=$(grep -E '"rule"[[:space:]]*:[[:space:]]*13[[:space:]]*,' "$file" | sed -n 's/.*"translation"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+        MSSQL_TARGET=$(grep -E '"rule"[[:space:]]*:[[:space:]]*14[[:space:]]*,' "$file" | sed -n 's/.*"translation"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+
+        if grep -qE '"outbound_pat"[[:space:]]*:[[:space:]]*true' "$file"; then
+            OUTBOUND_PAT="true"
+        else
+            OUTBOUND_PAT="false"
+        fi
+
+        DEF_GW=$(grep -E '"prefix"[[:space:]]*:[[:space:]]*"0\.0\.0\.0/0"' "$file" | sed -n 's/.*"next_hop"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+        SRV_NH=$(grep -E '"prefix"[[:space:]]*:[[:space:]]*"172\.20\.240\.0/24"' "$file" | sed -n 's/.*"next_hop"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+
+        if [ -z "$ECOM_TARGET" ] && [ -z "$EMAIL_TARGET" ] && [ -z "$SPLUNK_TARGET" ] && [ -z "$AD_TARGET" ] && [ -z "$MSSQL_TARGET" ] && [ -z "$DEF_GW" ] && [ -z "$SRV_NH" ]; then
+            log_warn "Failed to extract any rules or routes from $file"
+            return 1
+        fi
+    fi
+
+    # Clean-slate deletion of destination NAT rules 10 through 14
+    for r in 10 11 12 13 14; do
+        delete nat destination rule "$r" 2>/dev/null || true
+    done
+    delete nat source rule 100 2>/dev/null || true
+
+    # Extract clean IPv4 addresses
+    local CLEAN_DEF_GW
+    CLEAN_DEF_GW=$(echo "$DEF_GW" | grep -oE "([0-9]{1,3}\.){3}[0-9]{1,3}" | head -n1)
+    if [ -z "$CLEAN_DEF_GW" ]; then
+        CLEAN_DEF_GW="172.31.${OCTET}.1"
+    fi
+
+    local CLEAN_SRV_NH
+    CLEAN_SRV_NH=$(echo "$SRV_NH" | grep -oE "([0-9]{1,3}\.){3}[0-9]{1,3}" | head -n1)
+    if [ -z "$CLEAN_SRV_NH" ]; then
+        CLEAN_SRV_NH="172.16.0.254"
+    fi
+
+    local FINAL_ECOM FINAL_EMAIL FINAL_SPLUNK FINAL_AD FINAL_MSSQL
+    if echo "$ECOM_TARGET" | grep -qE "^([0-9]{1,3}\.){3}[0-9]{1,3}$"; then
+        FINAL_ECOM="$ECOM_TARGET"
+    else
+        FINAL_ECOM="172.20.240.10"
+    fi
+
+    if echo "$EMAIL_TARGET" | grep -qE "^([0-9]{1,3}\.){3}[0-9]{1,3}$"; then
+        FINAL_EMAIL="$EMAIL_TARGET"
+    else
+        FINAL_EMAIL="172.20.240.15"
+    fi
+
+    if echo "$SPLUNK_TARGET" | grep -qE "^([0-9]{1,3}\.){3}[0-9]{1,3}$"; then
+        FINAL_SPLUNK="$SPLUNK_TARGET"
+    else
+        FINAL_SPLUNK="172.20.240.20"
+    fi
+
+    if echo "$AD_TARGET" | grep -qE "^([0-9]{1,3}\.){3}[0-9]{1,3}$"; then
+        FINAL_AD="$AD_TARGET"
+    else
+        FINAL_AD="172.20.240.100"
+    fi
+
+    if echo "$MSSQL_TARGET" | grep -qE "^([0-9]{1,3}\.){3}[0-9]{1,3}$"; then
+        FINAL_MSSQL="$MSSQL_TARGET"
+    else
+        FINAL_MSSQL="172.20.240.120"
+    fi
+
+    log_info "Configuring Scored DNAT Rules from detected state:"
+    log_info "  Rule 10 (Ecom)   -> $FINAL_ECOM"
+    log_info "  Rule 11 (Email)  -> $FINAL_EMAIL"
+    log_info "  Rule 12 (Splunk) -> $FINAL_SPLUNK"
+    log_info "  Rule 13 (AD)     -> $FINAL_AD"
+    log_info "  Rule 14 (MSSQL)  -> $FINAL_MSSQL"
+
+    set nat destination rule 10 description 'Ecom'
+    set nat destination rule 10 inbound-interface name 'eth0'
+    set nat destination rule 10 protocol 'tcp'
+    set nat destination rule 10 destination port '80,443'
+    set nat destination rule 10 translation address "$FINAL_ECOM"
+
+    set nat destination rule 11 description 'Email'
+    set nat destination rule 11 inbound-interface name 'eth0'
+    set nat destination rule 11 protocol 'tcp'
+    set nat destination rule 11 destination port '25,143,587,993'
+    set nat destination rule 11 translation address "$FINAL_EMAIL"
+
+    set nat destination rule 12 description 'Splunk'
+    set nat destination rule 12 inbound-interface name 'eth0'
+    set nat destination rule 12 protocol 'tcp'
+    set nat destination rule 12 destination port '8000,8089,9997'
+    set nat destination rule 12 translation address "$FINAL_SPLUNK"
+
+    set nat destination rule 13 description 'AD'
+    set nat destination rule 13 inbound-interface name 'eth0'
+    set nat destination rule 13 protocol 'tcp_udp'
+    set nat destination rule 13 destination port '53,5985'
+    set nat destination rule 13 translation address "$FINAL_AD"
+
+    set nat destination rule 14 description 'MSSQL'
+    set nat destination rule 14 inbound-interface name 'eth0'
+    set nat destination rule 14 protocol 'tcp'
+    set nat destination rule 14 destination port '445,1433,3389'
+    set nat destination rule 14 translation address "$FINAL_MSSQL"
+
+    # Outbound PAT
+    if [ "$OUTBOUND_PAT" == "true" ] || [ "$ENABLE_OUTBOUND_PAT" = true ]; then
+        log_warn "Outbound PAT is ENABLED from detected state (Rule 100 masquerade)."
+        set nat source rule 100 description 'workstation-outbound-pat'
+        set nat source rule 100 outbound-interface name 'eth0'
+        set nat source rule 100 source address '172.16.0.0/12'
+        set nat source rule 100 translation address 'masquerade'
+    else
+        log_ok "Outbound PAT is DISABLED (Rule 100 deleted)."
+        delete nat source rule 100 2>/dev/null || true
+    fi
+
+    # Static routes
+    log_info "Configuring static routes from detected state:"
+    log_info "  0.0.0.0/0        next-hop $CLEAN_DEF_GW"
+    log_info "  172.20.240.0/24  next-hop $CLEAN_SRV_NH"
+
+    delete protocols static route 0.0.0.0/0 2>/dev/null || true
+    delete protocols static route 172.20.240.0/24 2>/dev/null || true
+
+    set protocols static route 0.0.0.0/0 next-hop "$CLEAN_DEF_GW"
+    set protocols static route 172.20.240.0/24 next-hop "$CLEAN_SRV_NH"
+
+    return 0
+}
+
 # ==============================================================================
 # MODE: RESTORE NAT BASELINE (RULES 10-14 & PAT)
 # ==============================================================================
@@ -824,27 +1064,54 @@ if [ "$MODE" == "restore-nat" ]; then
         builtin exit 0
     fi
 
-    log_info "Entering VyOS configuration mode to restore NAT baseline..."
+    log_info "Entering VyOS configuration mode to restore NAT & routing baseline (Mode: $RESTORE_MODE)..."
     configure
 
-    apply_nat_configuration
+    if [ "$RESTORE_MODE" == "detected" ] || [ "$RESTORE_MODE" == "backup" ]; then
+        DETECTED_FILE="${CONFIG_SOURCE:-/etc/linux-defender/vyos/detected_nat_routes.json}"
+        if [ ! -f "$DETECTED_FILE" ]; then
+            if [ -f "/tmp/defender/vyos/detected_nat_routes.json" ]; then
+                DETECTED_FILE="/tmp/defender/vyos/detected_nat_routes.json"
+            fi
+        fi
+        if [ -f "$DETECTED_FILE" ] && apply_detected_configuration "$DETECTED_FILE"; then
+            log_ok "Successfully restored NAT rules and static routes from detected state: $DETECTED_FILE"
+        else
+            log_warn "Detected state file missing or invalid ($DETECTED_FILE); applying topology baseline instead."
+            apply_nat_configuration
+            apply_routing_baseline
+        fi
+    else
+        apply_nat_configuration
+        apply_routing_baseline
+    fi
 
     echo "======================================================================"
     if [ "$NO_CONFIRM" = true ]; then
         log_warn "--no-confirm specified. Committing immediately..."
-        commit
+        COMMIT_OUT=$(commit 2>&1)
+        echo "$COMMIT_OUT"
+        if echo "$COMMIT_OUT" | grep -qE "Commit failed|\[\[.*\]\] failed"; then
+            log_error "VyOS configuration commit failed! Discarding changes..."
+            discard 2>/dev/null || true
+            vyos_exit_cfg
+            builtin exit 1
+        fi
         save
         vyos_exit_cfg
-        log_ok "NAT configuration committed and saved permanently."
+        log_ok "NAT & routing configuration committed and saved permanently."
     else
-        log_info "Applying NAT configuration with ${COMMIT_TIMEOUT}-minute failsafe rollback..."
-        if ! printf 'y\n' | commit-confirm "$COMMIT_TIMEOUT"; then
+        log_info "Applying NAT & routing configuration with ${COMMIT_TIMEOUT}-minute failsafe rollback..."
+        COMMIT_OUT=$(printf 'y\n' | commit-confirm "$COMMIT_TIMEOUT" 2>&1)
+        echo "$COMMIT_OUT"
+        if echo "$COMMIT_OUT" | grep -qE "Commit failed|\[\[.*\]\] failed|failed\!"; then
+            log_error "VyOS configuration commit-confirm failed! Discarding changes..."
+            discard 2>/dev/null || true
             vyos_exit_cfg
-            log_error "commit-confirm failed! Rollback will not be initiated."
             builtin exit 1
         fi
         echo ""
-        log_ok "NAT rules applied with commit-confirm ${COMMIT_TIMEOUT}!"
+        log_ok "NAT rules and transit routes applied with commit-confirm ${COMMIT_TIMEOUT}!"
         vyos_exit_cfg
     fi
     builtin exit 0
@@ -1080,6 +1347,9 @@ if [ "$MODE" == "harden" ]; then
     log_info "Step 7: Applying Scored 1:1 DNAT Rules 10-14 & Outbound PAT..."
     apply_nat_configuration
 
+    log_info "Step 7b: Applying Standard Transit Routes Grounded in Topology..."
+    apply_routing_baseline
+
     # 3. Apply changes with commit-confirm
     echo "======================================================================"
     if [ "$NO_CONFIRM" = true ]; then
@@ -1087,15 +1357,25 @@ if [ "$MODE" == "harden" ]; then
         echo -e "${RED}  WARNING: --no-confirm ENABLED! Instant commit in progress...        ${RESET}"
         echo -e "${RED}  Rollback protection is DISABLED!                                     ${RESET}"
         echo -e "${RED}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${RESET}"
-        commit
+        COMMIT_OUT=$(commit 2>&1)
+        echo "$COMMIT_OUT"
+        if echo "$COMMIT_OUT" | grep -qE "Commit failed|\[\[.*\]\] failed"; then
+            log_error "VyOS configuration commit failed! Discarding changes..."
+            discard 2>/dev/null || true
+            vyos_exit_cfg
+            builtin exit 1
+        fi
         save
         vyos_exit_cfg
         log_ok "Configuration committed and saved permanently."
     else
         log_info "Step 8: Applying configuration with ${COMMIT_TIMEOUT}-minute failsafe rollback..."
-        if ! printf 'y\n' | commit-confirm "$COMMIT_TIMEOUT"; then
+        COMMIT_OUT=$(printf 'y\n' | commit-confirm "$COMMIT_TIMEOUT" 2>&1)
+        echo "$COMMIT_OUT"
+        if echo "$COMMIT_OUT" | grep -qE "Commit failed|\[\[.*\]\] failed|failed\!"; then
+            log_error "VyOS configuration commit-confirm failed! Discarding changes..."
+            discard 2>/dev/null || true
             vyos_exit_cfg
-            log_error "commit-confirm failed! Rollback will not be initiated."
             builtin exit 1
         fi
         echo ""

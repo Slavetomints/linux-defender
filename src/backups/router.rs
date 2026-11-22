@@ -24,7 +24,7 @@ pub const ROUTER_PATHS: &[&str] = &[
 
 /// Back up the VyOS router configuration to `save_location`.
 pub fn run(ctx: &DefenderContext, save_location: &Option<PathBuf>) -> Result {
-    ctx.log_msg("[+] Backing up VyOS router configuration (/config/config.boot)...");
+    ctx.progress("[+] Backing up VyOS router configuration (/config/config.boot)...");
     all::run_with_paths(ctx, save_location, ROUTER_PATHS)
 }
 

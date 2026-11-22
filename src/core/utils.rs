@@ -200,6 +200,16 @@ pub fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// Strip any text preceding carriage returns (\r) to prevent overstrike corruption in TUI.
+pub fn sanitize_cr(s: &str) -> &str {
+    let trimmed = s.trim_end_matches('\r');
+    if let Some(pos) = trimmed.rfind('\r') {
+        &trimmed[pos + 1..]
+    } else {
+        trimmed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,5 +286,13 @@ weird:x:1001:1001:Weird:/var/lib/weird:/bin/sh
 
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].name, "root");
+    }
+
+    #[test]
+    fn test_sanitize_cr() {
+        assert_eq!(sanitize_cr("plain line"), "plain line");
+        assert_eq!(sanitize_cr("overwritten\rnew line"), "new line");
+        assert_eq!(sanitize_cr("foo\rbar\rbaz"), "baz");
+        assert_eq!(sanitize_cr("line with trailing cr\r"), "line with trailing cr");
     }
 }

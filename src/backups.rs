@@ -74,43 +74,43 @@ pub struct CliArgs {
 /// Run each backup the operator asked for, in a fixed order.
 pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
     if args.all {
-        println!("[+] Backing up service configs");
+        ctx.progress("[+] Backing up service configs");
         all::run(ctx, &args.save_location)?;
     }
     if args.compare_hashes {
-        println!("[+] Comparing hashes");
+        ctx.progress("[+] Comparing hashes");
         compare_hashes::run(ctx, &args.save_location)?;
     }
     if let Some(ref path) = args.custom {
-        println!("[+] Backing up custom path: {}", path.display());
+        ctx.progress(&format!("[+] Backing up custom path: {}", path.display()));
         custom::run(ctx, path, &args.save_location)?;
     }
     if args.ecomm {
-        println!("[+] Backing up ecomm service");
+        ctx.progress("[+] Backing up ecomm service");
         ecomm::run(ctx, &args.save_location)?;
     }
     if args.mail {
-        println!("[+] Backing up mail service");
+        ctx.progress("[+] Backing up mail service");
         mail::run(ctx, &args.save_location)?;
     }
     if args.restore {
         if let Some(ref dir) = args.save_location {
-            println!("[+] Restoring from backup");
+            ctx.progress("[+] Restoring from backup");
             restore::run(ctx, dir)?;
         } else {
-            eprintln!("[!] --restore requires --save-location <backup-dir>");
+            ctx.progress("[!] --restore requires --save-location <backup-dir>");
         }
     }
     if args.splunk {
-        println!("[+] Backing up splunk service");
+        ctx.progress("[+] Backing up splunk service");
         splunk::run(ctx, &args.save_location)?;
     }
     if args.users {
-        println!("[+] Backing up user databases");
+        ctx.progress("[+] Backing up user databases");
         users::run(ctx, &args.save_location)?;
     }
     if args.router {
-        println!("[+] Backing up router configuration");
+        ctx.progress("[+] Backing up router configuration");
         router::run(ctx, &args.save_location)?;
     }
 

@@ -53,7 +53,7 @@ pub fn run(ctx: &DefenderContext, args: &CliArgs) -> Result {
         configs::run(ctx)?;
     }
     if args.install_tools {
-        println!("[+] Installing hardening tools");
+        ctx.progress("[+] Installing hardening tools");
         install_tools::run(ctx)?;
     }
 

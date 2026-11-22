@@ -355,15 +355,17 @@ impl DefenderContext {
         }
     }
 
-    /// True when the context is wired to a TUI findings channel.
+    /// True when the context is wired to a TUI findings or progress channel.
     pub fn in_tui(&self) -> bool {
-        self.finding_tx.is_some()
+        self.finding_tx.is_some() || self.progress_tx.is_some()
     }
 
-    /// Emit a plain informational message. In TUI mode this becomes an Info
-    /// finding; in legacy mode it prints.
+    /// Emit a plain informational message. In TUI mode this routes to progress
+    /// or Info finding; in legacy mode it prints.
     pub fn log_msg(&self, msg: &str) {
-        if self.in_tui() {
+        if let Some(ref tx) = self.progress_tx {
+            let _ = tx.send(msg.to_string());
+        } else if self.finding_tx.is_some() {
             self.emit(Finding::new(Severity::Info, "log", msg, ""));
         } else {
             println!("{}", msg);
@@ -380,7 +382,11 @@ impl DefenderContext {
     /// Print only when running with `--verbose`.
     pub fn debug(&self, message: &str) {
         if self.verbose {
-            println!("[debug] {}", message);
+            if let Some(ref tx) = self.progress_tx {
+                let _ = tx.send(format!("[debug] {}", message));
+            } else if !self.in_tui() {
+                println!("[debug] {}", message);
+            }
         }
     }
 

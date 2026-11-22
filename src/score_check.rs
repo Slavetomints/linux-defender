@@ -1033,12 +1033,19 @@ fn gen_random_hex(n: usize) -> String {
         .and_then(|mut f| f.read_exact(&mut buf))
         .is_ok();
     if !filled {
-        // SAFETY: buf is valid for n bytes; getrandom writes at most n bytes.
-        let got = unsafe { libc::getrandom(buf.as_mut_ptr().cast(), n, 0) };
-        assert!(
-            usize::try_from(got).is_ok_and(|g| g == n),
-            "no source of randomness for the mail check password"
-        );
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: buf is valid for n bytes; getrandom writes at most n bytes.
+            let got = unsafe { libc::getrandom(buf.as_mut_ptr().cast(), n, 0) };
+            assert!(
+                usize::try_from(got).is_ok_and(|g| g == n),
+                "no source of randomness for the mail check password"
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            panic!("no source of randomness for the mail check password");
+        }
     }
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }

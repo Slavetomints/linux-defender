@@ -37,6 +37,15 @@ pub(crate) enum ScanFocus {
     Findings,
 }
 
+/// Which pane of the Router tab currently has keyboard focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RouterFocus {
+    /// Left pane: Operations list
+    Operations,
+    /// Right pane: Output log
+    Log,
+}
+
 /// How often a module runs in auto-scan mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScanInterval {
@@ -76,15 +85,6 @@ const MONITOR_MODULES: &[(&str, &str)] = &[
     ("webserver_config", "Webserver config audit"),
     ("apt_sources", "APT source integrity"),
     ("bind_mounts", "Bind/overlay mount detection"),
-];
-
-/// Backup operations: (id, display label).
-const BACKUP_STEPS: &[(&str, &str)] = &[
-    ("all", "Full Config Backup"),
-    ("mail", "Mail Stack"),
-    ("splunk", "Splunk Config"),
-    ("users", "User/Group/Shadow DBs"),
-    ("ecomm", "E-Commerce Stack"),
 ];
 
 /// Service restore operations: (id, display label).
@@ -382,14 +382,13 @@ impl Tab {
     ];
 
     /// All tabs for Router box type:
-    /// Router is placed at tab 2, and Svc Restore is hidden,
-    /// keeping all 8 remaining tabs accessible.
+    /// Router is placed at tab 2, and both Hardening and Svc Restore are omitted,
+    /// giving the router exactly 7 streamlined tabs.
     pub const ROUTER: &'static [Tab] = &[
         Tab::Dashboard,
         Tab::Router,
         Tab::Logs,
         Tab::Scan,
-        Tab::Hardening,
         Tab::Backups,
         Tab::Monitor,
         Tab::Tools,
@@ -436,6 +435,13 @@ impl Tab {
         let tabs = Self::for_box_type(box_type);
         let idx = d.to_digit(10)?.checked_sub(1)? as usize;
         tabs.get(idx).copied()
+    }
+
+    /// Return the single digit key character ('1'..'9') that activates this tab for the given box type.
+    pub fn digit_for(self, box_type: BoxType) -> Option<char> {
+        let tabs = Self::for_box_type(box_type);
+        let idx = tabs.iter().position(|&t| t == self)?;
+        char::from_digit((idx + 1) as u32, 10)
     }
 }
 
@@ -680,6 +686,10 @@ pub(crate) enum RouterDialogStep {
     Harden,
     /// Phase 2 console lockdown: disable SSH entirely and terminate active sessions.
     ConsoleLockdown,
+    /// Restore CCDC DNAT Rules 10-14 & configure outbound PAT.
+    RestoreNat,
+    /// Separately rotate vyos and root passwords; sanitize authorized_keys.
+    RotatePasswords,
 }
 
 /// Modal configuration dialog for Router Phase 1 & Phase 2 operations.
@@ -707,7 +717,7 @@ fn detect_vyos_team_number() -> Option<u8> {
                 && parts[0] == "172"
                 && parts[1] == "31"
                 && let Ok(octet) = parts[2].parse::<u8>()
-                && (21..=40).contains(&octet)
+                && (20..=40).contains(&octet)
             {
                 return Some(octet - 20);
             }
@@ -718,21 +728,27 @@ fn detect_vyos_team_number() -> Option<u8> {
 
 impl RouterConfigDialog {
     /// Create a new modal configuration dialog for the given step with sensible defaults.
-    fn new(step: RouterDialogStep) -> Self {
+    fn new(step: RouterDialogStep, default_team: Option<u8>) -> Self {
+        let team_str = default_team
+            .or_else(detect_vyos_team_number)
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+
         let fields = match step {
-            RouterDialogStep::Harden => {
-                let team_str = detect_vyos_team_number()
-                    .map(|t| t.to_string())
-                    .unwrap_or_default();
-                [
-                    team_str,
-                    String::new(),
-                    "172.17.0.0/24".into(),
-                    String::new(),
-                ]
-            }
+            RouterDialogStep::Harden => [
+                team_str,
+                String::new(),
+                "172.17.0.0/24".into(),
+                String::new(),
+            ],
             RouterDialogStep::ConsoleLockdown => {
                 [String::new(), "no".into(), String::new(), String::new()]
+            }
+            RouterDialogStep::RestoreNat => {
+                [team_str, "private".into(), "no".into(), String::new()]
+            }
+            RouterDialogStep::RotatePasswords => {
+                [String::new(), String::new(), "yes".into(), String::new()]
             }
         };
         Self {
@@ -747,6 +763,8 @@ impl RouterConfigDialog {
         match self.step {
             RouterDialogStep::Harden => 4,
             RouterDialogStep::ConsoleLockdown => 2,
+            RouterDialogStep::RestoreNat => 3,
+            RouterDialogStep::RotatePasswords => 3,
         }
     }
 
@@ -754,7 +772,7 @@ impl RouterConfigDialog {
     fn field_label(&self, idx: usize) -> &'static str {
         match self.step {
             RouterDialogStep::Harden => match idx {
-                0 => "CCDC Team Number [1-20]",
+                0 => "CCDC Team Number [0-20]",
                 1 => "New 'vyos' Admin Password",
                 2 => "Management Subnet (wkst)",
                 3 => "SSH Public Key (optional)",
@@ -763,6 +781,18 @@ impl RouterConfigDialog {
             RouterDialogStep::ConsoleLockdown => match idx {
                 0 => "New 'vyos' Console Password",
                 1 => "Force Override Active SSH Check? (yes/no)",
+                _ => "",
+            },
+            RouterDialogStep::RestoreNat => match idx {
+                0 => "CCDC Team Number [0-20]",
+                1 => "DNAT Target [private / public]",
+                2 => "Enable Outbound PAT? [yes / no]",
+                _ => "",
+            },
+            RouterDialogStep::RotatePasswords => match idx {
+                0 => "New Password for 'vyos' (Operator)",
+                1 => "New Password for Linux 'root' (Superuser)",
+                2 => "Sanitize authorized_keys? [yes / no]",
                 _ => "",
             },
         }
@@ -809,12 +839,47 @@ impl RouterConfigDialog {
                     },
                 )
             }
+            RouterDialogStep::RestoreNat => {
+                let team: Option<u8> = self.fields[0].trim().parse().ok();
+                let dnat_target = if self.fields[1].trim().is_empty() {
+                    Some("private".to_string())
+                } else {
+                    Some(self.fields[1].trim().to_string())
+                };
+                let enable_outbound_pat = self.fields[2].trim().eq_ignore_ascii_case("yes");
+                (
+                    "router_nat",
+                    crate::router::CliArgs {
+                        restore_nat: true,
+                        team,
+                        dnat_target,
+                        enable_outbound_pat,
+                        ..Default::default()
+                    },
+                )
+            }
+            RouterDialogStep::RotatePasswords => {
+                let vyos_pass = self.fields[0].clone();
+                let root_pass = self.fields[1].clone();
+                (
+                    "rotate_passwords",
+                    crate::router::CliArgs {
+                        rotate_passwords: true,
+                        user: Some("vyos".into()),
+                        pass: Some(vyos_pass.clone()),
+                        vyos_pass: Some(vyos_pass),
+                        root_pass: Some(root_pass),
+                        ..Default::default()
+                    },
+                )
+            }
         }
     }
 }
 
 pub struct App {
     pub box_type: BoxType,
+    pub team: Option<u8>,
     pub tab: Tab,
     pub findings: Vec<Finding>,
     /// Scored-service check histories (latency, uptime %, last result).
@@ -937,6 +1002,8 @@ pub struct App {
     /// Credential input dialog shown before OpenCart / PrestaShop restore.
     restore_cred_dialog: Option<RestoreCredDialog>,
     // ── Router tab state ─────────────────────────────────────────────────────
+    /// Which pane of the Router tab currently has keyboard focus.
+    pub(crate) router_focus: RouterFocus,
     /// Cursor position in the router step list.
     pub router_cursor: usize,
     /// True while a router operation is running in the background.
@@ -976,6 +1043,7 @@ impl App {
         finding_tx: Sender<Finding>,
         finding_rx: Receiver<Finding>,
         nft_config: Option<String>,
+        team: Option<u8>,
     ) -> Self {
         if box_type == BoxType::Mail {
             crate::score_check::ensure_mail_test_account();
@@ -997,6 +1065,7 @@ impl App {
         let sessions = poll_sessions(&authorized_users);
         Self {
             box_type,
+            team,
             tab: Tab::Dashboard,
             findings: Vec::new(),
             services,
@@ -1062,6 +1131,7 @@ impl App {
             restore_progress_rx,
             baseline_present: Self::detect_baseline(),
             restore_cred_dialog: None,
+            router_focus: RouterFocus::Operations,
             router_cursor: 0,
             router_running: false,
             router_log: Vec::new(),
@@ -1452,7 +1522,9 @@ impl App {
         self.backups_log_scroll = 0;
 
         let progress_tx = self.backups_progress_tx.clone();
-        let label = BACKUP_STEPS
+        let label = self
+            .box_type
+            .backup_steps()
             .iter()
             .find(|(id, _)| *id == step_id)
             .map(|(_, l)| *l)
@@ -1471,6 +1543,7 @@ impl App {
                 restore: false,
                 splunk: false,
                 users: false,
+                router: step_id == "router",
                 save_location: None,
             };
             match step_id {
@@ -1479,6 +1552,7 @@ impl App {
                 "splunk" => args.splunk = true,
                 "users" => args.users = true,
                 "ecomm" => args.ecomm = true,
+                "router" => args.router = true,
                 _ => {}
             }
             match crate::backups::run(&ctx, &args) {
@@ -1601,14 +1675,36 @@ impl App {
         self.router_active_step = Some(step_id);
         self.router_active_args = Some(args.clone());
 
+        let finding_tx = self.finding_tx.clone();
+        let box_type = self.box_type;
         std::thread::spawn(move || {
             let report = PathBuf::from("/tmp/defender-router.log");
-            let ctx = DefenderContext::new(report, false).with_progress(progress_tx.clone());
-            if let Err(e) = crate::router::run(&ctx, &args) {
-                let _ = progress_tx.send(format!("ERROR: {}", e));
-                let _ = progress_tx.send(crate::router::ROUTER_PROGRESS_DONE_ERROR.to_string());
+            let mut ctx = DefenderContext::new(report, false)
+                .with_progress(progress_tx.clone())
+                .with_box_type(box_type);
+            ctx.finding_tx = Some(finding_tx);
+
+            if step_id == "services" || step_id == "user_permissions" {
+                let hardening_args = crate::system_hardening::CliArgs {
+                    user_permissions: step_id == "user_permissions",
+                    services: step_id == "services",
+                    programs: false,
+                    configs: false,
+                    install_tools: false,
+                };
+                if let Err(e) = crate::system_hardening::run(&ctx, &hardening_args) {
+                    let _ = progress_tx.send(format!("ERROR: {}", e));
+                    let _ = progress_tx.send(crate::router::ROUTER_PROGRESS_DONE_ERROR.to_string());
+                } else {
+                    let _ = progress_tx.send(crate::router::ROUTER_PROGRESS_DONE_OK.to_string());
+                }
             } else {
-                let _ = progress_tx.send(crate::router::ROUTER_PROGRESS_DONE_OK.to_string());
+                if let Err(e) = crate::router::run(&ctx, &args) {
+                    let _ = progress_tx.send(format!("ERROR: {}", e));
+                    let _ = progress_tx.send(crate::router::ROUTER_PROGRESS_DONE_ERROR.to_string());
+                } else {
+                    let _ = progress_tx.send(crate::router::ROUTER_PROGRESS_DONE_OK.to_string());
+                }
             }
         });
     }
@@ -1830,6 +1926,13 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
     let detected = detect_box_type();
     let box_type = select_box_type(terminal, detected)?;
 
+    let detected_team = detect_vyos_team_number();
+    let team = if box_type == BoxType::Router {
+        Some(prompt_team_number(terminal, detected_team)?)
+    } else {
+        detected_team
+    };
+
     let source_paths = LogDash::source_paths(box_type);
     let source_refs: Vec<&str> = source_paths.iter().map(|s| s.as_str()).collect();
     let preserve_cfg = if nix::unistd::geteuid().is_root() {
@@ -1842,7 +1945,7 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
 
     let (finding_tx, finding_rx) = mpsc::channel::<Finding>();
     // nft_config starts empty — populated only after explicit operator action in Tools tab
-    let mut app = App::new(box_type, log_dashboard, finding_tx, finding_rx, None);
+    let mut app = App::new(box_type, log_dashboard, finding_tx, finding_rx, None, team);
 
     loop {
         app.tick();
@@ -1986,12 +2089,19 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                     KeyCode::Enter => {
                         let max_field = dlg.field_count() - 1;
                         if dlg.focused == max_field {
-                            let pass_idx = match dlg.step {
-                                RouterDialogStep::Harden => 1,
-                                RouterDialogStep::ConsoleLockdown => 0,
+                            let valid = match dlg.step {
+                                RouterDialogStep::Harden => !dlg.fields[1].trim().is_empty(),
+                                RouterDialogStep::ConsoleLockdown => {
+                                    !dlg.fields[0].trim().is_empty()
+                                }
+                                RouterDialogStep::RestoreNat => !dlg.fields[0].trim().is_empty(),
+                                RouterDialogStep::RotatePasswords => {
+                                    !dlg.fields[0].trim().is_empty()
+                                        && !dlg.fields[1].trim().is_empty()
+                                }
                             };
-                            if dlg.fields[pass_idx].trim().is_empty() {
-                                // Required password is empty; stay on dialog
+                            if !valid {
+                                // Required fields are empty; stay on dialog
                                 continue;
                             }
                             let dialog = app.router_config_dialog.take().unwrap();
@@ -2097,10 +2207,11 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                         }
                     }
                     Tab::Backups => {
-                        app.backups_cursor = app
-                            .backups_cursor
-                            .checked_sub(1)
-                            .unwrap_or(BACKUP_STEPS.len() - 1);
+                        let steps = app.box_type.backup_steps();
+                        if !steps.is_empty() {
+                            app.backups_cursor =
+                                app.backups_cursor.checked_sub(1).unwrap_or(steps.len() - 1);
+                        }
                     }
                     Tab::ServiceRestore => {
                         app.restore_cursor = app
@@ -2108,12 +2219,18 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                             .checked_sub(1)
                             .unwrap_or(RESTORE_SERVICES.len() - 1);
                     }
-                    Tab::Router => {
-                        app.router_cursor = app
-                            .router_cursor
-                            .checked_sub(1)
-                            .unwrap_or(crate::router::ROUTER_STEPS.len() - 1);
-                    }
+                    Tab::Router => match app.router_focus {
+                        RouterFocus::Operations => {
+                            app.router_cursor = app
+                                .router_cursor
+                                .checked_sub(1)
+                                .unwrap_or(crate::router::ROUTER_STEPS.len() - 1);
+                        }
+                        RouterFocus::Log => {
+                            let max = app.router_log.len().saturating_sub(1);
+                            app.router_log_scroll = (app.router_log_scroll + 1).min(max);
+                        }
+                    },
                     _ => {}
                 },
                 KeyCode::Down => match app.tab {
@@ -2152,15 +2269,23 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                         }
                     }
                     Tab::Backups => {
-                        app.backups_cursor = (app.backups_cursor + 1) % BACKUP_STEPS.len();
+                        let steps = app.box_type.backup_steps();
+                        if !steps.is_empty() {
+                            app.backups_cursor = (app.backups_cursor + 1) % steps.len();
+                        }
                     }
                     Tab::ServiceRestore => {
                         app.restore_cursor = (app.restore_cursor + 1) % RESTORE_SERVICES.len();
                     }
-                    Tab::Router => {
-                        app.router_cursor =
-                            (app.router_cursor + 1) % crate::router::ROUTER_STEPS.len();
-                    }
+                    Tab::Router => match app.router_focus {
+                        RouterFocus::Operations => {
+                            app.router_cursor =
+                                (app.router_cursor + 1) % crate::router::ROUTER_STEPS.len();
+                        }
+                        RouterFocus::Log => {
+                            app.router_log_scroll = app.router_log_scroll.saturating_sub(1);
+                        }
+                    },
                     _ => {}
                 },
                 KeyCode::Enter => {
@@ -2177,8 +2302,10 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                         let module_id = MONITOR_MODULES[app.monitor_cursor].0;
                         app.start_monitor(module_id);
                     } else if app.tab == Tab::Backups && !app.backups_running {
-                        let step_id = BACKUP_STEPS[app.backups_cursor].0;
-                        app.start_backup(step_id);
+                        let steps = app.box_type.backup_steps();
+                        if let Some(&(step_id, _)) = steps.get(app.backups_cursor) {
+                            app.start_backup(step_id);
+                        }
                     } else if app.tab == Tab::ServiceRestore && !app.restore_running {
                         let service_id = RESTORE_SERVICES[app.restore_cursor].0;
                         match service_id {
@@ -2199,23 +2326,49 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                     } else if app.tab == Tab::Router && !app.router_running {
                         let step_id = crate::router::ROUTER_STEPS[app.router_cursor].id;
                         if app.router_pending_confirm.is_some()
-                            && (step_id == "harden" || step_id == "console_lockdown")
+                            && (step_id == "harden"
+                                || step_id == "console_lockdown"
+                                || step_id == "router_nat")
                         {
                             app.router_log.push(
-                                "[WARN] Cannot start Phase 1 or Phase 2 while confirmation is pending. Press 'c' to confirm or wait for rollback."
+                                "[WARN] Cannot start configuration while confirmation is pending. Press 'c' to confirm or wait for rollback."
                                     .to_string(),
                             );
                             continue;
                         }
                         match step_id {
                             "harden" => {
-                                app.router_config_dialog =
-                                    Some(RouterConfigDialog::new(RouterDialogStep::Harden));
+                                app.router_config_dialog = Some(RouterConfigDialog::new(
+                                    RouterDialogStep::Harden,
+                                    app.team,
+                                ));
                             }
                             "console_lockdown" => {
                                 app.router_config_dialog = Some(RouterConfigDialog::new(
                                     RouterDialogStep::ConsoleLockdown,
+                                    app.team,
                                 ));
+                            }
+                            "router_nat" => {
+                                app.router_config_dialog = Some(RouterConfigDialog::new(
+                                    RouterDialogStep::RestoreNat,
+                                    app.team,
+                                ));
+                            }
+                            "rotate_passwords" => {
+                                app.router_config_dialog = Some(RouterConfigDialog::new(
+                                    RouterDialogStep::RotatePasswords,
+                                    app.team,
+                                ));
+                            }
+                            "confirm" => {
+                                app.start_router(
+                                    "confirm",
+                                    Some(crate::router::CliArgs {
+                                        confirm: true,
+                                        ..Default::default()
+                                    }),
+                                );
                             }
                             _ => {
                                 app.start_router(step_id, None);
@@ -2397,10 +2550,6 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                     }
                 }
                 KeyCode::PageUp | KeyCode::Char('[') => match app.tab {
-                    Tab::Router => {
-                        let max = app.router_log.len().saturating_sub(1);
-                        app.router_log_scroll = (app.router_log_scroll + 5).min(max);
-                    }
                     Tab::Hardening => {
                         let max = app.hardening_log.len().saturating_sub(1);
                         app.hardening_log_scroll = (app.hardening_log_scroll + 5).min(max);
@@ -2416,9 +2565,6 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                     _ => {}
                 },
                 KeyCode::PageDown | KeyCode::Char(']') => match app.tab {
-                    Tab::Router => {
-                        app.router_log_scroll = app.router_log_scroll.saturating_sub(5);
-                    }
                     Tab::Hardening => {
                         app.hardening_log_scroll = app.hardening_log_scroll.saturating_sub(5);
                     }
@@ -2451,6 +2597,11 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                         app.scan_focus = match app.scan_focus {
                             ScanFocus::Modules => ScanFocus::Findings,
                             ScanFocus::Findings => ScanFocus::Modules,
+                        };
+                    } else if app.tab == Tab::Router {
+                        app.router_focus = match app.router_focus {
+                            RouterFocus::Operations => RouterFocus::Log,
+                            RouterFocus::Log => RouterFocus::Operations,
                         };
                     }
                 }
@@ -2835,18 +2986,28 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
                 right.extend(kb("Enter", "restore", key_color));
             }
         }
-        Tab::Router => {
-            if app.router_running {
-                right.push(Span::styled("running…", Style::default().fg(warn_color)));
-            } else {
-                right.extend(kb("↑↓", "select", key_color));
-                right.extend(kb("Enter", "run operation", key_color));
+        Tab::Router => match app.router_focus {
+            RouterFocus::Operations => {
+                if app.router_running {
+                    right.push(Span::styled("running…", Style::default().fg(warn_color)));
+                } else {
+                    right.extend(kb("Tab", "→ log", key_color));
+                    right.extend(kb("↑↓", "select", key_color));
+                    right.extend(kb("Enter", "run", key_color));
+                }
+                if app.router_pending_confirm.is_some() {
+                    right.extend(kb("c", "confirm dialog", Color::Yellow));
+                }
             }
-            if app.router_pending_confirm.is_some() {
-                right.extend(kb("c", "confirm dialog", Color::Yellow));
+            RouterFocus::Log => {
+                right.extend(kb("Tab", "→ ops", key_color));
+                right.extend(kb("↑↓", "scroll", key_color));
+                right.extend(kb("End", "bottom", key_color));
+                if app.router_pending_confirm.is_some() {
+                    right.extend(kb("c", "confirm dialog", Color::Yellow));
+                }
             }
-            right.extend(kb("PgUp/PgDn", "scroll", key_color));
-        }
+        },
     }
 
     // ── Layout: left flush, right flush ──────────────────────────────────────
@@ -3586,7 +3747,9 @@ fn render_backups(f: &mut ratatui::Frame, area: Rect, app: &App) {
         Style::default().fg(Color::Blue)
     };
 
-    let items: Vec<ListItem> = BACKUP_STEPS
+    let items: Vec<ListItem> = app
+        .box_type
+        .backup_steps()
         .iter()
         .enumerate()
         .map(|(i, (_id, label))| {
@@ -3843,6 +4006,95 @@ fn select_box_type(
     }
 }
 
+/// Interactive modal dialog prompting for CCDC team number [0-20] at startup.
+fn prompt_team_number(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    detected_team: Option<u8>,
+) -> anyhow::Result<u8> {
+    let default_val = detected_team.unwrap_or(0).to_string();
+    let mut input = default_val;
+    let mut error_msg: Option<String> = None;
+
+    loop {
+        terminal.draw(|f| {
+            let area = f.area();
+            let inner = crate::wizards::modal_popup(f, area, 50, 25, " CCDC Team Number Setup ");
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(2),
+                    Constraint::Length(3),
+                    Constraint::Length(2),
+                    Constraint::Length(1),
+                ])
+                .split(inner);
+
+            f.render_widget(
+                Paragraph::new("Enter Team Number [0-20] (0 = Practice, 1-20 = Competition):")
+                    .style(Style::default().fg(Color::Cyan)),
+                rows[0],
+            );
+
+            let border_style = if error_msg.is_some() {
+                Style::default().fg(Color::Red)
+            } else {
+                Style::default().fg(Color::Yellow)
+            };
+            f.render_widget(
+                Paragraph::new(input.as_str()).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(border_style),
+                ),
+                rows[1],
+            );
+
+            if let Some(ref err) = error_msg {
+                f.render_widget(
+                    Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red)),
+                    rows[2],
+                );
+            }
+
+            f.render_widget(
+                Paragraph::new("[Enter] Confirm   [Backspace] Edit")
+                    .style(Style::default().fg(Color::DarkGray)),
+                rows[3],
+            );
+        })?;
+
+        if event::poll(Duration::from_millis(200))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Enter => {
+                        if let Ok(t) = input.trim().parse::<u8>()
+                            && t <= 20
+                        {
+                            return Ok(t);
+                        } else {
+                            error_msg = Some("Invalid team! Must be 0 to 20.".into());
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                        error_msg = None;
+                    }
+                    KeyCode::Char(c) if c.is_ascii_digit() => {
+                        if input.len() < 3 {
+                            input.push(c);
+                            error_msg = None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 /// Draw the box-type selection overlay on `f`.
 fn draw_box_select(
     f: &mut ratatui::Frame,
@@ -3993,6 +4245,8 @@ fn render_router_config_dialog(f: &mut ratatui::Frame, area: Rect, dlg: &RouterC
     let title = match dlg.step {
         RouterDialogStep::Harden => " Phase 1: Router Hardening Configuration ",
         RouterDialogStep::ConsoleLockdown => " Phase 2: Console Lockdown (Nuke SSH) ",
+        RouterDialogStep::RestoreNat => " Restore NAT Baseline on Router ",
+        RouterDialogStep::RotatePasswords => " Dual Password Rotation & SSH Key Sanitization ",
     };
     let inner = modal_popup(f, area, 65, 75, title);
 
@@ -4165,6 +4419,11 @@ fn render_router(f: &mut ratatui::Frame, area: Rect, app: &App) {
             format!(" VyOS Operations [⚠ PENDING: {} — press 'c'] ", countdown),
             Style::default().fg(Color::Yellow),
         )
+    } else if app.router_focus == RouterFocus::Operations {
+        (
+            " VyOS Operations ".to_string(),
+            Style::default().fg(Color::Yellow),
+        )
     } else {
         (
             " VyOS Operations ".to_string(),
@@ -4227,16 +4486,23 @@ fn render_router(f: &mut ratatui::Frame, area: Rect, app: &App) {
     // Right: output log
     let log_title = if app.router_log_scroll > 0 {
         format!(
-            " Output [Scrolled +{}] (PgUp/PgDn / [/]: scroll, End: bottom) ",
+            " Output [Scrolled +{}] (↑↓: scroll, End: bottom) ",
             app.router_log_scroll
         )
+    } else if app.router_focus == RouterFocus::Log {
+        " Output [↑↓: scroll, End: bottom] ".to_string()
     } else {
-        " Output [PgUp/PgDn / [/]: scroll] ".to_string()
+        " Output ".to_string()
+    };
+    let log_border = if app.router_focus == RouterFocus::Log {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::Cyan)
     };
     let log_block = Block::default()
         .title(log_title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(log_border);
 
     if app.router_log.is_empty() {
         let msg = if app.router_running {
@@ -4332,7 +4598,7 @@ mod tests {
     #[test]
     fn router_tabs_move_router_to_tab_2_and_hide_service_restore() {
         let tabs = Tab::for_box_type(BoxType::Router);
-        assert_eq!(tabs.len(), 8, "Router should have 8 total accessible tabs");
+        assert_eq!(tabs.len(), 7, "Router should have 7 total accessible tabs");
         assert_eq!(
             tabs,
             &[
@@ -4340,29 +4606,41 @@ mod tests {
                 Tab::Router,
                 Tab::Logs,
                 Tab::Scan,
-                Tab::Hardening,
                 Tab::Backups,
                 Tab::Monitor,
                 Tab::Tools,
             ]
         );
         assert!(!tabs.contains(&Tab::ServiceRestore));
+        assert!(!tabs.contains(&Tab::Hardening));
         assert_eq!(tabs[0], Tab::Dashboard);
         assert_eq!(tabs[1], Tab::Router);
         assert_eq!(tabs[2], Tab::Logs);
-        assert_eq!(tabs[7], Tab::Tools);
+        assert_eq!(tabs[6], Tab::Tools);
 
         assert_eq!(Tab::from_digit('1', BoxType::Router), Some(Tab::Dashboard));
         assert_eq!(Tab::from_digit('2', BoxType::Router), Some(Tab::Router));
         assert_eq!(Tab::from_digit('3', BoxType::Router), Some(Tab::Logs));
         assert_eq!(Tab::from_digit('4', BoxType::Router), Some(Tab::Scan));
-        assert_eq!(Tab::from_digit('5', BoxType::Router), Some(Tab::Hardening));
-        assert_eq!(Tab::from_digit('6', BoxType::Router), Some(Tab::Backups));
-        assert_eq!(Tab::from_digit('7', BoxType::Router), Some(Tab::Monitor));
-        assert_eq!(Tab::from_digit('8', BoxType::Router), Some(Tab::Tools));
+        assert_eq!(Tab::from_digit('5', BoxType::Router), Some(Tab::Backups));
+        assert_eq!(Tab::from_digit('6', BoxType::Router), Some(Tab::Monitor));
+        assert_eq!(Tab::from_digit('7', BoxType::Router), Some(Tab::Tools));
+        assert_eq!(Tab::from_digit('8', BoxType::Router), None);
         assert_eq!(Tab::from_digit('9', BoxType::Router), None);
         assert_eq!(Tab::from_digit('0', BoxType::Router), None);
-        assert_eq!(Tab::from_digit('a', BoxType::Router), None);
+
+        assert_eq!(Tab::digit_for(Tab::Dashboard, BoxType::Router), Some('1'));
+        assert_eq!(Tab::digit_for(Tab::Router, BoxType::Router), Some('2'));
+        assert_eq!(Tab::digit_for(Tab::Logs, BoxType::Router), Some('3'));
+        assert_eq!(Tab::digit_for(Tab::Scan, BoxType::Router), Some('4'));
+        assert_eq!(Tab::digit_for(Tab::Backups, BoxType::Router), Some('5'));
+        assert_eq!(Tab::digit_for(Tab::Monitor, BoxType::Router), Some('6'));
+        assert_eq!(Tab::digit_for(Tab::Tools, BoxType::Router), Some('7'));
+        assert_eq!(Tab::digit_for(Tab::Hardening, BoxType::Router), None);
+        assert_eq!(Tab::digit_for(Tab::ServiceRestore, BoxType::Router), None);
+
+        assert_eq!(Tab::digit_for(Tab::Scan, BoxType::Web), Some('3'));
+        assert_eq!(Tab::digit_for(Tab::Hardening, BoxType::Web), Some('4'));
     }
 }
 

@@ -10,6 +10,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use crate::core::{BoxType, Finding, Severity};
 use crate::score_check::ServiceHistory;
+use crate::tui::app::Tab;
 
 /// One logged-in user session from `who`.
 #[derive(Debug, Clone)]
@@ -70,7 +71,7 @@ pub fn render(
 
     render_services(f, left_rows[0], box_type, services);
     render_sessions(f, left_rows[1], sessions, authorized_users);
-    render_findings(f, cols[1], findings);
+    render_findings(f, cols[1], box_type, findings);
     render_sysinfo(f, right_rows[0]);
     render_auth_events(f, right_rows[1], auth_events);
 
@@ -195,7 +196,12 @@ fn render_sessions(
 }
 
 /// Render the findings summary panel with severity counts.
-fn render_findings(f: &mut Frame, area: ratatui::layout::Rect, findings: &[Finding]) {
+fn render_findings(
+    f: &mut Frame,
+    area: ratatui::layout::Rect,
+    box_type: BoxType,
+    findings: &[Finding],
+) {
     let crit = findings
         .iter()
         .filter(|f| f.severity == Severity::Critical)
@@ -266,7 +272,9 @@ fn render_findings(f: &mut Frame, area: ratatui::layout::Rect, findings: &[Findi
         .border_style(Style::default().fg(border_color));
 
     if items.is_empty() {
-        let p = Paragraph::new("No findings yet — run a scan with [3]")
+        let scan_digit = Tab::digit_for(Tab::Scan, box_type).unwrap_or('3');
+        let prompt = format!("No findings yet — run a scan with [{scan_digit}]");
+        let p = Paragraph::new(prompt)
             .block(block)
             .style(Style::default().fg(Color::DarkGray));
         f.render_widget(p, area);

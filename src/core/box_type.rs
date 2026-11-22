@@ -150,7 +150,326 @@ impl BoxType {
             ("configs", "Deploy Hardened Configs"),
         ]
     }
+
+    /// Audit and scan modules available for this box type: `(id, display_label, is_anti_persistence, interval)`.
+    ///
+    /// On [`BoxType::Router`], returns the 8 dedicated VyOS audit modules grounded in router topology.
+    /// On other box types, returns standard Linux anti-persistence and monitoring modules.
+    pub fn scan_modules(self) -> &'static [(&'static str, &'static str, bool, ScanInterval)] {
+        match self {
+            Self::Router => ROUTER_SCAN_MODULES,
+            _ => STANDARD_SCAN_MODULES,
+        }
+    }
 }
+
+/// How often a module runs in auto-scan mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanInterval {
+    /// Re-runs every 30 seconds — ephemeral state an attacker can change in real time.
+    Continuous,
+    /// Re-runs every 5 minutes — filesystem changes that take time to appear.
+    Frequent,
+    /// Manual only — expensive filesystem walks or rarely-changing config.
+    OnDemand,
+}
+
+/// Dedicated VyOS audit modules for `BoxType::Router`.
+pub const ROUTER_SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
+    (
+        "router_nat",
+        "NAT Rules 10-14 & PAT Baseline",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "router_services",
+        "Running Services vs ROUTER_ALLOW",
+        false,
+        ScanInterval::Continuous,
+    ),
+    (
+        "router_firewall",
+        "Control-Plane & Transit Firewalls",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "router_users",
+        "VyOS & Root User Accounts / SSH Keys",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "router_scripts",
+        "VyOS Script Persistence (/config/scripts)",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "router_tasks",
+        "Task-Scheduler & Cron Persistence",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "router_boot",
+        "Persistent Config Drift (/config/config.boot)",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "router_interfaces",
+        "Network Interfaces & Routing Integrity",
+        false,
+        ScanInterval::Frequent,
+    ),
+];
+
+/// Standard scan modules for non-router Linux boxes.
+pub const STANDARD_SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
+    // ── Anti-persistence ─────────────────────────────────────────────────
+    (
+        "ssh_keys",
+        "SSH authorized_keys",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    ("cron", "Cron jobs", true, ScanInterval::OnDemand),
+    ("at_jobs", "AT job queue", true, ScanInterval::OnDemand),
+    ("users", "User accounts", true, ScanInterval::OnDemand),
+    (
+        "webshells",
+        "Web shells (PHP/ASP/ASPX/Python/Ruby)",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    ("suid", "SUID binaries", true, ScanInterval::OnDemand),
+    (
+        "capabilities",
+        "Binary capabilities",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    ("systemd", "Systemd services", true, ScanInterval::OnDemand),
+    (
+        "kernel_modules",
+        "Kernel modules",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "ld_preload",
+        "LD_PRELOAD hijacking",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "immutable",
+        "Immutable file flags",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "startup_scripts",
+        "Startup scripts + skel",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "rc_local",
+        "rc.local / rc.d scripts",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "prompt_command",
+        "PROMPT_COMMAND backdoors",
+        true,
+        ScanInterval::Frequent,
+    ),
+    ("pam", "PAM configuration", true, ScanInterval::OnDemand),
+    ("grub", "GRUB bootloader", true, ScanInterval::OnDemand),
+    (
+        "initramfs",
+        "initramfs integrity",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "logrotate",
+        "logrotate scripts",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    ("udev", "udev rules", true, ScanInterval::OnDemand),
+    (
+        "xdg_autostart",
+        "XDG autostart entries",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "ssh_config",
+        "sshd_config audit",
+        true,
+        ScanInterval::Frequent,
+    ),
+    ("sudoers", "sudoers audit", true, ScanInterval::Frequent),
+    (
+        "cron_system",
+        "System cron dirs",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "systemd_timers",
+        "Systemd timers",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "shell_aliases",
+        "Shell alias backdoors",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    ("polkit", "polkit rules audit", true, ScanInterval::OnDemand),
+    (
+        "mail_intercept",
+        "Mail intercept (postfix)",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    // ── Monitoring ─────────────────────────────────────────────────────────
+    (
+        "hidden_elf",
+        "Hidden ELF binaries",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "deleted_binaries",
+        "Deleted running binaries",
+        false,
+        ScanInterval::Continuous,
+    ),
+    (
+        "suspicious_services",
+        "Suspicious service units",
+        false,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "auth_log",
+        "Auth log analysis",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "process_tree",
+        "Process tree anomalies",
+        false,
+        ScanInterval::Continuous,
+    ),
+    (
+        "recently_modified",
+        "Recently-modified binaries",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "world_writable",
+        "World-writable paths",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "outbound_connections",
+        "Outbound svc-acct connections",
+        false,
+        ScanInterval::Continuous,
+    ),
+    ("fail2ban", "Fail2ban status", false, ScanInterval::Frequent),
+    (
+        "ai_artifacts",
+        "AI-generated script tells",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "elf_disguise",
+        "ELF/script disguise check",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "perm_anomalies",
+        "Permission/ownership anomalies",
+        false,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "attacker_tools",
+        "Attacker tool detection",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "c2_detection",
+        "C2/implant detection",
+        false,
+        ScanInterval::Continuous,
+    ),
+    (
+        "rootkit_cross_check",
+        "Rootkit PID/port cross-check",
+        false,
+        ScanInterval::Continuous,
+    ),
+    (
+        "proc_maps",
+        "RWX anonymous memory maps",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "binary_integrity",
+        "Binary integrity baseline",
+        false,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "git_hooks",
+        "Malicious git hooks",
+        false,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "webserver_config",
+        "Webserver config audit",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "apt_sources",
+        "APT source integrity",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "bind_mounts",
+        "Bind/overlay mount detection",
+        false,
+        ScanInterval::Continuous,
+    ),
+    (
+        "malicious_binaries",
+        "Malicious/modified binaries",
+        false,
+        ScanInterval::OnDemand,
+    ),
+];
 
 #[derive(Debug, Clone, Copy)]
 pub struct ServiceConfig {

@@ -55,6 +55,26 @@ pub const ROUTER_STEPS: &[RouterStepDef] = &[
         description: "Separately update 'vyos' and 'root' passwords; sanitize authorized_keys",
     },
     RouterStepDef {
+        id: "sanitize_hooks",
+        label: "Sanitize Boot & Commit Hooks",
+        description: "Quarantine /config/scripts/commit hooks and reset bootup scripts",
+    },
+    RouterStepDef {
+        id: "sanitize_cron",
+        label: "Sanitize Task Scheduler & Crons",
+        description: "Delete VyOS system task-scheduler and flush /var/spool/cron/crontabs",
+    },
+    RouterStepDef {
+        id: "clean_rootkits",
+        label: "Remove Dynamic Linker Overrides",
+        description: "Remove /etc/ld.so.preload and inspect systemd generator overrides",
+    },
+    RouterStepDef {
+        id: "purge_containers",
+        label: "Purge Rogue Containers",
+        description: "Remove VyOS container config and stop all running podman containers",
+    },
+    RouterStepDef {
         id: "services",
         label: "Disable Unnecessary Services",
         description: "Apply VyOS 1.4.0 service whitelist; flag unknown daemons",
@@ -161,6 +181,22 @@ pub struct CliArgs {
     /// Separately rotate vyos and root passwords; sanitize authorized_keys
     #[arg(long)]
     pub rotate_passwords: bool,
+
+    /// Quarantine persistence hooks from /config/scripts/ and reset templates
+    #[arg(long)]
+    pub sanitize_hooks: bool,
+
+    /// Delete VyOS task-scheduler and flush /var/spool/cron/crontabs
+    #[arg(long)]
+    pub sanitize_cron: bool,
+
+    /// Remove /etc/ld.so.preload and check systemd overrides
+    #[arg(long)]
+    pub clean_rootkits: bool,
+
+    /// Delete VyOS container config and stop running podman containers
+    #[arg(long)]
+    pub purge_containers: bool,
 
     /// Phase 2: Pull SSH from vyos (Console-Only Administration)
     #[arg(long)]
@@ -433,6 +469,14 @@ pub fn build_script_args(args: &CliArgs) -> Vec<String> {
         script_args.push("--restore-nat".into());
     } else if args.rotate_passwords {
         script_args.push("--rotate-passwords".into());
+    } else if args.sanitize_hooks {
+        script_args.push("--sanitize-hooks".into());
+    } else if args.sanitize_cron {
+        script_args.push("--sanitize-cron".into());
+    } else if args.clean_rootkits {
+        script_args.push("--clean-rootkits".into());
+    } else if args.purge_containers {
+        script_args.push("--purge-containers".into());
     } else if args.console_lockdown {
         script_args.push("--console-lockdown".into());
     } else if args.interactive {

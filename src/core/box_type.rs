@@ -177,52 +177,88 @@ pub enum ScanInterval {
 /// Dedicated VyOS audit modules for `BoxType::Router`.
 pub const ROUTER_SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
     (
-        "router_nat",
-        "NAT Rules 10-14 & PAT Baseline",
+        "router_version",
+        "1. System Version & Identity",
         false,
         ScanInterval::Frequent,
     ),
     (
-        "router_services",
-        "Running Services vs ROUTER_ALLOW",
+        "router_boot_hooks",
+        "2. /config/scripts/ Boot Hooks",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "router_commit_hooks",
+        "3. Commit Hooks (High Risk)",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "router_task_scheduler",
+        "4. Task Scheduler & Linux Cron",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "router_users",
+        "5. Login Accounts & SSH Keys",
+        true,
+        ScanInterval::OnDemand,
+    ),
+    (
+        "router_interfaces",
+        "6. Interfaces, Tunnels & VPNs",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "router_containers",
+        "7. Containers (Podman)",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "router_services_config",
+        "8. Configured System Services",
+        false,
+        ScanInterval::Frequent,
+    ),
+    (
+        "router_listening_sockets",
+        "9. Listening Sockets & Conns",
         false,
         ScanInterval::Continuous,
     ),
     (
-        "router_firewall",
-        "Control-Plane & Transit Firewalls",
-        false,
-        ScanInterval::Frequent,
+        "router_dyn_linker",
+        "10. Linker & Systemd Overrides",
+        true,
+        ScanInterval::Continuous,
     ),
     (
-        "router_users",
-        "VyOS & Root User Accounts / SSH Keys",
+        "router_suid_files",
+        "11. SUID & Modified System Files",
         true,
         ScanInterval::OnDemand,
     ),
     (
-        "router_scripts",
-        "VyOS Script Persistence (/config/scripts)",
-        true,
+        "router_commit_history",
+        "12. Commit History & Revisions",
+        false,
         ScanInterval::OnDemand,
     ),
     (
-        "router_tasks",
-        "Task-Scheduler & Cron Persistence",
-        true,
-        ScanInterval::OnDemand,
-    ),
-    (
-        "router_boot",
-        "Persistent Config Drift (/config/config.boot)",
+        "router_nat",
+        "13. NAT Configuration (IP Baseline)",
         false,
         ScanInterval::Frequent,
     ),
     (
-        "router_interfaces",
-        "Network Interfaces & Routing Integrity",
+        "router_services_whitelist",
+        "14. Services vs ROUTER_ALLOW",
         false,
-        ScanInterval::Frequent,
+        ScanInterval::Continuous,
     ),
 ];
 
@@ -724,5 +760,27 @@ mod scored_unit_tests {
             let steps = bt.hardening_steps();
             assert!(!steps.is_empty());
         }
+    }
+
+    /// Router scan modules must contain exactly the 14 dedicated VyOS audit modules.
+    #[test]
+    fn router_scan_modules_scoping() {
+        let modules = BoxType::Router.scan_modules();
+        assert_eq!(modules.len(), 14);
+        let ids: Vec<&str> = modules.iter().map(|(id, _, _, _)| *id).collect();
+        assert!(ids.contains(&"router_version"));
+        assert!(ids.contains(&"router_boot_hooks"));
+        assert!(ids.contains(&"router_commit_hooks"));
+        assert!(ids.contains(&"router_task_scheduler"));
+        assert!(ids.contains(&"router_users"));
+        assert!(ids.contains(&"router_interfaces"));
+        assert!(ids.contains(&"router_containers"));
+        assert!(ids.contains(&"router_services_config"));
+        assert!(ids.contains(&"router_listening_sockets"));
+        assert!(ids.contains(&"router_dyn_linker"));
+        assert!(ids.contains(&"router_suid_files"));
+        assert!(ids.contains(&"router_commit_history"));
+        assert!(ids.contains(&"router_nat"));
+        assert!(ids.contains(&"router_services_whitelist"));
     }
 }

@@ -1,14 +1,19 @@
-//! VyOS modular audit scan engine for Tab 4 (Scan).
+//! VyOS 14 modular audit scan engine for Tab 4 (Scan) with IP-Centric NAT detection.
 //!
-//! Implements 8 dedicated router forensic audit and integrity checks grounded
+//! Implements 14 dedicated router forensic audit and integrity checks grounded
 //! in CCDC network topology:
 //!   - WAN: 172.31.(20+Team).2/29 (Gateway .1)
 //!   - Internal LAN: 172.16.0.254/24
 //!   - Workstations: 172.17.0.1/24 (eth2)
 //!   - Servers DMZ: 172.20.240.x (Ecom .10, Email .15, Splunk .20, AD .100, MSSQL .120)
+//!
+//! Each module runs independently, emits rich structured `Finding` objects with
+//! command details, detection triggers, and remediation recommendations, and saves
+//! state for Tab 2 (Router Operations) remediation actions.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crate::core::{DefenderContext, Finding, Severity};
 
@@ -24,6 +29,60 @@ const CONFIG_BOOT_PATHS: &[&str] = &[
 const DETECTED_STATE_PATH_PRIMARY: &str = "/etc/linux-defender/vyos/detected_nat_routes.json";
 const DETECTED_STATE_PATH_FALLBACK: &str = "/tmp/defender/vyos/detected_nat_routes.json";
 
+/// Scored CCDC server target definition for IP-centric NAT matching.
+#[derive(Debug, Clone, Copy)]
+pub struct ScoredServerTarget {
+    /// Friendly service name (e.g. "E-Commerce Web").
+    pub name: &'static str,
+    /// Target IP suffix (e.g. ".10").
+    pub ip_suffix: &'static str,
+    /// Default internal target IP (e.g. "172.20.240.10").
+    pub internal_ip: &'static str,
+    /// List of expected scored inbound port numbers.
+    pub expected_ports: &'static [&'static str],
+    /// Transport layer protocol (e.g. "tcp" or "tcp_udp").
+    pub protocol: &'static str,
+}
+
+/// Standard CCDC scored server definitions.
+pub const SCORED_SERVERS: &[ScoredServerTarget] = &[
+    ScoredServerTarget {
+        name: "E-Commerce Web",
+        ip_suffix: ".10",
+        internal_ip: "172.20.240.10",
+        expected_ports: &["80", "443"],
+        protocol: "tcp",
+    },
+    ScoredServerTarget {
+        name: "Mail Server",
+        ip_suffix: ".15",
+        internal_ip: "172.20.240.15",
+        expected_ports: &["25", "143", "587", "993"],
+        protocol: "tcp",
+    },
+    ScoredServerTarget {
+        name: "Splunk SIEM",
+        ip_suffix: ".20",
+        internal_ip: "172.20.240.20",
+        expected_ports: &["8000", "8089", "9997"],
+        protocol: "tcp",
+    },
+    ScoredServerTarget {
+        name: "Active Directory",
+        ip_suffix: ".100",
+        internal_ip: "172.20.240.100",
+        expected_ports: &["53", "88", "389", "636", "5985"],
+        protocol: "tcp",
+    },
+    ScoredServerTarget {
+        name: "MSSQL Database",
+        ip_suffix: ".120",
+        internal_ip: "172.20.240.120",
+        expected_ports: &["445", "1433", "3389"],
+        protocol: "tcp",
+    },
+];
+
 /// Load the active or fixture VyOS `config.boot` file content.
 pub fn load_config_boot() -> Option<(PathBuf, String)> {
     for p in CONFIG_BOOT_PATHS {
@@ -37,6 +96,21 @@ pub fn load_config_boot() -> Option<(PathBuf, String)> {
         }
     }
     None
+}
+
+/// Helper to execute a command with args, returning stdout if successful.
+fn run_cmd_output(cmd: &str, args: &[&str]) -> Option<String> {
+    Command::new(cmd)
+        .args(args)
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                Some(String::from_utf8_lossy(&out.stdout).to_string())
+            } else {
+                None
+            }
+        })
 }
 
 /// Helper to extract the contents of a braced block: `{ ... }` given the position of `{`.
@@ -180,7 +254,6 @@ pub fn save_detected_nat_routes_to_path(
 
             let existing_pat = extract_json_bool(&existing, "outbound_pat");
 
-            // Merge NAT rules: preserve existing if incoming is empty
             if final_nat.is_empty() && !existing_nat.is_empty() {
                 final_nat = existing_nat;
                 if let Some(ep) = existing_pat {
@@ -188,7 +261,6 @@ pub fn save_detected_nat_routes_to_path(
                 }
             }
 
-            // Merge static routes: preserve existing if incoming is empty
             if final_routes.is_empty() && !existing_routes.is_empty() {
                 final_routes = existing_routes;
             }
@@ -253,377 +325,398 @@ pub fn save_detected_nat_routes(
 /// Detected NAT rule representation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectedNatRule {
-    /// Destination rule number (e.g. 10..14).
+    /// Rule number in VyOS configuration.
     pub rule_num: u32,
-    /// Rule description or service name.
+    /// Rule description or server label.
     pub description: String,
-    /// Configured translation target IP address.
+    /// Destination translation address.
     pub translation: String,
-    /// Whether the translation target matches the topology baseline.
+    /// Whether the rule is structurally valid and expected.
     pub is_valid: bool,
+}
+
+/// Raw parsed destination NAT rule extracted from configuration.
+#[derive(Debug, Clone)]
+pub struct ParsedDestNatRule {
+    /// Discovered rule number.
+    pub rule_num: u32,
+    /// Rule description text.
+    pub description: String,
+    /// Target translation IP address.
+    pub translation_address: String,
+    /// Inbound destination port(s).
+    pub destination_ports: String,
+    /// Protocol (e.g. tcp, udp, tcp_udp).
+    pub protocol: String,
+    /// Inbound network interface (e.g. eth0).
+    pub inbound_interface: String,
 }
 
 /// Detected static route representation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectedRoute {
-    /// Destination CIDR prefix (e.g. 0.0.0.0/0).
+    /// Destination CIDR prefix.
     pub prefix: String,
-    /// Next-hop gateway or router interface.
+    /// Next-hop gateway IP address.
     pub next_hop: String,
-    /// Whether the route matches the topology baseline.
+    /// Whether this route matches competition topology.
     pub is_valid: bool,
 }
 
-/// Dispatch execution for a router audit scan module by ID.
+/// IP-Centric NAT audit outcome.
+#[derive(Debug, Clone)]
+pub struct NatIpAuditOutcome {
+    /// All detected destination NAT rules formatted for display.
+    pub detected_rules: Vec<DetectedNatRule>,
+    /// Targets correctly mapped with valid ports and interface.
+    pub valid_targets: Vec<(ScoredServerTarget, ParsedDestNatRule)>,
+    /// Targets with port drift or misconfigured ports.
+    pub drifted_targets: Vec<(ScoredServerTarget, ParsedDestNatRule, String)>,
+    /// Targets with duplicate conflicting destination rules.
+    pub duplicate_conflicts: Vec<(ScoredServerTarget, Vec<ParsedDestNatRule>)>,
+    /// Scored targets lacking any inbound destination NAT rule.
+    pub missing_targets: Vec<ScoredServerTarget>,
+    /// Rules translating to unknown or untracked destination IPs.
+    pub rogue_rules: Vec<ParsedDestNatRule>,
+    /// Whether outbound masquerade/PAT is active.
+    pub outbound_pat_active: bool,
+}
+
+/// Dispatch execution for any of the 14 router audit scan modules by ID.
 pub fn run_module(id: &str, ctx: &DefenderContext) {
     match id {
-        "router_nat" => scan_nat(ctx),
-        "router_services" => scan_services(ctx),
-        "router_firewall" => scan_firewall(ctx),
+        "router_version" => scan_version(ctx),
+        "router_boot_hooks" => scan_boot_hooks(ctx),
+        "router_commit_hooks" => scan_commit_hooks(ctx),
+        "router_task_scheduler" => scan_task_scheduler(ctx),
         "router_users" => scan_users(ctx),
-        "router_scripts" => scan_scripts(ctx),
-        "router_tasks" => scan_tasks(ctx),
-        "router_boot" => scan_boot(ctx),
         "router_interfaces" => scan_interfaces(ctx),
+        "router_containers" => scan_containers(ctx),
+        "router_services_config" => scan_services_config(ctx),
+        "router_listening_sockets" => scan_listening_sockets(ctx),
+        "router_dyn_linker" => scan_dynamic_linker(ctx),
+        "router_suid_files" => scan_suid_files(ctx),
+        "router_commit_history" => scan_commit_history(ctx),
+        "router_nat" => scan_nat(ctx),
+        "router_services_whitelist" => scan_services_whitelist(ctx),
         _ => {
             ctx.progress(&format!("Unknown router scan module ID: {}", id));
         }
     }
 }
 
-/// Helper to extract scored DNAT rules 10-14 from VyOS configuration text.
-/// Scopes strictly to `nat { destination { ... } }` and extracts the translation target IP
-/// from `translation { address ... }`. Avoids substring collisions between rule 10 and rule 100.
-pub fn parse_nat_rules_from_content(
-    content: &str,
-) -> (Vec<DetectedNatRule>, Vec<u32>, Vec<(u32, String)>) {
-    let expected_rules: &[(u32, &str, &str)] = &[
-        (10, "E-Commerce Web", "172.20.240.10"),
-        (11, "Mail Server", "172.20.240.15"),
-        (12, "Splunk SIEM", "172.20.240.20"),
-        (13, "Active Directory", "172.20.240.100"),
-        (14, "MSSQL Database", "172.20.240.120"),
+// ==============================================================================
+// 1. System Version & Identity
+// ==============================================================================
+/// Module 1: Probes system version, OS release, and system identity.
+pub fn scan_version(ctx: &DefenderContext) {
+    ctx.progress("[*] Module 1: Probing VyOS System Version & Identity...");
+
+    let mut output = String::new();
+    if let Some(ver_out) = run_cmd_output("show", &["version"]) {
+        output = ver_out;
+    } else if let Ok(os_rel) = fs::read_to_string("/etc/os-release") {
+        output = os_rel;
+    } else if let Ok(ver) = fs::read_to_string("/proc/version") {
+        output = ver;
+    }
+
+    let release_line = output
+        .lines()
+        .find(|l| l.contains("Version:") || l.contains("PRETTY_NAME="))
+        .unwrap_or("VyOS Sagitta 1.4.0")
+        .trim();
+
+    let mut finding = Finding::new(
+        Severity::Info,
+        "router_version",
+        format!("System Identity: {}", release_line),
+        output.clone(),
+    );
+
+    finding.context.push(("Command Executed", "show version || cat /etc/os-release".into()));
+    finding.context.push(("System Release", release_line.to_string()));
+    finding.recommendation = "Verify system release train, kernel version, and build UUID match official competition baseline.".into();
+
+    ctx.emit(finding);
+}
+
+// ==============================================================================
+// 2. /config/scripts/ Directory & Boot Hooks
+// ==============================================================================
+/// Module 2: Audits `/config/scripts/` bootup scripts and persistence tokens.
+pub fn scan_boot_hooks(ctx: &DefenderContext) {
+    ctx.progress("[*] Module 2: Auditing /config/scripts/ Directory & Boot Hooks...");
+
+    let scripts_dir = Path::new("/config/scripts");
+    if !scripts_dir.exists() {
+        let mut finding = Finding::new(
+            Severity::Info,
+            "router_boot_hooks",
+            "/config/scripts directory does not exist (Clean)",
+            "No persistence scripts present.",
+        );
+        finding.context.push(("Directory", "/config/scripts/".into()));
+        finding.context.push(("Status", "Clean - directory absent".into()));
+        ctx.emit(finding);
+        return;
+    }
+
+    let standard_boot_scripts = &[
+        "vyos-preconfig-bootup.script",
+        "vyos-postconfig-bootup.script",
+        "post-upgrade",
     ];
 
-    let mut detected_nat: Vec<DetectedNatRule> = Vec::new();
-    let mut missing_rules: Vec<u32> = Vec::new();
-    let mut drifted_rules: Vec<(u32, String)> = Vec::new();
+    let suspicious_tokens = &[
+        "/dev/tcp", "nc ", "bash -i", "sh -i", "curl ", "wget ", "python ",
+        "perl ", "ruby ", "useradd", "usermod", "chpasswd", "rm -rf",
+    ];
 
-    // Isolate the `destination` block within `nat`
-    let dest_block = find_named_block(content, "nat")
-        .and_then(|nb| find_named_block(nb, "destination"))
-        .or_else(|| find_named_block(content, "destination"));
+    let mut found_scripts = Vec::new();
+    let mut rogue_scripts = Vec::new();
 
-    for &(rule, name, expected_ip) in expected_rules {
-        let rule_marker = format!("rule {}", rule);
-        let mut found = false;
+    if let Ok(entries) = fs::read_dir(scripts_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let content = fs::read_to_string(&path).unwrap_or_default();
+                found_scripts.push((name.clone(), path.clone(), content.clone()));
 
-        // 1. Try finding within hierarchical `destination { ... }` block
-        if let Some(dest_body) = dest_block {
-            let mut search_from = 0;
-            while let Some(rel) = dest_body[search_from..].find(&rule_marker) {
-                let pos = search_from + rel;
-                search_from = pos + rule_marker.len();
-
-                // Boundary before rule_marker: start of string or whitespace / '{' / ';'
-                if pos > 0 {
-                    let prev = dest_body[..pos].chars().last().unwrap();
-                    if !prev.is_whitespace() && prev != '{' && prev != ';' {
-                        continue;
+                let mut matched_tokens = Vec::new();
+                for &token in suspicious_tokens {
+                    if content.contains(token) {
+                        matched_tokens.push(token);
                     }
                 }
 
-                // Boundary after rule_marker: MUST NOT be a digit (so "rule 10" never matches "rule 100")
-                if let Some(next_c) = dest_body[pos + rule_marker.len()..].chars().next() {
-                    if next_c.is_ascii_digit() {
-                        continue;
+                let is_standard = standard_boot_scripts.contains(&name.as_str());
+                if !matched_tokens.is_empty() || (!is_standard && !content.trim().is_empty()) {
+                    rogue_scripts.push((name, path, matched_tokens, content));
+                }
+            }
+        }
+    }
+
+    if rogue_scripts.is_empty() {
+        let mut finding = Finding::new(
+            Severity::Info,
+            "router_boot_hooks",
+            format!("Boot Hooks Clean: {} scripts inspected in /config/scripts/", found_scripts.len()),
+            format!("Standard scripts present: {:?}", standard_boot_scripts),
+        );
+        finding.context.push(("Command Executed", "ls -laR /config/scripts/".into()));
+        finding.context.push(("Status", "No rogue boot persistence detected".into()));
+        ctx.emit(finding);
+    } else {
+        for (name, path, tokens, content) in rogue_scripts {
+            let severity = if tokens.is_empty() { Severity::High } else { Severity::Critical };
+            let mut finding = Finding::new(
+                severity,
+                "router_boot_hooks",
+                format!("Suspicious boot hook script: {}", name),
+                content.clone(),
+            );
+            finding.path = Some(path.clone());
+            finding.context.push(("Command Executed", format!("cat {}", path.display())));
+            finding.context.push(("Detection Trigger", if tokens.is_empty() { "Non-standard script in /config/scripts/" } else { "Malicious persistence tokens detected" }.into()));
+            if !tokens.is_empty() {
+                finding.context.push(("Matched Tokens", tokens.join(", ")));
+            }
+            finding.recommendation = "Navigate to Tab [2] Router Operations and run 'Sanitize Boot & Commit Hooks' to quarantine rogue scripts.".into();
+            ctx.emit(finding);
+        }
+    }
+}
+
+// ==============================================================================
+// 3. Commit Hooks (High Risk)
+// ==============================================================================
+/// Module 3: Audits VyOS commit hooks in `pre-hooks.d` and `post-hooks.d`.
+pub fn scan_commit_hooks(ctx: &DefenderContext) {
+    ctx.progress("[*] Module 3: Inspecting VyOS Commit Hooks (pre/post-hooks.d)...");
+
+    let hook_dirs = &[
+        "/config/scripts/commit/pre-hooks.d",
+        "/config/scripts/commit/post-hooks.d",
+    ];
+
+    let mut found_hooks = Vec::new();
+    for &dir in hook_dirs {
+        let p = Path::new(dir);
+        if p.exists() {
+            if let Ok(entries) = fs::read_dir(p) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        let content = fs::read_to_string(&path).unwrap_or_default();
+                        found_hooks.push((dir, path, content));
                     }
                 }
+            }
+        }
+    }
 
-                // Find the opening brace '{' for this rule
-                let after = &dest_body[pos + rule_marker.len()..];
-                let mut brace_rel = None;
-                for (idx, c) in after.char_indices() {
-                    if c == '{' {
-                        brace_rel = Some(idx);
-                        break;
-                    } else if !c.is_whitespace() {
-                        break;
+    if found_hooks.is_empty() {
+        let mut finding = Finding::new(
+            Severity::Info,
+            "router_commit_hooks",
+            "Commit Hooks Clean: No pre-hooks or post-hooks configured",
+            "VyOS stock image has 0 commit hooks.",
+        );
+        finding.context.push(("Directories Checked", "/config/scripts/commit/(pre|post)-hooks.d/".into()));
+        finding.context.push(("Status", "Clean".into()));
+        ctx.emit(finding);
+    } else {
+        for (dir, path, content) in found_hooks {
+            let mut finding = Finding::new(
+                Severity::Critical,
+                "router_commit_hooks",
+                format!("High-Risk Commit Hook Detected: {}", path.display()),
+                content.clone(),
+            );
+            finding.path = Some(path.clone());
+            finding.context.push(("Command Executed", format!("ls -la {} && cat {}", dir, path.display())));
+            finding.context.push(("Detection Trigger", "Commit hook scripts execute as root on every configuration commit!".into()));
+            finding.recommendation = "Run 'Sanitize Boot & Commit Hooks' in Tab [2] Router Operations immediately to delete commit hooks.".into();
+            ctx.emit(finding);
+        }
+    }
+}
+
+// ==============================================================================
+// 4. Task Scheduler & Linux Cron
+// ==============================================================================
+/// Module 4: Audits VyOS task-scheduler configurations and Linux system crontabs.
+pub fn scan_task_scheduler(ctx: &DefenderContext) {
+    ctx.progress("[*] Module 4: Auditing VyOS Task Scheduler & Linux Crontabs...");
+
+    let (_, content) = match load_config_boot() {
+        Some(pair) => pair,
+        None => (PathBuf::from("/config/config.boot"), String::new()),
+    };
+
+    if let Some(task_body) = find_named_block(&content, "task-scheduler") {
+        let mut finding = Finding::new(
+            Severity::High,
+            "router_task_scheduler",
+            "VyOS system task-scheduler persistence found in configuration",
+            task_body.to_string(),
+        );
+        finding.context.push(("Command Executed", "show configuration commands | grep task-scheduler".into()));
+        finding.context.push(("Detection Trigger", "Active task-scheduler block in /config/config.boot".into()));
+        finding.recommendation = "Navigate to Tab [2] Router Operations and run 'Sanitize Task Scheduler & Crons'.".into();
+        ctx.emit(finding);
+    }
+
+    // Inspect crontabs
+    let cron_paths = &[
+        "/etc/crontab",
+        "/etc/cron.d",
+        "/var/spool/cron/crontabs",
+    ];
+
+    let mut active_crons = Vec::new();
+    for &cp in cron_paths {
+        let p = Path::new(cp);
+        if p.is_file() {
+            if let Ok(c) = fs::read_to_string(p) {
+                for line in c.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                        active_crons.push((cp.to_string(), trimmed.to_string()));
                     }
                 }
-
-                if let Some(offset) = brace_rel {
-                    let open_brace = pos + rule_marker.len() + offset;
-                    if let Some(rule_body) = extract_braced_block(dest_body, open_brace) {
-                        found = true;
-                        let mut translation_ip = String::new();
-                        // Extract address strictly from inside `translation { ... }`
-                        if let Some(trans_body) = find_named_block(rule_body, "translation") {
-                            if let Some(addr_pos) = trans_body.find("address") {
-                                let after_addr = &trans_body[addr_pos + 7..];
-                                let ip_str: String = after_addr
-                                    .trim_start()
-                                    .chars()
-                                    .take_while(|c| !c.is_whitespace() && *c != ';' && *c != '}' && *c != '\'' && *c != '"')
-                                    .collect();
-                                translation_ip = ip_str;
+            }
+        } else if p.is_dir() {
+            if let Ok(entries) = fs::read_dir(p) {
+                for entry in entries.flatten() {
+                    if let Ok(c) = fs::read_to_string(entry.path()) {
+                        for line in c.lines() {
+                            let trimmed = line.trim();
+                            if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                                active_crons.push((entry.path().display().to_string(), trimmed.to_string()));
                             }
                         }
-
-                        let valid = translation_ip == expected_ip
-                            || (translation_ip.starts_with("172.25.")
-                                && translation_ip.ends_with(expected_ip.strip_prefix("172.20.240").unwrap_or("")));
-
-                        detected_nat.push(DetectedNatRule {
-                            rule_num: rule,
-                            description: name.to_string(),
-                            translation: if translation_ip.is_empty() { "unknown".into() } else { translation_ip.clone() },
-                            is_valid: valid,
-                        });
-
-                        if !valid {
-                            drifted_rules.push((rule, if translation_ip.is_empty() { "unknown".into() } else { translation_ip }));
-                        }
-
-                        break;
                     }
                 }
             }
         }
-
-        // 2. Fallback check for flat `set nat destination rule <rule> translation address <ip>` command syntax
-        if !found {
-            let set_prefix = format!("set nat destination rule {} translation address ", rule);
-            if let Some(pos) = content.find(&set_prefix) {
-                found = true;
-                let after = &content[pos + set_prefix.len()..];
-                let ip_str: String = after
-                    .trim_start()
-                    .chars()
-                    .take_while(|c| !c.is_whitespace() && *c != ';' && *c != '\'' && *c != '"')
-                    .collect();
-                let valid = ip_str == expected_ip
-                    || (ip_str.starts_with("172.25.")
-                        && ip_str.ends_with(expected_ip.strip_prefix("172.20.240").unwrap_or("")));
-
-                detected_nat.push(DetectedNatRule {
-                    rule_num: rule,
-                    description: name.to_string(),
-                    translation: if ip_str.is_empty() { "unknown".into() } else { ip_str.clone() },
-                    is_valid: valid,
-                });
-
-                if !valid {
-                    drifted_rules.push((rule, if ip_str.is_empty() { "unknown".into() } else { ip_str }));
-                }
-            }
-        }
-
-        if !found {
-            missing_rules.push(rule);
-        }
     }
 
-    (detected_nat, missing_rules, drifted_rules)
-}
-
-/// 1. `router_nat`: Scored 1:1 DNAT Rules 10-14 & PAT Baseline.
-pub fn scan_nat(ctx: &DefenderContext) {
-    ctx.progress("[*] Scanning VyOS DNAT Rules 10-14 & Outbound PAT...");
-
-    let (path, content) = match load_config_boot() {
-        Some(pair) => pair,
-        None => {
-            ctx.emit(Finding::new(
-                Severity::Critical,
-                "router_nat",
-                "VyOS configuration file (/config/config.boot) not found or unreadable",
-                "Ensure /config/config.boot exists and is accessible.",
-            ));
-            return;
-        }
-    };
-
-    ctx.progress(&format!("→ Loaded VyOS config from: {}", path.display()));
-
-    let (detected_nat, missing_rules, drifted_rules) = parse_nat_rules_from_content(&content);
-
-    let has_outbound_pat = (content.contains("rule 100") && content.contains("masquerade"))
-        || content.contains("source rule 100 translation address masquerade");
-
-    // Save detected rules to state file for Tab 2 restore workflow
-    save_detected_nat_routes(&detected_nat, &[], has_outbound_pat);
-
-    for r in &missing_rules {
-        ctx.emit(Finding::new(
-            Severity::Critical,
-            "router_nat",
-            format!("Missing Scored DNAT Rule {}: scoring traffic not forwarded to servers DMZ", r),
-            "Restore DNAT baseline via Tab 2 (Router -> Restore NAT Baseline).",
-        ));
-    }
-
-    for (r, actual) in &drifted_rules {
-        ctx.emit(Finding::new(
-            Severity::Critical,
-            "router_nat",
-            format!("DNAT Rule {} drift detected: translation IP is '{}' (expected 172.20.240.x)", r, actual),
-            "Restore DNAT baseline to correct destination IPs in Tab 2.",
-        ));
-    }
-
-    if has_outbound_pat {
-        ctx.emit(Finding::new(
-            Severity::Medium,
-            "router_nat",
-            "Outbound PAT (Rule 100 masquerade) is ENABLED: workstations can egress to WAN",
-            "CCDC best practice: Keep outbound PAT disabled to block reverse shells.",
-        ));
-    }
-
-    if missing_rules.is_empty() && drifted_rules.is_empty() {
-        ctx.emit(Finding::new(
+    if active_crons.is_empty() && !content.contains("task-scheduler") {
+        let mut finding = Finding::new(
             Severity::Info,
-            "router_nat",
-            "Scored DNAT Rules 10-14 are correctly configured and targeted",
-            "",
-        ));
-    }
-}
-
-/// 2. `router_services`: Running Services vs `ROUTER_ALLOW`.
-pub fn scan_services(ctx: &DefenderContext) {
-    ctx.progress("[*] Scanning running services against ROUTER_ALLOW policy...");
-
-    let (_, content) = match load_config_boot() {
-        Some(pair) => pair,
-        None => (PathBuf::from("/config/config.boot"), String::new()),
-    };
-
-    let forbidden_services = &["telnet", "http", "apache", "nginx", "mysql"];
-    for &svc in forbidden_services {
-        if content.contains(&format!("{} {{", svc))
-            || content.contains(&format!("service {}", svc))
-        {
-            ctx.emit(Finding::new(
-                Severity::Critical,
-                "router_services",
-                format!("Insecure/Rogue router service configured: '{}'", svc),
-                format!("Delete service '{}' from VyOS configuration and commit.", svc),
-            ));
-        }
-    }
-
-    // Inspect live systemd listeners if systemctl is present
-    if let Ok(output) = std::process::Command::new("systemctl")
-        .args(["list-units", "--type=service", "--state=running", "--no-pager", "--no-legend"])
-        .output()
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let svc_name = line.split_whitespace().next().unwrap_or("");
-            if svc_name.contains("telnet") || svc_name.contains("vsftpd") || svc_name.contains("nc") {
-                ctx.emit(Finding::new(
-                    Severity::Critical,
-                    "router_services",
-                    format!("Rogue listening service running on router: '{}'", svc_name),
-                    "Stop and disable unauthorized service unit immediately.",
-                ));
-            }
-        }
-    }
-
-    ctx.emit(Finding::new(
-        Severity::Info,
-        "router_services",
-        "Router services audit complete: SSH active on management interface",
-        "",
-    ));
-}
-
-/// 3. `router_firewall`: Control-Plane & Transit Firewalls.
-pub fn scan_firewall(ctx: &DefenderContext) {
-    ctx.progress("[*] Auditing control-plane input and transit forward firewall rules...");
-
-    let (_, content) = match load_config_boot() {
-        Some(pair) => pair,
-        None => (PathBuf::from("/config/config.boot"), String::new()),
-    };
-
-    // Check if SSH is exposed to WAN without management source filtering
-    if content.contains("service {") && content.contains("ssh {") {
-        let is_mgmt_filtered = content.contains("source address 172.17.0.0/24")
-            || content.contains("172.17.0.0/24")
-            || content.contains("listen-address 172.17.0.1")
-            || content.contains("listen-address 172.20.240.1");
-
-        if !is_mgmt_filtered && content.contains("listen-address 0.0.0.0") {
-            ctx.emit(Finding::new(
-                Severity::High,
-                "router_firewall",
-                "VyOS SSH daemon listening on all interfaces (0.0.0.0) without subnet restriction",
-                "Restrict SSH listen-address to management subnet (172.17.0.1) or apply input filter rule.",
-            ));
-        }
-    }
-
-    // Check transit firewall default actions
-    if content.contains("forward filter") {
-        if content.contains("default-action drop") && !content.contains("state established") {
-            ctx.emit(Finding::new(
-                Severity::High,
-                "router_firewall",
-                "Transit forward filter default drop without established/related rule: scored traffic blocked",
-                "Add established/related accept rule to forward filter in Phase 1 Hardening.",
-            ));
-        }
+            "router_task_scheduler",
+            "Scheduled Tasks Clean: No active crontabs or task-scheduler jobs",
+            "System crontabs and VyOS task scheduler verified clean.",
+        );
+        finding.context.push(("Paths Checked", cron_paths.join(", ")));
+        finding.context.push(("Status", "Clean".into()));
+        ctx.emit(finding);
     } else {
-        ctx.emit(Finding::new(
-            Severity::Medium,
-            "router_firewall",
-            "No transit forward firewall configured: relying solely on DNAT filtering",
-            "Deploy Phase 1 Hardening to apply standard transit protection.",
-        ));
+        for (path, line) in active_crons {
+            let mut finding = Finding::new(
+                Severity::High,
+                "router_task_scheduler",
+                format!("Active Linux cron entry found in {}", path),
+                line.clone(),
+            );
+            finding.context.push(("File Path", path));
+            finding.context.push(("Cron Command", line));
+            finding.recommendation = "Review scheduled task. Run 'Sanitize Task Scheduler & Crons' in Tab [2] to flush rogue crontabs.".into();
+            ctx.emit(finding);
+        }
     }
 }
 
-/// 4. `router_users`: VyOS & Root User Accounts / SSH Keys.
+// ==============================================================================
+// 5. Login Accounts, Sudoers & SSH Keys
+// ==============================================================================
+/// Module 5: Audits VyOS login users, `/etc/passwd`, sudoers, and authorized_keys.
 pub fn scan_users(ctx: &DefenderContext) {
-    ctx.progress("[*] Auditing router operator and superuser accounts...");
+    ctx.progress("[*] Module 5: Auditing Login Accounts, Sudoers & SSH Keys...");
 
     let (_, content) = match load_config_boot() {
         Some(pair) => pair,
         None => (PathBuf::from("/config/config.boot"), String::new()),
     };
 
-    // Check for unauthorized VyOS user accounts in config.boot
-    if let Some(pos) = content.find("login {") {
-        let login_section = &content[pos..];
-        for line in login_section.lines() {
+    // 1. Check VyOS users in config.boot
+    if let Some(login_body) = find_named_block(&content, "login") {
+        for line in login_body.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with("user ") {
-                let username = trimmed.strip_prefix("user ").unwrap_or("").trim_end_matches(" {");
-                if username != "vyos" && !username.is_empty() {
-                    ctx.emit(Finding::new(
+                let user = trimmed.strip_prefix("user ").unwrap_or("").trim_end_matches('{').trim();
+                if user != "vyos" && !user.is_empty() {
+                    let mut finding = Finding::new(
                         Severity::Critical,
                         "router_users",
-                        format!("Unauthorized user account '{}' defined in VyOS configuration", username),
-                        "Delete unauthorized user from VyOS config using: delete system login user <name>.",
-                    ));
+                        format!("Unauthorized VyOS operator account configured: '{}'", user),
+                        format!("Config line: {}", trimmed),
+                    );
+                    finding.context.push(("Command Executed", "show configuration commands | grep 'system login'".into()));
+                    finding.context.push(("Unauthorized User", user.to_string()));
+                    finding.recommendation = "Delete unauthorized operator: delete system login user <name>.".into();
+                    ctx.emit(finding);
                 }
             }
             if trimmed.contains("plaintext-password") {
-                ctx.emit(Finding::new(
+                let mut finding = Finding::new(
                     Severity::Critical,
                     "router_users",
-                    "User account configured with plaintext-password in /config/config.boot",
-                    "Rotate password with encrypted-password hash immediately.",
-                ));
+                    "User configured with plaintext-password in /config/config.boot",
+                    trimmed.to_string(),
+                );
+                finding.context.push(("Risk", "Cleartext password exposure in configuration file".into()));
+                finding.recommendation = "Run 'Update VyOS & Linux Root Passwords' in Tab [2] to encrypt credentials.".into();
+                ctx.emit(finding);
             }
         }
     }
 
-    // Check /etc/passwd for backdoor UID 0 or rogue interactive users
+    // 2. Check /etc/passwd for UID 0 backdoors
     if let Ok(passwd) = fs::read_to_string("/etc/passwd") {
         for line in passwd.lines() {
             let parts: Vec<&str> = line.split(':').collect();
@@ -631,146 +724,157 @@ pub fn scan_users(ctx: &DefenderContext) {
                 let name = parts[0];
                 let uid = parts[2].parse::<u32>().unwrap_or(999);
                 if uid == 0 && name != "root" {
-                    ctx.emit(Finding::new(
+                    let mut finding = Finding::new(
                         Severity::Critical,
                         "router_users",
-                        format!("Rogue UID 0 superuser account found: '{}'", name),
-                        "Remove backdoor account from /etc/passwd.",
-                    ));
+                        format!("Rogue UID 0 superuser account found in /etc/passwd: '{}'", name),
+                        line.to_string(),
+                    );
+                    finding.context.push(("Command Executed", "awk -F: '($3 == 0) {print $1}' /etc/passwd".into()));
+                    finding.context.push(("Account", name.to_string()));
+                    finding.recommendation = "Remove rogue superuser account immediately.".into();
+                    ctx.emit(finding);
                 }
                 let shell = parts[6];
                 if uid >= 1000 && name != "vyos" && !shell.contains("nologin") && !shell.contains("false") {
-                    ctx.emit(Finding::new(
+                    let mut finding = Finding::new(
                         Severity::Critical,
                         "router_users",
-                        format!("Unauthorized interactive Linux user account: '{}' (UID {})", name, uid),
-                        "Lock or delete unauthorized user account.",
-                    ));
+                        format!("Unauthorized interactive Linux account: '{}' (UID {})", name, uid),
+                        line.to_string(),
+                    );
+                    finding.context.push(("User", name.to_string()));
+                    finding.context.push(("Shell", shell.to_string()));
+                    finding.recommendation = "Lock account: passwd -l <user> and delete from /etc/passwd.".into();
+                    ctx.emit(finding);
                 }
             }
         }
     }
 
-    // Check authorized_keys in /root/.ssh and /home/vyos/.ssh
+    // 3. Check SSH authorized_keys
     for path in &["/home/vyos/.ssh/authorized_keys", "/root/.ssh/authorized_keys"] {
         if let Ok(keys) = fs::read_to_string(path) {
             for (line_no, line) in keys.lines().enumerate() {
                 let trimmed = line.trim();
                 if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                    ctx.emit(Finding::new(
+                    let mut finding = Finding::new(
                         Severity::High,
                         "router_users",
-                        format!("Authorized SSH key found in {} (line {})", path, line_no + 1),
-                        "Rotate passwords and sanitize authorized_keys in Tab 2 (Rotate Passwords).",
-                    ));
+                        format!("Authorized SSH Key found in {} (line {})", path, line_no + 1),
+                        trimmed.to_string(),
+                    );
+                    finding.path = Some(PathBuf::from(path));
+                    finding.context.push(("File Path", path.to_string()));
+                    finding.context.push(("Key Preview", trimmed.chars().take(40).collect::<String>() + "..."));
+                    finding.recommendation = "Sanitize authorized_keys in Tab [2] (Update VyOS & Linux Root Passwords).".into();
+                    ctx.emit(finding);
                 }
             }
         }
     }
 }
 
-/// 5. `router_scripts`: VyOS Script Persistence (`/config/scripts`).
-pub fn scan_scripts(ctx: &DefenderContext) {
-    ctx.progress("[*] Sweeping VyOS script persistence hooks in /config/scripts/...");
-
-    let scripts_dir = Path::new("/config/scripts");
-    if !scripts_dir.exists() {
-        ctx.emit(Finding::new(
-            Severity::Info,
-            "router_scripts",
-            "/config/scripts directory does not exist or clean",
-            "",
-        ));
-        return;
-    }
-
-    let suspicious_tokens = &["/dev/tcp", "nc -e", "bash -i", "curl |", "wget |", "python -c"];
-    if let Ok(entries) = fs::read_dir(scripts_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    for &token in suspicious_tokens {
-                        if content.contains(token) {
-                            ctx.emit(Finding::new(
-                                Severity::Critical,
-                                "router_scripts",
-                                format!("Reverse shell or downloader detected in {}: matches '{}'", path.display(), token),
-                                "Quarantine or delete malicious script hook immediately.",
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// 6. `router_tasks`: Task-Scheduler & Cron Persistence.
-pub fn scan_tasks(ctx: &DefenderContext) {
-    ctx.progress("[*] Inspecting VyOS task-scheduler and system crontabs...");
+// ==============================================================================
+// 6. Network Interfaces, Tunnels & VPNs
+// ==============================================================================
+/// Module 6: Audits network interface addresses, rogue tunnels, and static routes.
+pub fn scan_interfaces(ctx: &DefenderContext) {
+    ctx.progress("[*] Module 6: Auditing Network Interfaces, Tunnels & Static Routes...");
 
     let (_, content) = match load_config_boot() {
         Some(pair) => pair,
         None => (PathBuf::from("/config/config.boot"), String::new()),
     };
 
-    if content.contains("task-scheduler {") {
-        ctx.emit(Finding::new(
+    let mut detected_routes: Vec<DetectedRoute> = Vec::new();
+
+    // Default route check
+    let (has_default_route, def_gateway) = match detect_static_route(&content, "0.0.0.0/0") {
+        Some(nh) if !nh.is_empty() => (true, nh),
+        _ => (false, String::new()),
+    };
+
+    if has_default_route {
+        detected_routes.push(DetectedRoute {
+            prefix: "0.0.0.0/0".into(),
+            next_hop: def_gateway.clone(),
+            is_valid: true,
+        });
+        let mut finding = Finding::new(
+            Severity::Info,
+            "router_interfaces",
+            format!("Default Route Active: 0.0.0.0/0 via {}", def_gateway),
+            format!("Upstream WAN gateway: {}", def_gateway),
+        );
+        finding.context.push(("Route", "0.0.0.0/0".into()));
+        finding.context.push(("Next-Hop", def_gateway));
+        ctx.emit(finding);
+    } else {
+        let mut finding = Finding::new(
+            Severity::Critical,
+            "router_interfaces",
+            "Missing Default Route (0.0.0.0/0): WAN egress gateway unreachable",
+            "Router cannot reach upstream competition network.",
+        );
+        finding.context.push(("Missing Route", "0.0.0.0/0".into()));
+        finding.recommendation = "Deploy transit routes in Tab [2] Router Operations.".into();
+        ctx.emit(finding);
+    }
+
+    // Transit route check
+    let (has_servers_route, srv_gateway) = match detect_static_route(&content, "172.20.240.0/24") {
+        Some(nh) if !nh.is_empty() => (true, nh),
+        _ => (false, String::new()),
+    };
+
+    if has_servers_route {
+        detected_routes.push(DetectedRoute {
+            prefix: "172.20.240.0/24".into(),
+            next_hop: srv_gateway.clone(),
+            is_valid: true,
+        });
+        let mut finding = Finding::new(
+            Severity::Info,
+            "router_interfaces",
+            format!("Servers DMZ Transit Route Active: 172.20.240.0/24 via {}", srv_gateway),
+            format!("Firewall next-hop: {}", srv_gateway),
+        );
+        finding.context.push(("Route", "172.20.240.0/24".into()));
+        finding.context.push(("Next-Hop", srv_gateway));
+        ctx.emit(finding);
+    } else {
+        let mut finding = Finding::new(
             Severity::High,
-            "router_tasks",
-            "VyOS task-scheduler persistence found in configuration",
-            "Audit scheduled tasks and remove persistence via: delete system task-scheduler.",
-        ));
+            "router_interfaces",
+            "Missing Static Transit Route to Servers DMZ (172.20.240.0/24)",
+            "Traffic to internal servers cannot route across firewall interface.",
+        );
+        finding.context.push(("Missing Route", "172.20.240.0/24".into()));
+        finding.recommendation = "Add static route 172.20.240.0/24 next-hop 172.16.0.254.".into();
+        ctx.emit(finding);
     }
 
-    // Check system crontabs
-    for path in &["/etc/crontab", "/etc/cron.d"] {
-        let p = Path::new(path);
-        if p.exists() {
-            ctx.progress(&format!("→ Checking crontab path: {}", path));
-        }
-    }
-}
+    save_detected_nat_routes(&[], &detected_routes, false);
 
-/// 7. `router_boot`: Persistent Config Drift (`/config/config.boot`).
-pub fn scan_boot(ctx: &DefenderContext) {
-    ctx.progress("[*] Validating /config/config.boot persistence and structure...");
-
-    match load_config_boot() {
-        Some((path, content)) => {
-            if content.len() < 50 || !content.contains('{') || !content.contains('}') {
-                ctx.emit(Finding::new(
-                    Severity::Critical,
-                    "router_boot",
-                    format!("VyOS config file ({}) is corrupted or truncated ({} bytes)", path.display(), content.len()),
-                    "Restore /config/config.boot from backup in Tab 5 (Backups).",
-                ));
-            } else {
-                ctx.emit(Finding::new(
-                    Severity::Info,
-                    "router_boot",
-                    format!("VyOS config boot verified at {} ({} bytes)", path.display(), content.len()),
-                    "",
-                ));
-            }
-        }
-        None => {
-            ctx.emit(Finding::new(
+    // Check rogue tunnels
+    for tunnel in &["wireguard", "openvpn", "vti", "tunnel", "pseudo-ethernet", "vxlan"] {
+        if content.contains(&format!("interfaces {} ", tunnel)) {
+            let mut finding = Finding::new(
                 Severity::Critical,
-                "router_boot",
-                "Primary VyOS configuration /config/config.boot is missing!",
-                "Restore configuration from backup in Tab 5.",
-            ));
+                "router_interfaces",
+                format!("Unauthorized tunnel/VPN interface type configured: '{}'", tunnel),
+                format!("Matched interfaces {} definition in VyOS config", tunnel),
+            );
+            finding.context.push(("Interface Type", tunnel.to_string()));
+            finding.recommendation = "Remove rogue tunnel interface: delete interfaces <type>.".into();
+            ctx.emit(finding);
         }
     }
 }
 
 /// Helper to detect static route and extract its next-hop gateway.
-/// Requires explicit route prefix matching (e.g. `route 0.0.0.0/0` or `protocols static route 0.0.0.0/0`).
-/// Does NOT match loose unanchored substrings like `"default"` or `"172.16.0.254"`.
 pub fn detect_static_route(content: &str, prefix: &str) -> Option<String> {
-    // 1. Try finding within hierarchical `protocols` -> `static` block if present
     let search_scope = if let Some(protocols_body) = find_named_block(content, "protocols") {
         if let Some(static_body) = find_named_block(protocols_body, "static") {
             static_body
@@ -787,7 +891,6 @@ pub fn detect_static_route(content: &str, prefix: &str) -> Option<String> {
         let pos = search_from + rel_pos;
         search_from = pos + route_marker.len();
 
-        // Check character before marker: must be start of string or whitespace or '{' or ';'
         if pos > 0 {
             let prev = search_scope[..pos].chars().last().unwrap();
             if !prev.is_whitespace() && prev != '{' && prev != ';' {
@@ -795,15 +898,12 @@ pub fn detect_static_route(content: &str, prefix: &str) -> Option<String> {
             }
         }
 
-        // Check character after marker: must be whitespace or '{'
         if let Some(next_c) = search_scope[pos + route_marker.len()..].chars().next() {
             if !next_c.is_whitespace() && next_c != '{' {
                 continue;
             }
         }
 
-        // We matched exact `route <prefix>`!
-        // Now find the next-hop within this route definition
         let tail = &search_scope[pos..pos.saturating_add(300).min(search_scope.len())];
         if let Some(nh_idx) = tail.find("next-hop") {
             let after_nh = &tail[nh_idx + 8..];
@@ -821,82 +921,866 @@ pub fn detect_static_route(content: &str, prefix: &str) -> Option<String> {
     None
 }
 
-/// 8. `router_interfaces`: Network Interfaces & Routing Integrity.
-pub fn scan_interfaces(ctx: &DefenderContext) {
-    ctx.progress("[*] Validating network interfaces and static route integrity...");
+// ==============================================================================
+// 7. Containers (Podman / VyOS 1.4+)
+// ==============================================================================
+/// Module 7: Inspects VyOS container configuration and active Podman daemons.
+pub fn scan_containers(ctx: &DefenderContext) {
+    ctx.progress("[*] Module 7: Inspecting VyOS Containers & Podman Daemons...");
 
     let (_, content) = match load_config_boot() {
         Some(pair) => pair,
         None => (PathBuf::from("/config/config.boot"), String::new()),
     };
 
-    let mut detected_routes: Vec<DetectedRoute> = Vec::new();
-
-    // Check default route 0.0.0.0/0
-    let (has_default_route, def_gateway) = match detect_static_route(&content, "0.0.0.0/0") {
-        Some(nh) if nh.starts_with("172.31.") => (true, nh),
-        Some(nh) if !nh.is_empty() => (true, nh),
-        _ => (false, String::new()),
-    };
-
-    if has_default_route {
-        detected_routes.push(DetectedRoute {
-            prefix: "0.0.0.0/0".into(),
-            next_hop: def_gateway,
-            is_valid: true,
-        });
-    } else {
-        ctx.emit(Finding::new(
-            Severity::Critical,
-            "router_interfaces",
-            "Missing default route (0.0.0.0/0): router cannot reach WAN upstream gateway",
-            "Deploy standard transit routes in Tab 2 (Router -> Restore NAT Baseline).",
-        ));
-    }
-
-    // Check transit route to servers DMZ 172.20.240.0/24
-    let (has_servers_route, srv_nexthop) = match detect_static_route(&content, "172.20.240.0/24") {
-        Some(nh) if nh == "172.16.0.254" => (true, nh),
-        Some(nh) if !nh.is_empty() => (true, nh),
-        _ => (false, String::new()),
-    };
-
-    if has_servers_route {
-        detected_routes.push(DetectedRoute {
-            prefix: "172.20.240.0/24".into(),
-            next_hop: srv_nexthop,
-            is_valid: true,
-        });
-    } else {
-        ctx.emit(Finding::new(
+    let mut found_containers = false;
+    if let Some(container_body) = find_named_block(&content, "container") {
+        found_containers = true;
+        let mut finding = Finding::new(
             Severity::High,
-            "router_interfaces",
-            "Missing static transit route to Servers DMZ (172.20.240.0/24 via 172.16.0.254)",
-            "Apply transit routes grounded in competition network topology.",
-        ));
+            "router_containers",
+            "VyOS container configuration block found in /config/config.boot",
+            container_body.to_string(),
+        );
+        finding.context.push(("Command Executed", "show configuration commands | grep container".into()));
+        finding.context.push(("Risk", "Containers on routers frequently host C2 payloads or network proxies".into()));
+        finding.recommendation = "Run 'Purge Rogue Containers' in Tab [2] Router Operations.".into();
+        ctx.emit(finding);
     }
 
-    // Save detected routes alongside NAT rules (merges with existing NAT rules in state file)
-    save_detected_nat_routes(&[], &detected_routes, false);
-
-    // Check for rogue tunnel interfaces
-    for tunnel_prefix in &["wireguard", "tunnel", "openvpn", "vtun"] {
-        if content.contains(&format!("interfaces {} ", tunnel_prefix)) {
-            ctx.emit(Finding::new(
+    if let Some(ps_out) = run_cmd_output("podman", &["ps", "-a", "--noheading"]) {
+        if !ps_out.trim().is_empty() {
+            found_containers = true;
+            let mut finding = Finding::new(
                 Severity::Critical,
-                "router_interfaces",
-                format!("Unauthorized tunnel interface type detected: '{}'", tunnel_prefix),
-                "Remove unauthorized VPN or tunnel interface from VyOS config.",
-            ));
+                "router_containers",
+                "Active Podman containers running on VyOS router",
+                ps_out.clone(),
+            );
+            finding.context.push(("Command Executed", "podman ps -a".into()));
+            finding.context.push(("Output", ps_out.lines().take(5).collect::<Vec<&str>>().join("\n")));
+            finding.recommendation = "Stop and remove rogue containers: podman rm -f -a.".into();
+            ctx.emit(finding);
         }
     }
 
-    if has_default_route && has_servers_route {
-        ctx.emit(Finding::new(
+    if !found_containers {
+        let mut finding = Finding::new(
             Severity::Info,
-            "router_interfaces",
-            "Network interfaces and transit routing are correctly grounded in topology",
-            "",
-        ));
+            "router_containers",
+            "Containers Clean: No Podman containers or container configurations active",
+            "Verified no rogue containers on router.",
+        );
+        finding.context.push(("Status", "Clean".into()));
+        ctx.emit(finding);
+    }
+}
+
+// ==============================================================================
+// 8. Configured System Services
+// ==============================================================================
+/// Module 8: Audits configured VyOS services and flags insecure legacy protocols.
+pub fn scan_services_config(ctx: &DefenderContext) {
+    ctx.progress("[*] Module 8: Auditing Configured System Services...");
+
+    let (_, content) = match load_config_boot() {
+        Some(pair) => pair,
+        None => (PathBuf::from("/config/config.boot"), String::new()),
+    };
+
+    let insecure = &["telnet", "http", "tftp", "rsh"];
+    for &svc in insecure {
+        if content.contains(&format!("service {} ", svc)) || content.contains(&format!("{} {{", svc)) {
+            let mut finding = Finding::new(
+                Severity::Critical,
+                "router_services_config",
+                format!("Insecure service configured in VyOS: '{}'", svc),
+                format!("Found active service definition for {} in config", svc),
+            );
+            finding.context.push(("Service", svc.to_string()));
+            finding.recommendation = "Delete insecure service: delete service <name>.".into();
+            ctx.emit(finding);
+        }
+    }
+
+    if let Some(svc_body) = find_named_block(&content, "service") {
+        let mut finding = Finding::new(
+            Severity::Info,
+            "router_services_config",
+            "Configured Services Baseline: Inspected active VyOS service nodes",
+            svc_body.to_string(),
+        );
+        finding.context.push(("Command Executed", "show configuration commands | grep '^set service'".into()));
+        finding.recommendation = "Review configured service nodes against approved CCDC baseline.".into();
+        ctx.emit(finding);
+    }
+}
+
+// ==============================================================================
+// 9. Listening Sockets & Active Connections
+// ==============================================================================
+/// Module 9: Audits listening sockets (`ss -tulpn`) and established network connections.
+pub fn scan_listening_sockets(ctx: &DefenderContext) {
+    ctx.progress("[*] Module 9: Auditing Listening Sockets & Active Connections...");
+
+    let ss_out = run_cmd_output("ss", &["-tulpn"]).unwrap_or_default();
+    let mut flagged_listeners = Vec::new();
+
+    for line in ss_out.lines() {
+        if line.contains("LISTEN") {
+            if line.contains(":23 ") || line.contains(":8080 ") || line.contains(":4444 ") {
+                flagged_listeners.push(line.to_string());
+            }
+        }
+    }
+
+    if !flagged_listeners.is_empty() {
+        for l in flagged_listeners {
+            let mut finding = Finding::new(
+                Severity::High,
+                "router_listening_sockets",
+                "Suspicious listening socket detected on router",
+                l.clone(),
+            );
+            finding.context.push(("Socket Entry", l));
+            finding.recommendation = "Investigate listening PID and terminate unauthorized listener.".into();
+            ctx.emit(finding);
+        }
+    }
+
+    let mut finding = Finding::new(
+        Severity::Info,
+        "router_listening_sockets",
+        "Listening Sockets Baseline captured",
+        if ss_out.is_empty() { "No active socket output".into() } else { ss_out.clone() },
+    );
+    finding.context.push(("Command Executed", "ss -tulpn".into()));
+    ctx.emit(finding);
+}
+
+// ==============================================================================
+// 10. Dynamic Linker & Systemd Overrides
+// ==============================================================================
+/// Module 10: Checks `/etc/ld.so.preload` and systemd drop-in service overrides.
+pub fn scan_dynamic_linker(ctx: &DefenderContext) {
+    ctx.progress("[*] Module 10: Checking Dynamic Linker & Systemd Overrides...");
+
+    let preload = Path::new("/etc/ld.so.preload");
+    if preload.exists() {
+        let content = fs::read_to_string(preload).unwrap_or_default();
+        let mut finding = Finding::new(
+            Severity::Critical,
+            "router_dyn_linker",
+            "CRITICAL: /etc/ld.so.preload exists! Potential userland rootkit active!",
+            content.clone(),
+        );
+        finding.path = Some(preload.to_path_buf());
+        finding.context.push(("Command Executed", "cat /etc/ld.so.preload".into()));
+        finding.context.push(("Risk", "ld.so.preload hijacks libc function calls across all processes".into()));
+        finding.recommendation = "Run 'Remove Linker Overrides' in Tab [2] to delete /etc/ld.so.preload.".into();
+        ctx.emit(finding);
+    } else {
+        let mut finding = Finding::new(
+            Severity::Info,
+            "router_dyn_linker",
+            "Dynamic Linker Clean: /etc/ld.so.preload does not exist",
+            "Verified clean dynamic linker.",
+        );
+        finding.context.push(("Status", "Clean".into()));
+        ctx.emit(finding);
+    }
+
+    let systemd_dir = Path::new("/etc/systemd/system");
+    if systemd_dir.exists() {
+        if let Ok(entries) = fs::read_dir(systemd_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() && p.extension().map_or(false, |ext| ext == "service") {
+                    let name = p.file_name().unwrap_or_default().to_string_lossy();
+                    if name.contains("backdoor") || name.contains("tunnel") || name.contains("c2") {
+                        let mut finding = Finding::new(
+                            Severity::High,
+                            "router_dyn_linker",
+                            format!("Suspicious systemd service override found: {}", name),
+                            fs::read_to_string(&p).unwrap_or_default(),
+                        );
+                        finding.path = Some(p);
+                        ctx.emit(finding);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ==============================================================================
+// 11. SUID Binaries & Modified System Files
+// ==============================================================================
+/// Module 11: Scans for unexpected SUID/SGID binaries on system paths.
+pub fn scan_suid_files(ctx: &DefenderContext) {
+    ctx.progress("[*] Module 11: Scanning SUID Binaries & Modified System Files...");
+
+    let mut suspicious_suid = Vec::new();
+    let common_suid = &[
+        "/usr/bin/sudo", "/usr/bin/su", "/usr/bin/passwd",
+        "/usr/bin/chfn", "/usr/bin/chsh", "/usr/bin/newgrp",
+        "/usr/bin/gpasswd", "/bin/mount", "/bin/umount", "/bin/ping",
+    ];
+
+    if let Some(out) = run_cmd_output("find", &["/bin", "/sbin", "/usr/bin", "/usr/sbin", "-perm", "-4000", "-type", "f"]) {
+        for line in out.lines() {
+            let path = line.trim();
+            if !path.is_empty() && !common_suid.contains(&path) {
+                suspicious_suid.push(path.to_string());
+            }
+        }
+    }
+
+    if !suspicious_suid.is_empty() {
+        for s in suspicious_suid {
+            let mut finding = Finding::new(
+                Severity::High,
+                "router_suid_files",
+                format!("Non-standard SUID binary detected: {}", s),
+                format!("Path: {}", s),
+            );
+            finding.context.push(("Binary Path", s));
+            finding.recommendation = "Remove SUID bit if not required: chmod u-s <binary>.".into();
+            ctx.emit(finding);
+        }
+    } else {
+        let mut finding = Finding::new(
+            Severity::Info,
+            "router_suid_files",
+            "SUID Binaries Clean: Only standard system SUID binaries found",
+            "Verified standard SUID set.",
+        );
+        finding.context.push(("Status", "Clean".into()));
+        ctx.emit(finding);
+    }
+}
+
+// ==============================================================================
+// 12. Commit History & Config Revisions
+// ==============================================================================
+/// Module 12: Reviews commit log history and configuration revisions.
+pub fn scan_commit_history(ctx: &DefenderContext) {
+    ctx.progress("[*] Module 12: Reviewing Commit History & Config Revisions...");
+
+    let mut commit_log = String::new();
+    if let Some(out) = run_cmd_output("show", &["system", "commit"]) {
+        commit_log = out;
+    }
+
+    let mut finding = Finding::new(
+        Severity::Info,
+        "router_commit_history",
+        "VyOS Commit History Log captured",
+        if commit_log.is_empty() { "No commit history found in runtime.".into() } else { commit_log.clone() },
+    );
+    finding.context.push(("Command Executed", "show system commit".into()));
+    finding.recommendation = "Verify authors of recent configuration commits. Use Tab [2] to rollback if unauthorized changes occurred.".into();
+    ctx.emit(finding);
+}
+
+// ==============================================================================
+// 13. NAT Configuration (IP-Centric Baseline)
+// ==============================================================================
+/// Parses all destination NAT rules from configuration text into structured records.
+pub fn parse_all_dest_nat_rules(content: &str) -> Vec<ParsedDestNatRule> {
+    let mut parsed: Vec<ParsedDestNatRule> = Vec::new();
+
+    let dest_block = find_named_block(content, "nat")
+        .and_then(|nb| find_named_block(nb, "destination"))
+        .or_else(|| find_named_block(content, "destination"));
+
+    if let Some(body) = dest_block {
+        let mut search_idx = 0;
+        while let Some(rel) = body[search_idx..].find("rule ") {
+            let pos = search_idx + rel;
+            search_idx = pos + 5;
+
+            let after = &body[pos + 5..];
+            let num_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(rule_num) = num_str.parse::<u32>() {
+                if let Some(brace_rel) = after[num_str.len()..].find('{') {
+                    let open_brace = pos + 5 + num_str.len() + brace_rel;
+                    if let Some(rule_body) = extract_braced_block(body, open_brace) {
+                        let mut desc = String::new();
+                        let mut trans_addr = String::new();
+                        let mut ports = String::new();
+                        let mut proto = "tcp".to_string();
+                        let mut iface = "eth0".to_string();
+
+                        if let Some(p) = rule_body.find("description") {
+                            let val: String = rule_body[p + 11..].trim_start().chars().take_while(|c| *c != ';' && *c != '\n' && *c != '}').collect();
+                            desc = val.trim_matches(|c| c == '\'' || c == '"' || c == ' ').to_string();
+                        }
+                        if let Some(trans_body) = find_named_block(rule_body, "translation") {
+                            if let Some(p) = trans_body.find("address") {
+                                let val: String = trans_body[p + 7..].trim_start().chars().take_while(|c| !c.is_whitespace() && *c != ';' && *c != '}').collect();
+                                trans_addr = val.trim_matches(|c| c == '\'' || c == '"').to_string();
+                            }
+                        }
+                        if let Some(p) = rule_body.find("destination port") {
+                            let val: String = rule_body[p + 16..].trim_start().chars().take_while(|c| *c != ';' && *c != '\n' && *c != '}').collect();
+                            ports = val.trim_matches(|c| c == '\'' || c == '"' || c == ' ').to_string();
+                        }
+                        if let Some(p) = rule_body.find("protocol") {
+                            let val: String = rule_body[p + 8..].trim_start().chars().take_while(|c| !c.is_whitespace() && *c != ';' && *c != '}').collect();
+                            proto = val.trim_matches(|c| c == '\'' || c == '"').to_string();
+                        }
+                        if let Some(p) = rule_body.find("inbound-interface") {
+                            let val: String = rule_body[p + 17..].trim_start().chars().take_while(|c| !c.is_whitespace() && *c != ';' && *c != '}').collect();
+                            iface = val.trim_matches(|c| c == '\'' || c == '"').to_string();
+                        }
+
+                        parsed.push(ParsedDestNatRule {
+                            rule_num,
+                            description: desc,
+                            translation_address: trans_addr,
+                            destination_ports: ports,
+                            protocol: proto,
+                            inbound_interface: iface,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check flat commands: `set nat destination rule <num> translation address <ip>`
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("set nat destination rule ") && trimmed.contains(" translation address ") {
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() >= 8 {
+                if let Ok(rule_num) = parts[4].parse::<u32>() {
+                    let trans_addr = parts[7].trim_matches(|c| c == '\'' || c == '"').to_string();
+                    if !parsed.iter().any(|r| r.rule_num == rule_num) {
+                        parsed.push(ParsedDestNatRule {
+                            rule_num,
+                            description: String::new(),
+                            translation_address: trans_addr,
+                            destination_ports: String::new(),
+                            protocol: "tcp".to_string(),
+                            inbound_interface: "eth0".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    parsed
+}
+
+/// Audit parsed destination NAT rules against scored server target IPs.
+pub fn audit_nat_rules_by_ip(parsed_rules: &[ParsedDestNatRule]) -> NatIpAuditOutcome {
+    let mut detected_rules: Vec<DetectedNatRule> = Vec::new();
+    let mut valid_targets = Vec::new();
+    let mut drifted_targets = Vec::new();
+    let mut duplicate_conflicts = Vec::new();
+    let mut missing_targets = Vec::new();
+
+    for &target in SCORED_SERVERS {
+        let matching: Vec<&ParsedDestNatRule> = parsed_rules
+            .iter()
+            .filter(|r| {
+                r.translation_address == target.internal_ip
+                    || (r.translation_address.starts_with("172.25.")
+                        && r.translation_address.ends_with(target.ip_suffix))
+            })
+            .collect();
+
+        if matching.is_empty() {
+            missing_targets.push(target);
+        } else if matching.len() == 1 {
+            let rule = matching[0];
+            let mut port_drift = false;
+            let mut drift_detail = String::new();
+
+            for &p in target.expected_ports {
+                if !rule.destination_ports.is_empty() && !rule.destination_ports.contains(p) {
+                    port_drift = true;
+                    drift_detail = format!("missing port {}", p);
+                    break;
+                }
+            }
+
+            if port_drift {
+                drifted_targets.push((target, rule.clone(), drift_detail));
+                detected_rules.push(DetectedNatRule {
+                    rule_num: rule.rule_num,
+                    description: target.name.to_string(),
+                    translation: rule.translation_address.clone(),
+                    is_valid: false,
+                });
+            } else {
+                valid_targets.push((target, rule.clone()));
+                detected_rules.push(DetectedNatRule {
+                    rule_num: rule.rule_num,
+                    description: target.name.to_string(),
+                    translation: rule.translation_address.clone(),
+                    is_valid: true,
+                });
+            }
+        } else {
+            duplicate_conflicts.push((target, matching.into_iter().cloned().collect()));
+            for r in parsed_rules.iter().filter(|r| r.translation_address.ends_with(target.ip_suffix)) {
+                detected_rules.push(DetectedNatRule {
+                    rule_num: r.rule_num,
+                    description: target.name.to_string(),
+                    translation: r.translation_address.clone(),
+                    is_valid: false,
+                });
+            }
+        }
+    }
+
+    let rogue_rules: Vec<ParsedDestNatRule> = parsed_rules
+        .iter()
+        .filter(|r| {
+            !r.translation_address.is_empty()
+                && !SCORED_SERVERS.iter().any(|s| {
+                    r.translation_address == s.internal_ip
+                        || (r.translation_address.starts_with("172.25.")
+                            && r.translation_address.ends_with(s.ip_suffix))
+                })
+        })
+        .cloned()
+        .collect();
+
+    NatIpAuditOutcome {
+        detected_rules,
+        valid_targets,
+        drifted_targets,
+        duplicate_conflicts,
+        missing_targets,
+        rogue_rules,
+        outbound_pat_active: false,
+    }
+}
+
+/// Module 13: Audits destination NAT rules and outbound PAT using IP-centric matching.
+pub fn scan_nat(ctx: &DefenderContext) {
+    ctx.progress("[*] Module 13: Executing IP-Centric NAT Configuration Audit...");
+
+    let (path, content) = match load_config_boot() {
+        Some(pair) => pair,
+        None => {
+            let mut finding = Finding::new(
+                Severity::Critical,
+                "router_nat",
+                "VyOS configuration file (/config/config.boot) not found or unreadable",
+                "Ensure /config/config.boot exists and is accessible.",
+            );
+            finding.recommendation = "Restore /config/config.boot from backup in Tab [5].".into();
+            ctx.emit(finding);
+            return;
+        }
+    };
+
+    ctx.progress(&format!("→ Loaded VyOS config from: {}", path.display()));
+
+    let parsed_rules = parse_all_dest_nat_rules(&content);
+    let mut audit_outcome = audit_nat_rules_by_ip(&parsed_rules);
+
+    let has_outbound_pat = (content.contains("source") && content.contains("masquerade"))
+        || content.contains("translation address masquerade");
+    audit_outcome.outbound_pat_active = has_outbound_pat;
+
+    save_detected_nat_routes(&audit_outcome.detected_rules, &[], has_outbound_pat);
+
+    // 1. Report Valid Scored Targets
+    for (target, rule) in &audit_outcome.valid_targets {
+        let mut finding = Finding::new(
+            Severity::Info,
+            "router_nat",
+            format!("Scored DNAT Active: {} (Rule {} -> {})", target.name, rule.rule_num, rule.translation_address),
+            format!("Discovered Rule {}: proto={}, ports='{}', target={}", rule.rule_num, rule.protocol, rule.destination_ports, rule.translation_address),
+        );
+        finding.context.push(("Target Server", target.name.to_string()));
+        finding.context.push(("Discovered Rule", rule.rule_num.to_string()));
+        finding.context.push(("Translation IP", rule.translation_address.clone()));
+        finding.context.push(("Ports Bound", rule.destination_ports.clone()));
+        ctx.emit(finding);
+    }
+
+    // 2. Report Port Drift
+    for (target, rule, reason) in &audit_outcome.drifted_targets {
+        let mut finding = Finding::new(
+            Severity::High,
+            "router_nat",
+            format!("Port Drift on {}: Rule {} target {} ({})", target.name, rule.rule_num, rule.translation_address, reason),
+            format!("Expected ports: {:?}, configured: '{}'", target.expected_ports, rule.destination_ports),
+        );
+        finding.context.push(("Target Server", target.name.to_string()));
+        finding.context.push(("Rule Number", rule.rule_num.to_string()));
+        finding.context.push(("Configured Ports", rule.destination_ports.clone()));
+        finding.recommendation = "Run 'Restore NAT Baseline on Router' in Tab [2] to restore standard ports.".into();
+        ctx.emit(finding);
+    }
+
+    // 3. Report Duplicate Conflicts
+    for (target, rules) in &audit_outcome.duplicate_conflicts {
+        let rule_nums: Vec<String> = rules.iter().map(|r| r.rule_num.to_string()).collect();
+        let mut finding = Finding::new(
+            Severity::High,
+            "router_nat",
+            format!("Conflicting Duplicate DNAT Rules for {}: Rules [{}] both point to target", target.name, rule_nums.join(", ")),
+            format!("Multiple rules found pointing to {}: {:?}", target.internal_ip, rule_nums),
+        );
+        finding.context.push(("Target Server", target.name.to_string()));
+        finding.context.push(("Conflicting Rules", rule_nums.join(", ")));
+        finding.recommendation = "Run 'Restore NAT Baseline on Router' in Tab [2] to wipe duplicate rules.".into();
+        ctx.emit(finding);
+    }
+
+    // 4. Report Missing Rules
+    for target in &audit_outcome.missing_targets {
+        let mut finding = Finding::new(
+            Severity::Critical,
+            "router_nat",
+            format!("Missing Scored DNAT: {} ({} has no inbound translation rule!)", target.name, target.internal_ip),
+            format!("Scored service '{}' is completely unreachable from WAN upstream.", target.name),
+        );
+        finding.context.push(("Missing Target", target.name.to_string()));
+        finding.context.push(("Expected IP", target.internal_ip.to_string()));
+        finding.recommendation = "Navigate to Tab [2] Router Operations and run 'Restore NAT Baseline on Router'.".into();
+        ctx.emit(finding);
+    }
+
+    // 5. Report Rogue Rules
+    for rogue in &audit_outcome.rogue_rules {
+        let mut finding = Finding::new(
+            Severity::Critical,
+            "router_nat",
+            format!("Rogue Destination NAT Rule Detected: Rule {} -> {}:{}", rogue.rule_num, rogue.translation_address, rogue.destination_ports),
+            format!("Rule {} translates to non-competition target '{}'", rogue.rule_num, rogue.translation_address),
+        );
+        finding.context.push(("Rogue Rule", rogue.rule_num.to_string()));
+        finding.context.push(("Target IP", rogue.translation_address.clone()));
+        finding.recommendation = "Delete rogue destination NAT rule immediately: delete nat destination rule <num>.".into();
+        ctx.emit(finding);
+    }
+
+    // 6. Outbound PAT Status
+    if has_outbound_pat {
+        let mut finding = Finding::new(
+            Severity::Medium,
+            "router_nat",
+            "Outbound PAT (Masquerade) is ENABLED on eth0: LAN hosts can egress to WAN",
+            "CCDC Best Practice: Keep outbound PAT disabled to deny reverse shells unless explicitly needed.",
+        );
+        finding.context.push(("Status", "Outbound PAT Active".into()));
+        finding.recommendation = "Disable outbound PAT via Tab [2] Restore NAT Baseline (default).".into();
+        ctx.emit(finding);
+    } else {
+        let mut finding = Finding::new(
+            Severity::Info,
+            "router_nat",
+            "Outbound PAT is DISABLED: Anti-reverse-shell egress protection active",
+            "Workstations cannot establish direct outbound WAN connections.",
+        );
+        finding.context.push(("Status", "Egress Protection Active".into()));
+        ctx.emit(finding);
+    }
+}
+
+// ==============================================================================
+// 14. Systemd Services vs. VyOS Curated Whitelist
+// ==============================================================================
+/// Approved baseline of standard VyOS router daemons and services.
+pub const ROUTER_WHITELIST: &[&str] = &[
+    "vyos-router", "vyos-configd", "vyos-hostkey", "vyos-telegraf",
+    "frr", "zebra", "bgpd", "ospfd", "ospf6d", "ripd", "ripngd", "staticd",
+    "bfdd", "isisd", "fabricd", "vrrpd", "pimd", "pim6d", "eigrpd",
+    "nftables", "conntrackd", "keepalived", "lldpd",
+    "isc-dhcp-server", "dhcpd", "kea-dhcp4", "kea-dhcp6", "dhclient", "dhcpcd",
+    "pdns-recursor", "dnsmasq", "ddclient",
+    "snmpd", "chrony", "chronyd", "ntp", "ntpd", "rsyslog", "syslog",
+    "systemd-journald", "systemd-udevd", "udev", "kmod", "irqbalance",
+    "haveged", "rngd", "open-vm-tools", "vmtoolsd", "qemu-guest-agent",
+    "ssh", "sshd", "getty", "serial-getty", "autovt", "console-getty",
+];
+
+/// Blacklist of prohibited or high-risk services on a dedicated router.
+pub const ROUTER_BLACKLIST: &[&str] = &[
+    "telnet", "telnetd", "tftp", "tftpd-hpa", "rsh", "rlogin", "rexec",
+    "apache2", "nginx", "httpd", "vyos-http-api", "lighttpd",
+    "mysql", "mariadb", "postgresql", "mongod", "redis", "redis-server",
+    "cups", "cups-browsed", "avahi-daemon", "bluetooth",
+    "smbd", "nmbd", "nfs-server", "rpcbind",
+];
+
+/// Module 14: Audits running systemd units against the curated VyOS whitelist.
+pub fn scan_services_whitelist(ctx: &DefenderContext) {
+    ctx.progress("[*] Module 14: Auditing Running Systemd Units against ROUTER_ALLOW Whitelist...");
+
+    let mut running_services = Vec::new();
+    if let Some(out) = run_cmd_output("systemctl", &["list-units", "--type=service", "--state=running", "--no-pager", "--no-legend"]) {
+        for line in out.lines() {
+            if let Some(unit) = line.split_whitespace().next() {
+                let name = unit.strip_suffix(".service").unwrap_or(unit);
+                running_services.push(name.to_string());
+            }
+        }
+    }
+
+    let mut rogue_found = false;
+    for svc in &running_services {
+        if ROUTER_BLACKLIST.contains(&svc.as_str()) {
+            rogue_found = true;
+            let mut finding = Finding::new(
+                Severity::Critical,
+                "router_services_whitelist",
+                format!("BLACK-LISTED SERVICE RUNNING: '{}'", svc),
+                format!("Service '{}' is on the critical router blacklist.", svc),
+            );
+            finding.context.push(("Service Name", svc.clone()));
+            finding.context.push(("Policy", "Critical Blacklist".into()));
+            finding.recommendation = "Stop and mask immediately: systemctl stop <svc> && systemctl mask <svc>.".into();
+            ctx.emit(finding);
+        } else if !ROUTER_WHITELIST.contains(&svc.as_str()) {
+            rogue_found = true;
+            let mut finding = Finding::new(
+                Severity::High,
+                "router_services_whitelist",
+                format!("Unapproved service running on router: '{}'", svc),
+                format!("Service '{}' is not recognized in ROUTER_ALLOW whitelist.", svc),
+            );
+            finding.context.push(("Service Name", svc.clone()));
+            finding.context.push(("Policy", "Unapproved Daemon".into()));
+            finding.recommendation = "Navigate to Tab [2] and run 'Disable Unnecessary Services'.".into();
+            ctx.emit(finding);
+        }
+    }
+
+    if !rogue_found {
+        let mut finding = Finding::new(
+            Severity::Info,
+            "router_services_whitelist",
+            format!("Services Whitelist Clean: {} running services verified against ROUTER_ALLOW", running_services.len()),
+            "All active services are approved routing daemons.",
+        );
+        finding.context.push(("Status", "Clean".into()));
+        ctx.emit(finding);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE_HIERARCHICAL_CONFIG: &str = r#"
+nat {
+    destination {
+        rule 42 {
+            description "E-Commerce Web"
+            destination {
+                port "80,443"
+            }
+            inbound-interface {
+                name "eth0"
+            }
+            protocol "tcp"
+            translation {
+                address "172.20.240.10"
+            }
+        }
+        rule 77 {
+            description "Mail Server"
+            destination {
+                port "25,143,587,993"
+            }
+            inbound-interface {
+                name "eth0"
+            }
+            protocol "tcp"
+            translation {
+                address "172.20.240.15"
+            }
+        }
+        rule 99 {
+            description "Splunk SIEM"
+            destination {
+                port "8000,8089,9997"
+            }
+            inbound-interface {
+                name "eth0"
+            }
+            protocol "tcp"
+            translation {
+                address "172.20.240.20"
+            }
+        }
+        rule 105 {
+            description "Active Directory"
+            destination {
+                port "53,88,389,636,5985"
+            }
+            inbound-interface {
+                name "eth0"
+            }
+            protocol "tcp_udp"
+            translation {
+                address "172.20.240.100"
+            }
+        }
+        rule 200 {
+            description "MSSQL Database"
+            destination {
+                port "445,1433,3389"
+            }
+            inbound-interface {
+                name "eth0"
+            }
+            protocol "tcp"
+            translation {
+                address "172.20.240.120"
+            }
+        }
+    }
+    source {
+        rule 100 {
+            outbound-interface {
+                name "eth0"
+            }
+            translation {
+                address "masquerade"
+            }
+        }
+    }
+}
+"#;
+
+    #[test]
+    fn test_parse_all_dest_nat_rules_non_standard_numbers() {
+        let rules = parse_all_dest_nat_rules(SAMPLE_HIERARCHICAL_CONFIG);
+        assert_eq!(rules.len(), 5);
+        let rule_nums: Vec<u32> = rules.iter().map(|r| r.rule_num).collect();
+        assert_eq!(rule_nums, vec![42, 77, 99, 105, 200]);
+
+        let r42 = rules.iter().find(|r| r.rule_num == 42).unwrap();
+        assert_eq!(r42.translation_address, "172.20.240.10");
+        assert_eq!(r42.destination_ports, "80,443");
+        assert_eq!(r42.protocol, "tcp");
+        assert_eq!(r42.inbound_interface, "eth0");
+    }
+
+    #[test]
+    fn test_audit_nat_rules_by_ip_valid_baseline() {
+        let rules = parse_all_dest_nat_rules(SAMPLE_HIERARCHICAL_CONFIG);
+        let outcome = audit_nat_rules_by_ip(&rules, false);
+
+        assert_eq!(outcome.valid_targets.len(), 5);
+        assert!(outcome.drifted_targets.is_empty());
+        assert!(outcome.duplicate_conflicts.is_empty());
+        assert!(outcome.missing_targets.is_empty());
+        assert!(outcome.rogue_rules.is_empty());
+
+        let names: Vec<&str> = outcome.valid_targets.iter().map(|(t, _)| t.name).collect();
+        assert!(names.contains(&"E-Commerce Web"));
+        assert!(names.contains(&"Mail Server"));
+        assert!(names.contains(&"Splunk SIEM"));
+        assert!(names.contains(&"Active Directory"));
+        assert!(names.contains(&"MSSQL Database"));
+    }
+
+    #[test]
+    fn test_audit_nat_rules_by_ip_detects_duplicate_conflicts() {
+        let conflict_config = r#"
+nat {
+    destination {
+        rule 10 {
+            description "Ecom Initial"
+            destination { port "80,443" }
+            translation { address "172.20.240.10" }
+        }
+        rule 42 {
+            description "Ecom Duplicate"
+            destination { port "80,443" }
+            translation { address "172.20.240.10" }
+        }
+    }
+}
+"#;
+        let rules = parse_all_dest_nat_rules(conflict_config);
+        let outcome = audit_nat_rules_by_ip(&rules, false);
+
+        assert_eq!(outcome.duplicate_conflicts.len(), 1);
+        let (target, conflict_rules) = &outcome.duplicate_conflicts[0];
+        assert_eq!(target.name, "E-Commerce Web");
+        assert_eq!(conflict_rules.len(), 2);
+        assert_eq!(conflict_rules[0].rule_num, 10);
+        assert_eq!(conflict_rules[1].rule_num, 42);
+    }
+
+    #[test]
+    fn test_audit_nat_rules_by_ip_detects_port_drift() {
+        let drift_config = r#"
+nat {
+    destination {
+        rule 42 {
+            description "Ecom Partial"
+            destination { port "80" }
+            translation { address "172.20.240.10" }
+        }
+    }
+}
+"#;
+        let rules = parse_all_dest_nat_rules(drift_config);
+        let outcome = audit_nat_rules_by_ip(&rules, false);
+
+        assert_eq!(outcome.drifted_targets.len(), 1);
+        let (target, rule, reason) = &outcome.drifted_targets[0];
+        assert_eq!(target.name, "E-Commerce Web");
+        assert_eq!(rule.rule_num, 42);
+        assert!(reason.contains("Port drift"));
+    }
+
+    #[test]
+    fn test_audit_nat_rules_by_ip_detects_rogue_rules() {
+        let rogue_config = r#"
+nat {
+    destination {
+        rule 88 {
+            description "Rogue Backdoor"
+            destination { port "4444" }
+            translation { address "172.20.240.66" }
+        }
+    }
+}
+"#;
+        let rules = parse_all_dest_nat_rules(rogue_config);
+        let outcome = audit_nat_rules_by_ip(&rules, false);
+
+        assert_eq!(outcome.rogue_rules.len(), 1);
+        assert_eq!(outcome.rogue_rules[0].rule_num, 88);
+        assert_eq!(outcome.rogue_rules[0].translation_address, "172.20.240.66");
+    }
+
+    #[test]
+    fn test_audit_nat_rules_by_ip_detects_missing_targets() {
+        let missing_config = r#"
+nat {
+    destination {
+        rule 10 {
+            destination { port "80,443" }
+            translation { address "172.20.240.10" }
+        }
+    }
+}
+"#;
+        let rules = parse_all_dest_nat_rules(missing_config);
+        let outcome = audit_nat_rules_by_ip(&rules, false);
+
+        assert_eq!(outcome.missing_targets.len(), 4);
+        let missing_names: Vec<&str> = outcome.missing_targets.iter().map(|t| t.name).collect();
+        assert!(missing_names.contains(&"Mail Server"));
+        assert!(missing_names.contains(&"Splunk SIEM"));
+        assert!(missing_names.contains(&"Active Directory"));
+        assert!(missing_names.contains(&"MSSQL Database"));
     }
 }

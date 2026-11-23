@@ -1422,6 +1422,10 @@ impl App {
             harden: step_id == "harden",
             restore_nat: matches!(step_id, "router_nat" | "restore_nat"),
             rotate_passwords: step_id == "rotate_passwords",
+            sanitize_hooks: step_id == "sanitize_hooks",
+            sanitize_cron: step_id == "sanitize_cron",
+            clean_rootkits: step_id == "clean_rootkits",
+            purge_containers: step_id == "purge_containers",
             console_lockdown: step_id == "console_lockdown",
             confirm: step_id == "confirm",
             team: self.team,
@@ -3063,13 +3067,23 @@ fn render_finding_detail(
         )));
         for (label, value) in &finding.context {
             let label_width = 16usize;
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {:<width$}", label, width = label_width),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::raw(value),
-            ]));
+            let val_lines: Vec<&str> = value.split('\n').collect();
+            if let Some((first, rest)) = val_lines.split_first() {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {:<width$}", label, width = label_width),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::raw(*first),
+                ]));
+                let indent = " ".repeat(label_width + 2);
+                for r in rest {
+                    lines.push(Line::from(vec![
+                        Span::raw(indent.clone()),
+                        Span::raw(*r),
+                    ]));
+                }
+            }
         }
         lines.push(Line::from(""));
     }

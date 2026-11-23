@@ -82,23 +82,41 @@ On VyOS routers, generic Linux services and package reinstalls are omitted. The 
 | Tab | Key | What it does |
 |---|---|---|
 | **Dashboard** | `1` | Scored SSH status, NAT Rules status, Transit Routing status, last backup timestamp |
-| **Router** | `2` | VyOS operations: Phase 1 Hardening, Restore NAT Baseline, Dual Password Rotation, Console Lockdown |
+| **Router** | `2` | VyOS operations: Phase 1 Hardening, Restore NAT Baseline, Dual Password Rotation, Sanitize Hooks/Crons, Linker Cleanup, Purge Containers, Console Lockdown |
 | **Logs** | `3` | Full-width stacked syslog and auth streams |
-| **Scan** | `4` | 8 modular VyOS audit checks emitting structured `Finding` alerts to Dashboard and Findings view |
+| **Scan** | `4` | 14 dedicated VyOS modular scans emitting structured `Finding` alerts to Dashboard and Findings view |
 | **Backups** | `5` | Targeted router configuration backups (`/config/config.boot`, scripts, credentials) |
 | **Monitor** | `6` | Forensic inspection tools (process spy, network watch, binary integrity) |
 | **Tools** | `7` | Interactive wizards with stateful list navigation and scrollable active firewall ruleset |
 
 #### Dedicated VyOS Audit Modules (Tab 4)
-When running on `Router`, Tab 4 executes 8 non-destructive audit modules tailored to VyOS 1.4+ configuration and topology:
-- **`router_nat`**: Audits DNAT rules (10-14) and outbound source NAT (rule 100); validates destination mappings against CCDC servers DMZ (`172.20.240.x`). Records live configured rules to `/etc/linux-defender/vyos/detected_nat_routes.json`.
-- **`router_services`**: Checks running services against the VyOS baseline allow-list (SSH, LLDP, SNMP, NTP); flags unauthorized daemons and reverse shells.
-- **`router_firewall`**: Audits control-plane firewall rulesets, default drop policies, and stateful inspection.
-- **`router_users`**: Audits local user accounts in VyOS configuration, checks root superuser status, and inspects `/home/*/.ssh/authorized_keys` for unauthorized access.
-- **`router_scripts`**: Scans `/config/scripts/` (`vyos-postconfig-bootup.script`, commit hooks) and quarantine directories for persistence.
-- **`router_tasks`**: Inspects scheduled tasks (`system task-scheduler`) and underlying Linux crontabs for periodic implants.
-- **`router_boot`**: Verifies boot configuration integrity (`/config/config.boot`) and bootloader hooks.
-- **`router_interfaces`**: Validates interface addressing (`eth0` WAN: `172.31.(20+Team).2/29`, Gateway: `172.31.(20+Team).1`, `eth1` LAN: `172.16.0.254/24`, `eth2` DMZ) and link parameters.
+When running on `Router`, Tab 4 executes 14 non-destructive, modular audit scanners tailored to VyOS 1.4+ configuration and CCDC topology:
+1. **`router_version`** (*1. System Version & Identity*): Captures `show version`, release train, kernel version, architecture, uptime, and build UUID.
+2. **`router_boot_hooks`** (*2. /config/scripts/ Boot Hooks*): Scans `/config/scripts/` (`vyos-preconfig-bootup.script`, `vyos-postconfig-bootup.script`, `post-upgrade`) for backdoor persistence tokens.
+3. **`router_commit_hooks`** (*3. Commit Hooks (High Risk)*): Audits `/config/scripts/commit/pre-hooks.d/` and `post-hooks.d/`. Stock VyOS has 0 commit hooks; flags any root hooks.
+4. **`router_task_scheduler`** (*4. Task Scheduler & Linux Cron*): Audits VyOS `system task-scheduler` and system crontabs (`/etc/crontab`, `/etc/cron.*`, `/var/spool/cron/crontabs/`).
+5. **`router_users`** (*5. Login Accounts & SSH Keys*): Audits VyOS operator accounts, `/etc/passwd` UID 0 backdoors, plaintext passwords, and all `authorized_keys`.
+6. **`router_interfaces`** (*6. Interfaces, Tunnels & VPNs*): Scans interfaces, detects rogue tunnel/VPN adapters (wireguard, openvpn, vxlan), and verifies static routes.
+7. **`router_containers`** (*7. Containers (Podman)*): Audits VyOS container configurations and queries running Podman/Docker containers.
+8. **`router_services_config`** (*8. Configured System Services*): Audits configured services; flags cleartext legacy protocols (Telnet, HTTP API, TFTP).
+9. **`router_listening_sockets`** (*9. Listening Sockets & Conns*): Audits active listening sockets (`ss -tulpn`) and established outbound reverse shells.
+10. **`router_dyn_linker`** (*10. Linker & Systemd Overrides*): Inspects `/etc/ld.so.preload` for userland rootkits and detects rogue systemd drop-in overrides.
+11. **`router_suid_files`** (*11. SUID & Modified Files*): Scans system paths for non-standard SUID/SGID binaries.
+12. **`router_commit_history`** (*12. Commit History & Revisions*): Parses commit log history (`show system commit`) for audit trails.
+13. **`router_nat`** (*13. NAT Configuration (IP Baseline)*): **IP-Centric NAT Engine**: Matches rules by target server IP (`.10`, `.15`, `.20`, `.100`, `.120`) and ports under ANY rule number. Flags port drift, duplicate/conflicting rules, rogue translations, missing scored targets, and outbound PAT masquerade status.
+14. **`router_services_whitelist`** (*14. Services vs ROUTER_ALLOW*): Compares running systemd services against the curated VyOS whitelist (`ROUTER_WHITELIST`) and blacklist (`ROUTER_BLACKLIST`).
+
+#### Dedicated Router Remediations (Tab 2)
+Tab 2 provides single-key failsafe remediations with rollback protection:
+- **Phase 1: Hardening & Init Config** (`--harden`): Deploys 1:1 NAT, control-plane firewall, cleans persistence hooks, rotates credentials with 5-minute failsafe rollback.
+- **Restore NAT Baseline on Router** (`--restore-nat`): IP-centric cleanup that dynamically deletes any conflicting rule numbers pointing to scored server IPs before deploying standard rules 10–14.
+- **Update VyOS & Linux Root Passwords** (`--rotate-passwords`): Separately updates `vyos` and Linux superuser `root` passwords and sanitizes `authorized_keys`.
+- **Sanitize Boot & Commit Hooks** (`--sanitize-hooks`): Quarantines commit hooks from `(pre|post)-hooks.d/` and resets bootup scripts to clean stock templates.
+- **Sanitize Task Scheduler & Crons** (`--sanitize-cron`): Deletes VyOS `system task-scheduler` and clears `/var/spool/cron/crontabs/*`.
+- **Remove Dynamic Linker Overrides** (`--clean-rootkits`): Deletes `/etc/ld.so.preload` and removes rogue systemd service drop-ins.
+- **Purge Rogue Containers** (`--purge-containers`): Deletes VyOS container config and forcefully removes all Podman containers (`podman rm -f -a`).
+- **Phase 2: Console Lockdown** (`--console-lockdown`): Completely tears down SSH service and drops port 22 (Console-Only Administration).
+- **Confirm Pending Commit** (`--confirm`): Confirms and saves pending `commit-confirm` changes permanently.
 ---
 
 ## CLI reference

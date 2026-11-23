@@ -79,14 +79,38 @@ fn build_script_args_maps_confirm_flag() {
 }
 
 #[test]
+fn build_script_args_maps_remediation_flags() {
+    assert_eq!(
+        build_script_args(&CliArgs { sanitize_hooks: true, ..Default::default() }),
+        vec!["--sanitize-hooks"]
+    );
+    assert_eq!(
+        build_script_args(&CliArgs { sanitize_cron: true, ..Default::default() }),
+        vec!["--sanitize-cron"]
+    );
+    assert_eq!(
+        build_script_args(&CliArgs { clean_rootkits: true, ..Default::default() }),
+        vec!["--clean-rootkits"]
+    );
+    assert_eq!(
+        build_script_args(&CliArgs { purge_containers: true, ..Default::default() }),
+        vec!["--purge-containers"]
+    );
+}
+
+#[test]
 fn router_steps_registry_is_valid() {
-    assert_eq!(ROUTER_STEPS.len(), 9);
+    assert_eq!(ROUTER_STEPS.len(), 13);
     let ids: Vec<&str> = ROUTER_STEPS.iter().map(|s| s.id).collect();
     assert!(ids.contains(&"audit"));
     assert!(ids.contains(&"diff"));
     assert!(ids.contains(&"harden"));
     assert!(ids.contains(&"router_nat"));
     assert!(ids.contains(&"rotate_passwords"));
+    assert!(ids.contains(&"sanitize_hooks"));
+    assert!(ids.contains(&"sanitize_cron"));
+    assert!(ids.contains(&"clean_rootkits"));
+    assert!(ids.contains(&"purge_containers"));
     assert!(ids.contains(&"services"));
     assert!(ids.contains(&"user_permissions"));
     assert!(ids.contains(&"console_lockdown"));

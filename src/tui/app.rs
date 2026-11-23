@@ -1946,7 +1946,7 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                 KeyCode::Up => match app.tab {
                     Tab::Tools => {
                         use crate::tui::tools_view::SelectedTool;
-                        let total = SelectedTool::total();
+                        let total = SelectedTool::total(app.box_type);
                         if total > 0 {
                             app.tools_cursor = app.tools_cursor.checked_sub(1).unwrap_or(total - 1);
                         }
@@ -2019,7 +2019,7 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                 KeyCode::Down => match app.tab {
                     Tab::Tools => {
                         use crate::tui::tools_view::SelectedTool;
-                        let total = SelectedTool::total();
+                        let total = SelectedTool::total(app.box_type);
                         if total > 0 {
                             app.tools_cursor = (app.tools_cursor + 1) % total;
                         }
@@ -2481,6 +2481,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
                 app.download_status.as_deref(),
                 app.nft_config.as_deref(),
                 app.tools_nft_scroll,
+                app.box_type,
             );
         }
         Tab::Backups => {

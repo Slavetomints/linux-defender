@@ -5,7 +5,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
-use crate::tools::catalog::{ALL_TOOLS, ALL_WIZARDS};
+use crate::core::BoxType;
+use crate::tools::catalog::{ALL_TOOLS, wizards_for_box_type};
 use crate::tools::downloader::{is_installed, stored_sha256};
 
 /// Which item the cursor is on in the Tools tab.
@@ -13,14 +14,14 @@ use crate::tools::downloader::{is_installed, stored_sha256};
 pub enum SelectedTool {
     /// Index into `ALL_TOOLS`.
     Binary(usize),
-    /// Index into `ALL_WIZARDS`.
+    /// Index into the box-type-specific wizard slice.
     Wizard(usize),
 }
 
 impl SelectedTool {
-    /// Total navigable rows: binaries + wizards.
-    pub fn total() -> usize {
-        ALL_TOOLS.len() + ALL_WIZARDS.len()
+    /// Total navigable rows: binaries + wizards for the given box type.
+    pub fn total(box_type: BoxType) -> usize {
+        ALL_TOOLS.len() + wizards_for_box_type(box_type).len()
     }
 
     /// Build from a flat cursor position (binaries first, then wizards).
@@ -49,6 +50,7 @@ pub fn render(
     download_status: Option<&str>,
     nft_config: Option<&str>,
     nft_scroll: usize,
+    box_type: BoxType,
 ) {
     // When a firewall config exists, split horizontally: tool list on left, config on right.
     let (list_area, config_area) = if nft_config.is_some() {
@@ -66,7 +68,7 @@ pub fn render(
         .constraints([Constraint::Min(0), Constraint::Length(3)])
         .split(list_area);
 
-    render_tool_list(f, rows[0], selected, download_status);
+    render_tool_list(f, rows[0], selected, download_status, box_type);
     render_help(f, rows[1], selected);
 
     if let (Some(cfg_area), Some(cfg)) = (config_area, nft_config) {
@@ -80,7 +82,9 @@ fn render_tool_list(
     area: Rect,
     selected: SelectedTool,
     download_status: Option<&str>,
+    box_type: BoxType,
 ) {
+    let wizards = wizards_for_box_type(box_type);
     let mut items: Vec<ListItem> = Vec::new();
     let selected_flat_idx = match selected {
         SelectedTool::Binary(idx) => 1 + idx,
@@ -169,7 +173,7 @@ fn render_tool_list(
         Style::default().fg(Color::DarkGray),
     ))));
 
-    for (idx, wizard) in ALL_WIZARDS.iter().enumerate() {
+    for (idx, wizard) in wizards.iter().enumerate() {
         let is_sel = selected == SelectedTool::Wizard(idx);
         let base = if is_sel {
             Style::default()

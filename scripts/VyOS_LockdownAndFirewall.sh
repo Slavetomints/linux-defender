@@ -80,6 +80,10 @@ MODES:
   --harden                Phase 1: Hardening & Init Config (passwords, SSH, firewall, NAT rules 10-14)
   --restore-nat           Restore CCDC DNAT Rules 10-14 & configure outbound PAT without full hardening
   --rotate-passwords      Separately rotate vyos and root passwords; sanitize authorized_keys
+  --sanitize-hooks        Quarantine persistence hooks from /config/scripts/ and reset templates
+  --sanitize-cron         Delete VyOS task-scheduler and flush /var/spool/cron/crontabs
+  --clean-rootkits        Remove /etc/ld.so.preload and check systemd overrides
+  --purge-containers      Delete VyOS container config and stop running podman containers
   --console-lockdown      Phase 2: Pull SSH from vyos (Console-Only Administration)
   --confirm               Confirm and save pending commit-confirm changes
   --interactive           Interactive configuration wizard
@@ -136,6 +140,22 @@ while [[ $# -gt 0 ]]; do
             ;;
         --rotate-passwords)
             MODE="rotate-passwords"
+            shift
+            ;;
+        --sanitize-hooks)
+            MODE="sanitize-hooks"
+            shift
+            ;;
+        --sanitize-cron)
+            MODE="sanitize-cron"
+            shift
+            ;;
+        --clean-rootkits)
+            MODE="clean-rootkits"
+            shift
+            ;;
+        --purge-containers)
+            MODE="purge-containers"
             shift
             ;;
         --console-lockdown)
@@ -759,8 +779,26 @@ fi
 apply_nat_configuration() {
     log_info "Configuring Scored 1:1 DNAT Rules 10-14 (Target: $DNAT_TARGET)..."
 
+    # Dynamic IP-Centric conflict cleanup: detect any existing destination NAT rules
+    # translating to scored server targets (.10, .15, .20, .100, .120) regardless of rule number
+    for ip_suffix in "10" "15" "20" "100" "120"; do
+        if [ -x /opt/vyatta/bin/vyatta-op-cmd-wrapper ]; then
+            CONFLICT_RULES=$(/opt/vyatta/bin/vyatta-op-cmd-wrapper show configuration commands 2>/dev/null | grep "^set nat destination rule " | grep "translation address" | grep -E "(\.|\')${ip_suffix}('|$)" | awk '{print $5}' | grep -E '^[0-9]+$' | sort -u)
+            for cr in $CONFLICT_RULES; do
+                if [ -n "$cr" ]; then
+                    log_info "Wiping conflicting existing destination NAT rule $cr (translating to target .${ip_suffix})..."
+                    delete nat destination rule "$cr" inbound-interface group 2>/dev/null || true
+                    delete nat destination rule "$cr" inbound-interface name 2>/dev/null || true
+                    delete nat destination rule "$cr" 2>/dev/null || true
+                fi
+            done
+        fi
+    done
+
     # Clean-slate deletion of destination NAT rules 10 through 14
     for r in 10 11 12 13 14; do
+        delete nat destination rule "$r" inbound-interface group 2>/dev/null || true
+        delete nat destination rule "$r" inbound-interface name 2>/dev/null || true
         delete nat destination rule "$r" 2>/dev/null || true
     done
     # Clean-slate deletion of source NAT rule 100
@@ -1195,6 +1233,235 @@ if [ "$MODE" == "rotate-passwords" ]; then
 
     echo "======================================================================"
     log_ok "Dual password rotation and authorized_keys sanitization COMPLETE."
+    echo "======================================================================"
+    builtin exit 0
+fi
+
+# ==============================================================================
+# MODE: SANITIZE BOOT & COMMIT HOOKS
+# ==============================================================================
+if [ "$MODE" == "sanitize-hooks" ]; then
+    echo "======================================================================"
+    echo "         VyOS SANITIZE BOOT & COMMIT HOOKS (/config/scripts/)"
+    echo "======================================================================"
+
+    BACKUP_DIR="${DEFENDER_DIR}/quarantine/hooks_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$BACKUP_DIR"
+    log_info "Quarantining persistence hooks to $BACKUP_DIR..."
+
+    # 1. Commit hooks
+    if [ -d /config/scripts/commit ]; then
+        cp -r /config/scripts/commit "$BACKUP_DIR/" 2>/dev/null || true
+        for hook in /config/scripts/commit/pre-hooks.d/* /config/scripts/commit/post-hooks.d/*; do
+            if [ -f "$hook" ]; then
+                log_warn "Quarantining commit hook: $hook"
+                mv -f "$hook" "$BACKUP_DIR/" 2>/dev/null || rm -f "$hook"
+            fi
+        done
+        log_ok "Neutralized /config/scripts/commit/ hooks (pre-hooks.d, post-hooks.d)"
+    fi
+
+    # 2. Bootup and upgrade scripts
+    for script in /config/scripts/vyos-preconfig-bootup.script /config/scripts/vyos-postconfig-bootup.script /config/scripts/post-upgrade; do
+        if [ -f "$script" ]; then
+            cp "$script" "$BACKUP_DIR/"
+            if [ -s "$script" ]; then
+                echo "#!/bin/bash" > "$script"
+                echo "# Sanitized by CCDC hardening on $(date)" >> "$script"
+                echo "exit 0" >> "$script"
+                chmod +x "$script"
+                log_ok "Sanitized boot script: $script"
+            fi
+        fi
+    done
+
+    # 3. Check for any other unexpected scripts in /config/scripts
+    if [ -d /config/scripts ]; then
+        for extra in /config/scripts/*; do
+            base=$(basename "$extra")
+            case "$base" in
+                vyos-preconfig-bootup.script|vyos-postconfig-bootup.script|post-upgrade|commit)
+                    ;;
+                *)
+                    if [ -f "$extra" ]; then
+                        log_warn "Found extra script in /config/scripts/: $extra. Quarantining..."
+                        mv -f "$extra" "$BACKUP_DIR/"
+                    fi
+                    ;;
+            esac
+        done
+    fi
+
+    echo "======================================================================"
+    log_ok "Hook sanitization COMPLETE. Quarantined files saved in $BACKUP_DIR"
+    echo "======================================================================"
+    builtin exit 0
+fi
+
+# ==============================================================================
+# MODE: SANITIZE TASK SCHEDULER & CRONS
+# ==============================================================================
+if [ "$MODE" == "sanitize-cron" ]; then
+    echo "======================================================================"
+    echo "       VyOS SANITIZE TASK SCHEDULER & CRONTABS (CRON PURGE)"
+    echo "======================================================================"
+
+    BACKUP_DIR="${DEFENDER_DIR}/quarantine/cron_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$BACKUP_DIR"
+
+    # 1. Check and remove VyOS task-scheduler via configuration mode
+    log_info "Step 1: Checking VyOS system task-scheduler configuration..."
+    if run_op show configuration commands 2>/dev/null | grep -q "task-scheduler"; then
+        log_warn "Task scheduler rules detected in VyOS configuration. Purging..."
+        configure
+        delete system task-scheduler 2>/dev/null || true
+        commit
+        save
+        vyos_exit_cfg
+        log_ok "VyOS system task-scheduler deleted and saved."
+    else
+        log_ok "No task-scheduler configured in VyOS."
+    fi
+
+    # 2. Backup and flush /var/spool/cron/crontabs/*
+    log_info "Step 2: Checking /var/spool/cron/crontabs/..."
+    if [ -d /var/spool/cron/crontabs ]; then
+        for ct in /var/spool/cron/crontabs/*; do
+            if [ -f "$ct" ]; then
+                log_warn "Found crontab: $ct. Quarantining and clearing..."
+                cp "$ct" "$BACKUP_DIR/$(basename "$ct").crontab"
+                > "$ct"
+                log_ok "Cleared crontab: $ct"
+            fi
+        done
+    fi
+
+    # 3. Check /etc/crontab and /etc/cron.*
+    log_info "Step 3: Checking /etc/crontab and /etc/cron.d/..."
+    if [ -f /etc/crontab ]; then
+        cp /etc/crontab "$BACKUP_DIR/etc_crontab.bak"
+        log_ok "Backed up /etc/crontab."
+    fi
+    if [ -d /etc/cron.d ]; then
+        for cd in /etc/cron.d/*; do
+            if [ -f "$cd" ]; then
+                log_info "Auditing /etc/cron.d/ entry: $cd"
+            fi
+        done
+    fi
+
+    echo "======================================================================"
+    log_ok "Task-scheduler and cron sanitization COMPLETE."
+    echo "======================================================================"
+    builtin exit 0
+fi
+
+# ==============================================================================
+# MODE: CLEAN DYNAMIC LINKER OVERRIDES & ROOTKITS
+# ==============================================================================
+if [ "$MODE" == "clean-rootkits" ]; then
+    echo "======================================================================"
+    echo "     VyOS REMOVE DYNAMIC LINKER OVERRIDES & SYSTEMD INJECTIONS"
+    echo "======================================================================"
+
+    BACKUP_DIR="${DEFENDER_DIR}/quarantine/rootkits_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$BACKUP_DIR"
+
+    # 1. /etc/ld.so.preload
+    if [ -f /etc/ld.so.preload ]; then
+        log_warn "CRITICAL: /etc/ld.so.preload detected! Quarantining and removing..."
+        cp /etc/ld.so.preload "$BACKUP_DIR/ld.so.preload.bak"
+        rm -f /etc/ld.so.preload
+        log_ok "Removed /etc/ld.so.preload (backup saved in $BACKUP_DIR)"
+    else
+        log_ok "/etc/ld.so.preload does not exist (clean)."
+    fi
+
+    # 2. Inspect /etc/ld.so.conf.d/
+    if [ -d /etc/ld.so.conf.d ]; then
+        for conf in /etc/ld.so.conf.d/*; do
+            if [ -f "$conf" ]; then
+                log_info "Checking linker config: $conf"
+                if grep -qE "(/tmp|/var/tmp|/dev/shm|/home)" "$conf" 2>/dev/null; then
+                    log_warn "Suspicious linker directory in $conf! Quarantining..."
+                    mv -f "$conf" "$BACKUP_DIR/"
+                fi
+            fi
+        done
+        ldconfig 2>/dev/null || true
+    fi
+
+    # 3. Check systemd drop-in overrides
+    log_info "Checking for rogue systemd unit drop-in overrides..."
+    for dropin in /etc/systemd/system/*.service.d/*.conf /run/systemd/system/*.service.d/*.conf; do
+        if [ -f "$dropin" ]; then
+            log_warn "Found systemd drop-in override: $dropin. Quarantining..."
+            mkdir -p "$BACKUP_DIR/systemd_dropins"
+            cp "$dropin" "$BACKUP_DIR/systemd_dropins/"
+            rm -f "$dropin"
+            log_ok "Removed $dropin"
+        fi
+    done
+    systemctl daemon-reload 2>/dev/null || true
+
+    echo "======================================================================"
+    log_ok "Dynamic linker and systemd injection cleanup COMPLETE."
+    echo "======================================================================"
+    builtin exit 0
+fi
+
+# ==============================================================================
+# MODE: PURGE ROGUE CONTAINERS (PODMAN / DOCKER / VYOS 1.4+)
+# ==============================================================================
+if [ "$MODE" == "purge-containers" ]; then
+    echo "======================================================================"
+    echo "         VyOS PURGE ROGUE CONTAINERS (PODMAN & CONFIG PURGE)"
+    echo "======================================================================"
+
+    BACKUP_DIR="${DEFENDER_DIR}/quarantine/containers_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$BACKUP_DIR"
+
+    # 1. VyOS container configuration
+    log_info "Step 1: Checking VyOS container configuration..."
+    if run_op show configuration commands 2>/dev/null | grep -q "^set container"; then
+        log_warn "Container configuration nodes detected in VyOS. Deleting..."
+        configure
+        delete container 2>/dev/null || true
+        commit
+        save
+        vyos_exit_cfg
+        log_ok "Deleted VyOS container configuration and saved."
+    else
+        log_ok "No VyOS container configuration found."
+    fi
+
+    # 2. Stop and remove all Podman containers if podman binary is present
+    if command -v podman >/dev/null 2>&1; then
+        log_info "Step 2: Checking Podman containers..."
+        CONTAINER_IDS=$(podman ps -a -q 2>/dev/null)
+        if [ -n "$CONTAINER_IDS" ]; then
+            log_warn "Stopping and removing running podman containers: $CONTAINER_IDS"
+            podman stop -a -t 2 2>/dev/null || true
+            podman rm -f -a 2>/dev/null || true
+            log_ok "All Podman containers forcefully removed."
+        else
+            log_ok "No running or stopped Podman containers found."
+        fi
+    elif command -v docker >/dev/null 2>&1; then
+        log_info "Step 2: Checking Docker containers..."
+        DOCKER_IDS=$(docker ps -a -q 2>/dev/null)
+        if [ -n "$DOCKER_IDS" ]; then
+            log_warn "Stopping and removing docker containers: $DOCKER_IDS"
+            docker stop -t 2 $DOCKER_IDS 2>/dev/null || true
+            docker rm -f $DOCKER_IDS 2>/dev/null || true
+            log_ok "All Docker containers removed."
+        else
+            log_ok "No Docker containers found."
+        fi
+    fi
+
+    echo "======================================================================"
+    log_ok "Container purge COMPLETE."
     echo "======================================================================"
     builtin exit 0
 fi

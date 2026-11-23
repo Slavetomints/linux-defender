@@ -363,6 +363,153 @@ pub struct DetectedRoute {
     pub is_valid: bool,
 }
 
+/// Status of a router subsystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouterSubsystemStatus {
+    /// Subsystem is fully active and compliant with baseline.
+    Valid,
+    /// Subsystem has missing rules or drifted configuration.
+    Invalid,
+    /// Initial audit scan has not yet been executed or unconfigured.
+    PendingScan,
+}
+
+/// Evaluates raw VyOS configuration text for destination NAT and outbound PAT status.
+pub fn evaluate_config_nat_status(content: &str) -> (RouterSubsystemStatus, String) {
+    let parsed_rules = parse_all_dest_nat_rules(content);
+    if parsed_rules.is_empty() {
+        return (
+            RouterSubsystemStatus::PendingScan,
+            "Pending scan — run [4]".into(),
+        );
+    }
+
+    let outcome = audit_nat_rules_by_ip(&parsed_rules);
+
+    if outcome.valid_targets.len() == 5
+        && outcome.missing_targets.is_empty()
+        && outcome.duplicate_conflicts.is_empty()
+        && outcome.drifted_targets.is_empty()
+        && outcome.rogue_rules.is_empty()
+    {
+        (
+            RouterSubsystemStatus::Valid,
+            "Configured & Valid (5/5 Scored Targets Active)".into(),
+        )
+    } else if !outcome.missing_targets.is_empty() {
+        let missing_names: Vec<&str> = outcome.missing_targets.iter().map(|t| t.name).collect();
+        (
+            RouterSubsystemStatus::Invalid,
+            format!("Missing {} scored target(s): {}", outcome.missing_targets.len(), missing_names.join(", ")),
+        )
+    } else if !outcome.drifted_targets.is_empty() {
+        let (target, rule, reason) = &outcome.drifted_targets[0];
+        (
+            RouterSubsystemStatus::Invalid,
+            format!("Port drift on {} (Rule {}): {}", target.name, rule.rule_num, reason),
+        )
+    } else if !outcome.duplicate_conflicts.is_empty() {
+        let (target, rules) = &outcome.duplicate_conflicts[0];
+        let nums: Vec<String> = rules.iter().map(|r| r.rule_num.to_string()).collect();
+        (
+            RouterSubsystemStatus::Invalid,
+            format!("Conflicting rules for {} ({})", target.name, nums.join(", ")),
+        )
+    } else if !outcome.rogue_rules.is_empty() {
+        (
+            RouterSubsystemStatus::Invalid,
+            format!("Rogue NAT Rule {} -> {}:{}", outcome.rogue_rules[0].rule_num, outcome.rogue_rules[0].translation_address, outcome.rogue_rules[0].destination_ports),
+        )
+    } else {
+        (
+            RouterSubsystemStatus::Invalid,
+            format!("Incomplete: {}/5 Scored Targets Active", outcome.valid_targets.len()),
+        )
+    }
+}
+
+/// Evaluates raw VyOS configuration text for static routing and rogue tunnel status.
+pub fn evaluate_config_routes_status(content: &str) -> (RouterSubsystemStatus, String) {
+    if content.trim().is_empty() {
+        return (
+            RouterSubsystemStatus::PendingScan,
+            "Pending scan — run [4]".into(),
+        );
+    }
+
+    // Check rogue tunnels first
+    for tunnel in &["wireguard", "openvpn", "vti", "tunnel", "pseudo-ethernet", "vxlan"] {
+        if content.contains(&format!("interfaces {} ", tunnel)) {
+            return (
+                RouterSubsystemStatus::Invalid,
+                format!("Rogue tunnel interface configured: '{}'", tunnel),
+            );
+        }
+    }
+
+    let has_default = detect_static_route(content, "0.0.0.0/0").is_some();
+    let has_transit = detect_static_route(content, "172.20.240.0/24").is_some();
+
+    if has_default && has_transit {
+        (
+            RouterSubsystemStatus::Valid,
+            "Configured & Valid (WAN Default & DMZ Transit Active)".into(),
+        )
+    } else if !has_default && !has_transit {
+        (
+            RouterSubsystemStatus::Invalid,
+            "Missing Default (0.0.0.0/0) & DMZ Transit (172.20.240.0/24) Routes".into(),
+        )
+    } else if !has_default {
+        (
+            RouterSubsystemStatus::Invalid,
+            "Missing Default Route (0.0.0.0/0)".into(),
+        )
+    } else {
+        (
+            RouterSubsystemStatus::Invalid,
+            "Missing DMZ Transit Route (172.20.240.0/24)".into(),
+        )
+    }
+}
+
+/// Evaluates live NAT status from persistent configuration or cached runtime state.
+pub fn evaluate_live_nat_status() -> Option<(RouterSubsystemStatus, String)> {
+    if let Some((_, content)) = load_config_boot() {
+        Some(evaluate_config_nat_status(&content))
+    } else {
+        None
+    }
+}
+
+/// Evaluates live routing status from persistent configuration or system routing table.
+pub fn evaluate_live_routes_status() -> Option<(RouterSubsystemStatus, String)> {
+    if let Some((_, content)) = load_config_boot() {
+        let (st, desc) = evaluate_config_routes_status(&content);
+        if st == RouterSubsystemStatus::Valid {
+            return Some((st, desc));
+        }
+    }
+
+    // Check kernel routing table fallback via `ip route show` or `/proc/net/route`
+    if let Some(out) = run_cmd_output("ip", &["route", "show"]) {
+        let has_default = out.contains("default via");
+        let has_transit = out.contains("172.20.240.0/24 via");
+        if has_default && has_transit {
+            return Some((
+                RouterSubsystemStatus::Valid,
+                "Configured & Valid (WAN Default & DMZ Transit Active via kernel)".into(),
+            ));
+        }
+    }
+
+    if let Some((_, content)) = load_config_boot() {
+        Some(evaluate_config_routes_status(&content))
+    } else {
+        None
+    }
+}
+
 /// IP-Centric NAT audit outcome.
 #[derive(Debug, Clone)]
 pub struct NatIpAuditOutcome {

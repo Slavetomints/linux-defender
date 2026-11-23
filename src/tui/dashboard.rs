@@ -80,38 +80,57 @@ pub fn render(
     }
 }
 
-/// Status of a router subsystem.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RouterSubsystemStatus {
-    /// Subsystem is fully active and compliant with baseline.
-    Valid,
-    /// Subsystem has missing rules or drifted configuration.
-    Invalid,
-    /// Initial audit scan has not yet been executed.
-    PendingScan,
-}
+pub use crate::router::scan::RouterSubsystemStatus;
 
-/// Inspect findings for router NAT status.
+/// Inspect findings and live router configuration for NAT status.
 pub fn get_router_nat_status(findings: &[Finding]) -> (RouterSubsystemStatus, String) {
     let nat_findings: Vec<&Finding> = findings.iter().filter(|f| f.module == "router_nat").collect();
-    if nat_findings.is_empty() {
-        (RouterSubsystemStatus::PendingScan, "Pending scan — run [4]".into())
-    } else if let Some(bad) = nat_findings.iter().find(|f| f.severity >= Severity::High && !f.resolved) {
-        (RouterSubsystemStatus::Invalid, format!("Invalid: {}", bad.summary))
+    if !nat_findings.is_empty() {
+        if let Some(bad) = nat_findings.iter().find(|f| f.severity >= Severity::High && !f.resolved) {
+            (RouterSubsystemStatus::Invalid, format!("Invalid: {}", bad.summary))
+        } else {
+            let valid_count = nat_findings
+                .iter()
+                .filter(|f| f.summary.starts_with("Scored DNAT Active:"))
+                .count();
+            if valid_count == 5 {
+                (RouterSubsystemStatus::Valid, "Configured & Valid (5/5 Scored Targets Active)".into())
+            } else if valid_count > 0 {
+                (RouterSubsystemStatus::Invalid, format!("Incomplete: {}/5 Scored Targets Active", valid_count))
+            } else {
+                (RouterSubsystemStatus::Valid, "Configured & Valid (Rules active)".into())
+            }
+        }
+    } else if let Some((st, desc)) = crate::router::scan::evaluate_live_nat_status() {
+        (st, desc)
     } else {
-        (RouterSubsystemStatus::Valid, "Configured & Valid (Rules 10-14 active)".into())
+        (RouterSubsystemStatus::PendingScan, "Pending scan — run [4]".into())
     }
 }
 
-/// Inspect findings for router routing routes status.
+/// Inspect findings and live router configuration for routing routes status.
 pub fn get_router_routes_status(findings: &[Finding]) -> (RouterSubsystemStatus, String) {
     let route_findings: Vec<&Finding> = findings.iter().filter(|f| f.module == "router_interfaces").collect();
-    if route_findings.is_empty() {
-        (RouterSubsystemStatus::PendingScan, "Pending scan — run [4]".into())
-    } else if let Some(bad) = route_findings.iter().find(|f| f.severity >= Severity::High && !f.resolved) {
-        (RouterSubsystemStatus::Invalid, format!("Invalid: {}", bad.summary))
+    if !route_findings.is_empty() {
+        if let Some(bad) = route_findings.iter().find(|f| f.severity >= Severity::High && !f.resolved) {
+            (RouterSubsystemStatus::Invalid, format!("Invalid: {}", bad.summary))
+        } else {
+            let has_default = route_findings.iter().any(|f| f.summary.starts_with("Default Route Active:"));
+            let has_transit = route_findings.iter().any(|f| f.summary.starts_with("Servers DMZ Transit Route Active:"));
+            if has_default && has_transit {
+                (RouterSubsystemStatus::Valid, "Configured & Valid (WAN Default & DMZ Transit Active)".into())
+            } else if has_default {
+                (RouterSubsystemStatus::Invalid, "Missing DMZ Transit Route (172.20.240.0/24)".into())
+            } else if has_transit {
+                (RouterSubsystemStatus::Invalid, "Missing Default Route (0.0.0.0/0)".into())
+            } else {
+                (RouterSubsystemStatus::Valid, "Configured & Valid (Transit routes OK)".into())
+            }
+        }
+    } else if let Some((st, desc)) = crate::router::scan::evaluate_live_routes_status() {
+        (st, desc)
     } else {
-        (RouterSubsystemStatus::Valid, "Configured & Valid (Transit routes OK)".into())
+        (RouterSubsystemStatus::PendingScan, "Pending scan — run [4]".into())
     }
 }
 

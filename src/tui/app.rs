@@ -1497,6 +1497,21 @@ impl App {
                 // When confirm fails, keep the pending state so the operator can retry.
                 // The error line is already recorded in router_log.
             }
+
+            if success && matches!(id, "harden" | "router_nat" | "restore_nat" | "confirm") {
+                // Clear stale findings so fresh post-remediation audit findings populate
+                self.findings.retain(|f| f.module != "router_nat" && f.module != "router_interfaces");
+
+                let finding_tx = self.finding_tx.clone();
+                let box_type = self.box_type;
+                std::thread::spawn(move || {
+                    let report = crate::core::log_path("router_remediation_refresh.log");
+                    let mut ctx = DefenderContext::new(report, false).with_box_type(box_type);
+                    ctx.finding_tx = Some(finding_tx);
+                    crate::router::scan::run_module("router_nat", &ctx);
+                    crate::router::scan::run_module("router_interfaces", &ctx);
+                });
+            }
         }
     }
 

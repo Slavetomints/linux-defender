@@ -455,24 +455,38 @@ fn build_script_args_maps_restore_mode_and_config_source() {
 
 #[test]
 fn dashboard_router_status_helpers() {
-    // Initial state: no findings yet
-    let (nat_st, _) = get_router_nat_status(&[]);
-    assert_eq!(nat_st, RouterSubsystemStatus::PendingScan);
+    // When clean config fixture is present on disk, live evaluation detects valid environment
+    let (nat_st, desc_nat) = get_router_nat_status(&[]);
+    assert_eq!(nat_st, RouterSubsystemStatus::Valid);
+    assert!(desc_nat.contains("Configured & Valid"));
 
-    let (rt_st, _) = get_router_routes_status(&[]);
-    assert_eq!(rt_st, RouterSubsystemStatus::PendingScan);
+    let (rt_st, desc_rt) = get_router_routes_status(&[]);
+    assert_eq!(rt_st, RouterSubsystemStatus::Valid);
+    assert!(desc_rt.contains("Configured & Valid"));
 
-    // Valid state: Info finding present (resolved or non-actionable)
+    // Incomplete state: only 1 valid target finding present
     let mut valid_nat_finding = Finding::new(
         Severity::Info,
         "router_nat",
-        "Scored DNAT Rules 10-14 are correctly configured and targeted",
+        "Scored DNAT Active: E-Commerce Web (Rule 10 -> 172.20.240.10)",
         "",
     );
     valid_nat_finding.resolved = true;
     let (nat_st_ok, desc_ok) = get_router_nat_status(&[valid_nat_finding]);
-    assert_eq!(nat_st_ok, RouterSubsystemStatus::Valid);
-    assert!(desc_ok.contains("Rules 10-14 active"));
+    assert_eq!(nat_st_ok, RouterSubsystemStatus::Invalid);
+    assert!(desc_ok.contains("Incomplete: 1/5"));
+
+    // Complete valid state: all 5 scored targets present as findings
+    let all_5_findings = vec![
+        Finding::new(Severity::Info, "router_nat", "Scored DNAT Active: E-Commerce Web (Rule 10 -> 172.20.240.10)", ""),
+        Finding::new(Severity::Info, "router_nat", "Scored DNAT Active: Mail Server (Rule 11 -> 172.20.240.15)", ""),
+        Finding::new(Severity::Info, "router_nat", "Scored DNAT Active: Splunk SIEM (Rule 12 -> 172.20.240.20)", ""),
+        Finding::new(Severity::Info, "router_nat", "Scored DNAT Active: Active Directory (Rule 13 -> 172.20.240.100)", ""),
+        Finding::new(Severity::Info, "router_nat", "Scored DNAT Active: MSSQL Database (Rule 14 -> 172.20.240.120)", ""),
+    ];
+    let (nat_st_5, desc_5) = get_router_nat_status(&all_5_findings);
+    assert_eq!(nat_st_5, RouterSubsystemStatus::Valid);
+    assert!(desc_5.contains("5/5 Scored Targets Active"));
 
     // Invalid state: High finding present
     let crit_nat_finding = Finding::new(
@@ -487,6 +501,51 @@ fn dashboard_router_status_helpers() {
 
     // Backup timestamp formatting helper does not panic
     let _ = get_last_router_backup_timestamp();
+}
+
+#[test]
+fn evaluate_config_routes_status_detects_clean_and_drifted() {
+    use linux_defender::router::scan::evaluate_config_routes_status;
+
+    let clean_routes = r#"
+protocols {
+    static {
+        route 0.0.0.0/0 { next-hop 172.31.20.1 {} }
+        route 172.20.240.0/24 { next-hop 172.16.0.254 {} }
+    }
+}
+"#;
+    let (st_ok, desc_ok) = evaluate_config_routes_status(clean_routes);
+    assert_eq!(st_ok, RouterSubsystemStatus::Valid);
+    assert!(desc_ok.contains("WAN Default & DMZ Transit Active"));
+
+    let missing_def = r#"
+protocols {
+    static {
+        route 172.20.240.0/24 { next-hop 172.16.0.254 {} }
+    }
+}
+"#;
+    let (st_no_def, desc_no_def) = evaluate_config_routes_status(missing_def);
+    assert_eq!(st_no_def, RouterSubsystemStatus::Invalid);
+    assert!(desc_no_def.contains("Missing Default Route"));
+
+    let rogue_tunnel = r#"
+interfaces {
+    wireguard wg0 {
+        address 10.99.0.1/24
+    }
+}
+protocols {
+    static {
+        route 0.0.0.0/0 { next-hop 172.31.20.1 {} }
+        route 172.20.240.0/24 { next-hop 172.16.0.254 {} }
+    }
+}
+"#;
+    let (st_tunnel, desc_tunnel) = evaluate_config_routes_status(rogue_tunnel);
+    assert_eq!(st_tunnel, RouterSubsystemStatus::Invalid);
+    assert!(desc_tunnel.contains("wireguard"));
 }
 
 #[test]

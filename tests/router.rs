@@ -100,9 +100,9 @@ fn build_script_args_maps_remediation_flags() {
 
 #[test]
 fn router_steps_registry_is_valid() {
-    assert_eq!(ROUTER_STEPS.len(), 13);
+    assert_eq!(ROUTER_STEPS.len(), 12);
     let ids: Vec<&str> = ROUTER_STEPS.iter().map(|s| s.id).collect();
-    assert!(ids.contains(&"audit"));
+    assert!(!ids.contains(&"audit"), "audit is superseded by Tab 4 modular scans");
     assert!(ids.contains(&"diff"));
     assert!(ids.contains(&"harden"));
     assert!(ids.contains(&"router_nat"));
@@ -315,22 +315,28 @@ fn should_enter_pending_state_accepts_harden_and_restore_nat() {
 }
 
 #[test]
-fn router_box_type_scan_modules_returns_eight_dedicated_modules() {
+fn router_box_type_scan_modules_returns_fourteen_dedicated_modules() {
     let router_mods = BoxType::Router.scan_modules();
-    assert_eq!(router_mods.len(), 8, "Router must have exactly 8 dedicated audit modules");
+    assert_eq!(router_mods.len(), 14, "Router must have exactly 14 dedicated audit modules");
 
     let ids: Vec<&str> = router_mods.iter().map(|(id, _, _, _)| *id).collect();
     assert_eq!(
         ids,
         vec![
-            "router_nat",
-            "router_services",
-            "router_firewall",
+            "router_version",
+            "router_boot_hooks",
+            "router_commit_hooks",
+            "router_task_scheduler",
             "router_users",
-            "router_scripts",
-            "router_tasks",
-            "router_boot",
             "router_interfaces",
+            "router_containers",
+            "router_services_config",
+            "router_listening_sockets",
+            "router_dyn_linker",
+            "router_suid_files",
+            "router_commit_history",
+            "router_nat",
+            "router_services_whitelist",
         ]
     );
 

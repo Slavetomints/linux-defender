@@ -30,11 +30,6 @@ pub struct RouterStepDef {
 /// All available router operations in display order.
 pub const ROUTER_STEPS: &[RouterStepDef] = &[
     RouterStepDef {
-        id: "audit",
-        label: "Forensic Audit & Baseline",
-        description: "14-section persistence, NAT baseline, and service whitelist check",
-    },
-    RouterStepDef {
         id: "diff",
         label: "Diff Against Baseline",
         description: "Compare live VyOS state against last captured baseline",

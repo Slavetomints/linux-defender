@@ -4,8 +4,9 @@ use std::path::PathBuf;
 
 use linux_defender::core::finding::Severity;
 use linux_defender::tools::palo_alto::{
-    RemediationScript, XmlNode, audit_config, diff_baseline, extract_nat_rules,
-    extract_permitted_ips, extract_security_rules,
+    InterfaceConfig, RemediationScript, STANDARD_INTERFACES, XmlNode, ZoneConfig, audit_config,
+    diff_baseline, extract_interfaces, extract_nat_rules, extract_permitted_ips,
+    extract_security_rules, extract_zones,
 };
 
 const SAMPLE_CLEAN_BASELINE_XML: &str = r#"<?xml version="1.0"?>
@@ -567,4 +568,339 @@ fn test_cli_args_parsing() {
             assert_eq!(palo_args.port, 443);
         }
     }
+}
+
+#[test]
+fn test_recreated_baseline_known_good_is_clean() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let baseline_path = PathBuf::from(manifest_dir)
+        .join("tests/fixtures/palo_alto/baseline_known_good.xml");
+    let content = std::fs::read_to_string(&baseline_path)
+        .expect("Failed to read baseline_known_good.xml");
+    let root = XmlNode::parse(&content).expect("Failed to parse baseline_known_good.xml");
+
+    let findings = audit_config(&root, None);
+    assert_eq!(
+        findings.len(),
+        0,
+        "Known-good baseline XML must produce 0 audit findings, got: {:?}",
+        findings
+    );
+
+    let diff_findings = diff_baseline(&root, &root);
+    assert_eq!(
+        diff_findings.len(),
+        0,
+        "Known-good baseline XML diffed against itself must produce 0 findings, got: {:?}",
+        diff_findings
+    );
+}
+
+#[test]
+fn test_non_baseline_custom_rule_flagged_without_fix() {
+    let xml = r#"<?xml version="1.0"?>
+<config version="11.0.0">
+  <devices><entry name="localhost.localdomain"><vsys><entry name="vsys1">
+    <rulebase><security><rules>
+      <entry name="AllowICMP">
+        <from><member>any</member></from><to><member>any</member></to>
+        <source><member>any</member></source><destination><member>any</member></destination>
+        <service><member>application-default</member></service>
+        <application><member>ping</member></application>
+        <action>allow</action><disabled>no</disabled>
+      </entry>
+      <entry name="CustomDenyTraffic">
+        <from><member>any</member></from><to><member>any</member></to>
+        <source><member>any</member></source><destination><member>any</member></destination>
+        <service><member>any</member></service><application><member>any</member></application>
+        <action>deny</action><disabled>no</disabled>
+      </entry>
+    </rules></security></rulebase>
+  </entry></vsys></entry></devices>
+</config>"#;
+    let root = XmlNode::parse(xml).unwrap();
+    let findings = audit_config(&root, None);
+
+    let extra = findings
+        .iter()
+        .find(|f| f.check_id == "AUD-EXTRA-RULE")
+        .expect("Should flag non-baseline custom rule");
+    assert_eq!(extra.target, "CustomDenyTraffic");
+    assert!(
+        extra.remediation.is_empty(),
+        "Extra non-allow rule must be flagged without automated deletion command"
+    );
+}
+
+#[test]
+fn test_non_baseline_nat_flagged_without_fix() {
+    let xml = r#"<?xml version="1.0"?>
+<config version="11.0.0">
+  <devices><entry name="localhost.localdomain"><vsys><entry name="vsys1">
+    <rulebase><nat><rules>
+      <entry name="CustomWhiteTeamNAT">
+        <from><member>External</member></from><to><member>Internal</member></to>
+        <source><member>any</member></source><destination><member>any</member></destination>
+      </entry>
+      <entry name="Ecomm-StaticNAT">
+        <from><member>Internal</member></from><to><member>External</member></to>
+        <source><member>EcommPriv</member></source><destination><member>any</member></destination>
+      </entry>
+    </rules></nat></rulebase>
+  </entry></vsys></entry></devices>
+</config>"#;
+    let root = XmlNode::parse(xml).unwrap();
+    let findings = audit_config(&root, None);
+
+    // Ecomm-StaticNAT is in script -> has fix
+    let red_nat = findings
+        .iter()
+        .find(|f| f.check_id == "AUD-RED-NAT")
+        .expect("Should flag redundant NAT");
+    assert_eq!(red_nat.target, "Ecomm-StaticNAT");
+    assert_eq!(
+        red_nat.remediation,
+        vec!["delete rulebase nat rules \"Ecomm-StaticNAT\""]
+    );
+
+    // CustomWhiteTeamNAT is in addition to script -> flag only, NO fix
+    let extra_nat = findings
+        .iter()
+        .find(|f| f.check_id == "AUD-EXTRA-NAT")
+        .expect("Should flag non-baseline NAT");
+    assert_eq!(extra_nat.target, "CustomWhiteTeamNAT");
+    assert!(
+        extra_nat.remediation.is_empty(),
+        "Non-baseline NAT must be flagged without automated deletion command"
+    );
+}
+
+#[test]
+fn test_interface_and_zone_extraction() {
+    let xml = r#"<?xml version="1.0"?>
+<config version="11.0.0">
+  <devices><entry name="localhost.localdomain">
+    <network>
+      <interface>
+        <ethernet>
+          <entry name="ethernet1/1">
+            <layer3>
+              <ip><entry name="10.0.0.1/24"/></ip>
+              <interface-management-profile>allow-ping</interface-management-profile>
+            </layer3>
+            <comment>WAN Uplink</comment>
+            <link-state>up</link-state>
+          </entry>
+          <entry name="ethernet1/2">
+            <layer3>
+              <ip><entry name="172.16.0.1/24"/></ip>
+            </layer3>
+          </entry>
+        </ethernet>
+      </interface>
+    </network>
+    <vsys><entry name="vsys1">
+      <zone>
+        <entry name="External">
+          <network><layer3><member>ethernet1/2</member></layer3></network>
+        </entry>
+        <entry name="untrust">
+          <network><layer3><member>ethernet1/1</member></layer3></network>
+        </entry>
+      </zone>
+    </entry></vsys>
+  </entry></devices>
+</config>"#;
+    let root = XmlNode::parse(xml).unwrap();
+    let zones = extract_zones(&root);
+    assert_eq!(zones.len(), 2);
+    assert_eq!(zones[0].name, "External");
+    assert_eq!(zones[0].interfaces, vec!["ethernet1/2"]);
+    assert_eq!(zones[1].name, "untrust");
+    assert_eq!(zones[1].interfaces, vec!["ethernet1/1"]);
+
+    let ifaces = extract_interfaces(&root, &zones);
+    assert_eq!(ifaces.len(), 2);
+    let if1 = &ifaces[0];
+    assert_eq!(if1.name, "ethernet1/1");
+    assert_eq!(if1.if_type, "ethernet");
+    assert_eq!(if1.mode, "layer3");
+    assert_eq!(if1.ip_addresses, vec!["10.0.0.1/24"]);
+    assert_eq!(if1.zone.as_deref(), Some("untrust"));
+    assert_eq!(if1.mgmt_profile.as_deref(), Some("allow-ping"));
+    assert_eq!(if1.comment.as_deref(), Some("WAN Uplink"));
+    assert_eq!(if1.link_state.as_deref(), Some("up"));
+
+    let if2 = &ifaces[1];
+    assert_eq!(if2.name, "ethernet1/2");
+    assert_eq!(if2.zone.as_deref(), Some("External"));
+    assert_eq!(if2.mgmt_profile, None);
+}
+
+#[test]
+fn test_aud_iface_inventory_and_mgmt_exposure() {
+    let xml = r#"<?xml version="1.0"?>
+<config version="11.0.0">
+  <devices><entry name="localhost.localdomain">
+    <network>
+      <interface>
+        <ethernet>
+          <entry name="ethernet1/2">
+            <layer3>
+              <ip><entry name="172.16.0.1/24"/></ip>
+              <interface-management-profile>mgmt-allow</interface-management-profile>
+            </layer3>
+          </entry>
+        </ethernet>
+      </interface>
+    </network>
+    <vsys><entry name="vsys1">
+      <zone>
+        <entry name="External">
+          <network><layer3><member>ethernet1/2</member></layer3></network>
+        </entry>
+      </zone>
+    </entry></vsys>
+  </entry></devices>
+</config>"#;
+    let root = XmlNode::parse(xml).unwrap();
+    let findings = audit_config(&root, None);
+
+    // 1. Inventory notification
+    let inv = findings
+        .iter()
+        .find(|f| f.check_id == "AUD-IFACE-SETUP" && f.target == "ethernet1/2")
+        .expect("Should produce interface inventory notification");
+    assert_eq!(inv.severity, Severity::Info);
+    assert!(inv.message.contains("zone=External"));
+    assert!(inv.remediation.is_empty());
+
+    // 2. High severity finding for management profile exposure
+    let mgmt = findings
+        .iter()
+        .find(|f| f.check_id == "AUD-IFACE-MGMT")
+        .expect("Should flag management profile exposure");
+    assert_eq!(mgmt.severity, Severity::High);
+    assert_eq!(mgmt.target, "ethernet1/2");
+    assert_eq!(
+        mgmt.remediation,
+        vec!["set network interface ethernet ethernet1/2 layer3 interface-management-profile none"]
+    );
+
+    // Verify RemediationScript groups it into Phase 5 (Hardening)
+    let mut script = RemediationScript::new();
+    script.add(mgmt.remediation[0].clone());
+    let rendered = script.render();
+    assert!(
+        rendered.contains("# --- Phase 5: Hardening & Exposure Reduction ---"),
+        "Management profile remediation must be in Phase 5"
+    );
+    assert!(rendered.contains("set network interface ethernet ethernet1/2 layer3 interface-management-profile none"));
+}
+
+#[test]
+fn test_aud_iface_no_zone_and_extra_non_baseline() {
+    let xml = r#"<?xml version="1.0"?>
+<config version="11.0.0">
+  <devices><entry name="localhost.localdomain">
+    <network>
+      <interface>
+        <ethernet>
+          <entry name="ethernet1/1">
+            <layer3>
+              <ip><entry name="10.10.10.1/24"/></ip>
+            </layer3>
+          </entry>
+          <entry name="ethernet1/3">
+            <layer3>
+              <ip><entry name="172.20.240.254/24"/></ip>
+            </layer3>
+            <disabled>yes</disabled>
+          </entry>
+        </ethernet>
+      </interface>
+    </network>
+    <vsys><entry name="vsys1">
+      <zone>
+        <entry name="External">
+          <network><layer3><member>ethernet1/1</member></layer3></network>
+        </entry>
+      </zone>
+    </entry></vsys>
+  </entry></devices>
+</config>"#;
+    let root = XmlNode::parse(xml).unwrap();
+    let findings = audit_config(&root, None);
+
+    // ethernet1/1 is non-standard (not 1/2 or 1/3)
+    let extra = findings
+        .iter()
+        .find(|f| f.check_id == "AUD-IFACE-EXTRA" && f.target == "ethernet1/1")
+        .expect("Should flag non-baseline ethernet1/1");
+    assert_eq!(extra.severity, Severity::Medium);
+    assert!(extra.message.contains("Non-baseline interface 'ethernet1/1'"));
+    assert!(extra.remediation.is_empty(), "Extra interface flagged without fix");
+
+    // ethernet1/3 is unzoned (not listed in zone)
+    let no_zone = findings
+        .iter()
+        .find(|f| f.check_id == "AUD-IFACE-NO-ZONE" && f.target == "ethernet1/3")
+        .expect("Should flag unzoned L3 interface");
+    assert_eq!(no_zone.severity, Severity::Medium);
+    assert!(no_zone.remediation.is_empty());
+
+    // ethernet1/3 is disabled (critical baseline failure)
+    let disabled = findings
+        .iter()
+        .find(|f| f.check_id == "AUD-IFACE-EXTRA" && f.target == "ethernet1/3")
+        .expect("Should flag disabled baseline interface");
+    assert_eq!(disabled.severity, Severity::Critical);
+    assert_eq!(
+        disabled.remediation,
+        vec!["set network interface ethernet ethernet1/3 disabled no"]
+    );
+}
+
+#[test]
+fn test_aud_zone_mismatch_detection() {
+    let xml = r#"<?xml version="1.0"?>
+<config version="11.0.0">
+  <devices><entry name="localhost.localdomain">
+    <vsys><entry name="vsys1">
+      <zone>
+        <entry name="External">
+          <network><layer3><member>ethernet1/2</member></layer3></network>
+        </entry>
+        <entry name="Internal">
+          <network><layer3><member>ethernet1/3</member></layer3></network>
+        </entry>
+      </zone>
+      <rulebase><security><rules>
+        <entry name="AllowValid">
+          <from><member>External</member></from><to><member>Internal</member></to>
+          <source><member>any</member></source><destination><member>any</member></destination>
+          <service><member>any</member></service><application><member>ping</member></application>
+          <action>allow</action><disabled>no</disabled>
+        </entry>
+        <entry name="AllowGhostZone">
+          <from><member>PhantomZone</member></from><to><member>Internal</member></to>
+          <source><member>any</member></source><destination><member>any</member></destination>
+          <service><member>any</member></service><application><member>ping</member></application>
+          <action>allow</action><disabled>no</disabled>
+        </entry>
+      </rules></security></rulebase>
+    </entry></vsys>
+  </entry></devices>
+</config>"#;
+    let root = XmlNode::parse(xml).unwrap();
+    let findings = audit_config(&root, None);
+
+    let mismatch = findings
+        .iter()
+        .find(|f| f.check_id == "AUD-ZONE-MISMATCH")
+        .expect("Should detect rule referencing undefined zone");
+    assert_eq!(mismatch.severity, Severity::High);
+    assert_eq!(mismatch.target, "AllowGhostZone:PhantomZone");
+    assert!(mismatch.message.contains("references undefined zone 'PhantomZone'"));
+    assert!(mismatch.remediation.is_empty());
 }

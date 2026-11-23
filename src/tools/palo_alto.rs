@@ -152,6 +152,12 @@ pub const REQUIRED_SCORED_RULES: &[&str] = &[
     "AllowMSSQL-AppID",
 ];
 
+/// Standard data-plane interfaces defined for MWCCDC topology.
+pub const STANDARD_INTERFACES: &[&str] = &["ethernet1/2", "ethernet1/3"];
+
+/// Standard security zones defined for MWCCDC topology.
+pub const STANDARD_ZONES: &[&str] = &["External", "Internal"];
+
 /// Command-line arguments for Palo Alto firewall mode.
 #[derive(Args, Debug, Default, Clone)]
 #[command(arg_required_else_help = true)]
@@ -669,6 +675,198 @@ impl NatRule {
     }
 }
 
+/// Parsed security zone configuration from PAN-OS XML.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZoneConfig {
+    /// Zone name (e.g. "External", "Internal", "untrust").
+    pub name: String,
+    /// Interfaces assigned to this zone (e.g. ["ethernet1/2"]).
+    pub interfaces: Vec<String>,
+    /// Zone protection profile name (if configured).
+    pub zone_protection_profile: Option<String>,
+}
+
+impl ZoneConfig {
+    /// Parse a zone configuration from an XML `<entry>` node under `<zone>`.
+    pub fn from_xml(entry: &XmlNode) -> Self {
+        let name = entry.name().unwrap_or("").to_string();
+        let mut interfaces = Vec::new();
+
+        // 1. Check <network> child
+        if let Some(net) = entry.child("network") {
+            for mode in &["layer3", "layer2", "virtual-wire", "tap"] {
+                if let Some(mode_node) = net.child(mode) {
+                    for m in mode_node.member_values() {
+                        if !interfaces.contains(&m) {
+                            interfaces.push(m);
+                        }
+                    }
+                }
+            }
+            for m in net.member_values() {
+                if !interfaces.contains(&m) {
+                    interfaces.push(m);
+                }
+            }
+        }
+
+        // 2. Direct <layer3>, <layer2>, etc. under <entry>
+        for mode in &["layer3", "layer2", "virtual-wire", "tap"] {
+            if let Some(mode_node) = entry.child(mode) {
+                for m in mode_node.member_values() {
+                    if !interfaces.contains(&m) {
+                        interfaces.push(m);
+                    }
+                }
+            }
+        }
+
+        // 3. Direct <member> under entry
+        for m in entry.member_values() {
+            if !interfaces.contains(&m) {
+                interfaces.push(m);
+            }
+        }
+
+        // 4. Zone protection profile
+        let zone_protection_profile = entry
+            .child("network")
+            .and_then(|n| {
+                n.child("zone-protection-profile")
+                    .or_else(|| n.child("network-profile"))
+            })
+            .or_else(|| entry.child("zone-protection-profile"))
+            .or_else(|| entry.child("network-profile"))
+            .map(|n| n.text.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        Self {
+            name,
+            interfaces,
+            zone_protection_profile,
+        }
+    }
+}
+
+/// Parsed physical, aggregate, or logical interface configuration from PAN-OS XML.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceConfig {
+    /// Interface name (e.g. "ethernet1/1", "ethernet1/2", "tunnel.1").
+    pub name: String,
+    /// Interface type category (e.g. "ethernet", "loopback", "tunnel", "aggregate-ethernet", "vlan").
+    pub if_type: String,
+    /// Operating mode (e.g. "layer3", "layer2", "virtual-wire", "tap", "ha", "unknown").
+    pub mode: String,
+    /// Configured IP addresses/CIDRs.
+    pub ip_addresses: Vec<String>,
+    /// Assigned security zone (resolved from zone member definitions).
+    pub zone: Option<String>,
+    /// Attached interface management profile (e.g. "ping-only", None if none/detached).
+    pub mgmt_profile: Option<String>,
+    /// Administrative link-state override or status ("up", "down", "auto").
+    pub link_state: Option<String>,
+    /// Administrative disabled flag (`<disabled>yes</disabled>`).
+    pub disabled: bool,
+    /// User comment or description.
+    pub comment: Option<String>,
+}
+
+impl InterfaceConfig {
+    /// Parse an interface configuration from an XML `<entry>` node under `<interface>/<type>`.
+    pub fn from_xml(if_type: &str, entry: &XmlNode, zones: &[ZoneConfig]) -> Self {
+        let name = entry.name().unwrap_or("").to_string();
+        let mut mode = "unknown".to_string();
+        let mut ip_addresses = Vec::new();
+        let mut mgmt_profile = None;
+
+        if let Some(l3) = entry.child("layer3") {
+            mode = "layer3".to_string();
+            if let Some(ip_node) = l3.child("ip") {
+                for ip_entry in ip_node.children_named("entry") {
+                    if let Some(ip_name) = ip_entry.name() {
+                        if !ip_addresses.contains(&ip_name.to_string()) {
+                            ip_addresses.push(ip_name.to_string());
+                        }
+                    }
+                }
+                for m in ip_node.member_values() {
+                    if !ip_addresses.contains(&m) {
+                        ip_addresses.push(m);
+                    }
+                }
+            }
+            if let Some(mp) = l3.child("interface-management-profile") {
+                let trimmed = mp.text.trim();
+                if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("none") {
+                    mgmt_profile = Some(trimmed.to_string());
+                }
+            }
+        } else if entry.child("layer2").is_some() {
+            mode = "layer2".to_string();
+        } else if entry.child("virtual-wire").is_some() {
+            mode = "virtual-wire".to_string();
+        } else if entry.child("tap").is_some() {
+            mode = "tap".to_string();
+        } else if entry.child("ha").is_some() {
+            mode = "ha".to_string();
+        } else if if_type == "loopback" || if_type == "tunnel" || if_type == "vlan" {
+            mode = "layer3".to_string();
+            if let Some(ip_node) = entry.child("ip") {
+                for ip_entry in ip_node.children_named("entry") {
+                    if let Some(ip_name) = ip_entry.name() {
+                        if !ip_addresses.contains(&ip_name.to_string()) {
+                            ip_addresses.push(ip_name.to_string());
+                        }
+                    }
+                }
+                for m in ip_node.member_values() {
+                    if !ip_addresses.contains(&m) {
+                        ip_addresses.push(m);
+                    }
+                }
+            }
+            if let Some(mp) = entry.child("interface-management-profile") {
+                let trimmed = mp.text.trim();
+                if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("none") {
+                    mgmt_profile = Some(trimmed.to_string());
+                }
+            }
+        }
+
+        let link_state = entry
+            .child("link-state")
+            .map(|l| l.text.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let disabled = entry
+            .child("disabled")
+            .map(|c| c.text.eq_ignore_ascii_case("yes"))
+            .unwrap_or(false);
+
+        let comment = entry
+            .child("comment")
+            .map(|c| c.text.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let zone = zones
+            .iter()
+            .find(|z| z.interfaces.iter().any(|zi| zi == &name))
+            .map(|z| z.name.clone());
+
+        Self {
+            name,
+            if_type: if_type.to_string(),
+            mode,
+            ip_addresses,
+            zone,
+            mgmt_profile,
+            link_state,
+            disabled,
+            comment,
+        }
+    }
+}
+
 /// Structured finding produced by the Palo Alto audit engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaloAltoFinding {
@@ -766,7 +964,10 @@ impl RemediationScript {
                 dest_corrections.push(cmd.clone());
             } else if cmd.contains("disabled no") {
                 enable_cmds.push(cmd.clone());
-            } else if cmd.contains("permitted-ip") || cmd.contains("AllowAD-AppID application") {
+            } else if cmd.contains("permitted-ip")
+                || cmd.contains("AllowAD-AppID application")
+                || cmd.contains("interface-management-profile")
+            {
                 hardening_cmds.push(cmd.clone());
             } else {
                 other_cmds.push(cmd.clone());
@@ -879,6 +1080,55 @@ pub fn extract_permitted_ips(root: &XmlNode) -> Vec<String> {
     ips
 }
 
+/// Extract all security zones from XML configuration root.
+pub fn extract_zones(root: &XmlNode) -> Vec<ZoneConfig> {
+    let mut zones = Vec::new();
+    let zone_nodes = root.find_all_deep("zone");
+    for z_node in zone_nodes {
+        for entry in z_node.children_named("entry") {
+            zones.push(ZoneConfig::from_xml(entry));
+        }
+    }
+    // Deduplicate zones by name
+    let mut seen = BTreeSet::new();
+    zones.retain(|z| seen.insert(z.name.clone()));
+    zones
+}
+
+/// Extract all configured interfaces from XML configuration root.
+pub fn extract_interfaces(root: &XmlNode, zones: &[ZoneConfig]) -> Vec<InterfaceConfig> {
+    let mut interfaces = Vec::new();
+    let interface_parents = root.find_all_deep("interface");
+
+    for if_parent in interface_parents {
+        for if_type_node in &if_parent.children {
+            let if_type = &if_type_node.tag;
+            for entry in if_type_node.children_named("entry") {
+                let iface = InterfaceConfig::from_xml(if_type, entry, zones);
+                if !iface.name.is_empty() {
+                    interfaces.push(iface);
+                }
+                // Also check for subinterfaces under <layer3><units>
+                if let Some(l3) = entry.child("layer3") {
+                    if let Some(units) = l3.child("units") {
+                        for u_entry in units.children_named("entry") {
+                            let u_iface = InterfaceConfig::from_xml(if_type, u_entry, zones);
+                            if !u_iface.name.is_empty() {
+                                interfaces.push(u_iface);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Deduplicate interfaces by name
+    let mut seen = BTreeSet::new();
+    interfaces.retain(|i| seen.insert(i.name.clone()));
+    interfaces
+}
+
 /// Audit parsed PAN-OS XML tree against baseline rules, 22 scored services, and security posture.
 pub fn audit_config(root: &XmlNode, _team: Option<u8>) -> Vec<PaloAltoFinding> {
     let mut findings = Vec::new();
@@ -922,7 +1172,7 @@ pub fn audit_config(root: &XmlNode, _team: Option<u8>) -> Vec<PaloAltoFinding> {
         }
     }
 
-    // 2. AUD-RED-NAT: Redundant Static NAT Rules
+    // 2. AUD-RED-NAT & AUD-EXTRA-NAT: NAT Rules Check
     for nr in &nat_rules {
         let is_redundant = REDUNDANT_NAT_NAMES.contains(&nr.name.as_str())
             || nr.name.ends_with("-StaticNAT")
@@ -937,6 +1187,18 @@ pub fn audit_config(root: &XmlNode, _team: Option<u8>) -> Vec<PaloAltoFinding> {
                     nr.name
                 ),
                 remediation: vec![format!("delete rulebase nat rules \"{}\"", nr.name)],
+            });
+        } else {
+            // Any other NAT rule is in addition to the known baseline: flag for manual review, no auto-delete
+            findings.push(PaloAltoFinding {
+                severity: Severity::Medium,
+                check_id: "AUD-EXTRA-NAT",
+                target: nr.name.clone(),
+                message: format!(
+                    "Non-baseline NAT rule '{}' detected. Upstream VyOS handles scored NAT; verify this rule is authorized.",
+                    nr.name
+                ),
+                remediation: Vec::new(),
             });
         }
     }
@@ -978,19 +1240,34 @@ pub fn audit_config(root: &XmlNode, _team: Option<u8>) -> Vec<PaloAltoFinding> {
         }
     }
 
-    // 5. AUD-ROG-ALLOW: Rogue / Unauthorized Allow Rules
+    // 5. AUD-ROG-ALLOW & AUD-EXTRA-RULE: Security Rules Baseline Verification
     for r in &sec_rules {
-        if r.action == "allow" && !BASELINE_APPROVED_RULES.contains(&r.name.as_str()) {
-            findings.push(PaloAltoFinding {
-                severity: Severity::Critical,
-                check_id: "AUD-ROG-ALLOW",
-                target: r.name.clone(),
-                message: format!(
-                    "Unauthorized allow rule '{}' not in baseline whitelist. Source: {:?}, Destination: {:?}, App: {:?}.",
-                    r.name, r.source, r.destination, r.application
-                ),
-                remediation: vec![format!("delete rulebase security rules \"{}\"", r.name)],
-            });
+        if !BASELINE_APPROVED_RULES.contains(&r.name.as_str()) {
+            if r.action == "allow" {
+                // Rogue allow rules listed in script policy: auto-delete
+                findings.push(PaloAltoFinding {
+                    severity: Severity::Critical,
+                    check_id: "AUD-ROG-ALLOW",
+                    target: r.name.clone(),
+                    message: format!(
+                        "Unauthorized allow rule '{}' not in baseline whitelist. Source: {:?}, Destination: {:?}, App: {:?}.",
+                        r.name, r.source, r.destination, r.application
+                    ),
+                    remediation: vec![format!("delete rulebase security rules \"{}\"", r.name)],
+                });
+            } else {
+                // Any other rule configured in addition to the baseline: flag only, no automated fix
+                findings.push(PaloAltoFinding {
+                    severity: Severity::Medium,
+                    check_id: "AUD-EXTRA-RULE",
+                    target: r.name.clone(),
+                    message: format!(
+                        "Non-baseline security rule '{}' (action: '{}') detected. Verify this rule is authorized.",
+                        r.name, r.action
+                    ),
+                    remediation: Vec::new(),
+                });
+            }
         }
     }
 
@@ -1063,6 +1340,178 @@ pub fn audit_config(root: &XmlNode, _team: Option<u8>) -> Vec<PaloAltoFinding> {
         }
     }
 
+    // Extract zones and interfaces
+    let zones = extract_zones(root);
+    let interfaces = extract_interfaces(root, &zones);
+
+    // 8. AUD-IFACE-SETUP: Current Interface Inventory Notification
+    for iface in &interfaces {
+        findings.push(PaloAltoFinding {
+            severity: Severity::Info,
+            check_id: "AUD-IFACE-SETUP",
+            target: iface.name.clone(),
+            message: format!(
+                "Interface '{}' ({}, mode: {}): zone={}, IPs={:?}, mgmt_profile={}, disabled={}, link_state={}.",
+                iface.name,
+                iface.if_type,
+                iface.mode,
+                iface.zone.as_deref().unwrap_or("none"),
+                iface.ip_addresses,
+                iface.mgmt_profile.as_deref().unwrap_or("none"),
+                iface.disabled,
+                iface.link_state.as_deref().unwrap_or("auto")
+            ),
+            remediation: Vec::new(),
+        });
+    }
+
+    // 9. AUD-IFACE-MGMT: Data-Plane Management Profile Exposure
+    for iface in &interfaces {
+        if let Some(ref prof) = iface.mgmt_profile {
+            findings.push(PaloAltoFinding {
+                severity: Severity::High,
+                check_id: "AUD-IFACE-MGMT",
+                target: iface.name.clone(),
+                message: format!(
+                    "Data-plane interface '{}' has management profile '{}' attached, exposing management services on data network.",
+                    iface.name, prof
+                ),
+                remediation: vec![format!(
+                    "set network interface {} {} layer3 interface-management-profile none",
+                    iface.if_type, iface.name
+                )],
+            });
+        }
+    }
+
+    // 10. AUD-IFACE-NO-ZONE: Unzoned Layer 3 Interface
+    for iface in &interfaces {
+        if iface.mode == "layer3" && !iface.ip_addresses.is_empty() && iface.zone.is_none() {
+            findings.push(PaloAltoFinding {
+                severity: Severity::Medium,
+                check_id: "AUD-IFACE-NO-ZONE",
+                target: iface.name.clone(),
+                message: format!(
+                    "Layer 3 interface '{}' with IP(s) {:?} is not assigned to any security zone.",
+                    iface.name, iface.ip_addresses
+                ),
+                remediation: Vec::new(),
+            });
+        }
+    }
+
+    // 11. AUD-IFACE-EXTRA: Non-Baseline Interfaces & Topology Variations
+    for iface in &interfaces {
+        if !STANDARD_INTERFACES.contains(&iface.name.as_str()) {
+            findings.push(PaloAltoFinding {
+                severity: Severity::Medium,
+                check_id: "AUD-IFACE-EXTRA",
+                target: iface.name.clone(),
+                message: format!(
+                    "Non-baseline interface '{}' detected (zone: {}, mode: {}, IPs: {:?}). Verify physical topology mapping (e.g. Netlab/Proxmox uplink on 1/1 vs 1/2).",
+                    iface.name,
+                    iface.zone.as_deref().unwrap_or("none"),
+                    iface.mode,
+                    iface.ip_addresses
+                ),
+                remediation: Vec::new(),
+            });
+        } else if iface.name == "ethernet1/2" {
+            if iface.disabled {
+                findings.push(PaloAltoFinding {
+                    severity: Severity::Critical,
+                    check_id: "AUD-IFACE-EXTRA",
+                    target: iface.name.clone(),
+                    message: "External uplink interface 'ethernet1/2' is administratively disabled ('disabled yes'). All traffic through this interface is blocked.".to_string(),
+                    remediation: vec![format!("set network interface {} ethernet1/2 disabled no", iface.if_type)],
+                });
+            }
+            if let Some(ref z) = iface.zone {
+                if z != "External" {
+                    findings.push(PaloAltoFinding {
+                        severity: Severity::Medium,
+                        check_id: "AUD-IFACE-EXTRA",
+                        target: iface.name.clone(),
+                        message: format!(
+                            "External uplink interface 'ethernet1/2' is assigned to unexpected zone '{}' (expected 'External').",
+                            z
+                        ),
+                        remediation: Vec::new(),
+                    });
+                }
+            }
+            if !iface.ip_addresses.is_empty() && !iface.ip_addresses.iter().any(|ip| ip.starts_with("172.16.0.")) {
+                findings.push(PaloAltoFinding {
+                    severity: Severity::Medium,
+                    check_id: "AUD-IFACE-EXTRA",
+                    target: iface.name.clone(),
+                    message: format!(
+                        "Interface 'ethernet1/2' configured with unexpected IP(s) {:?} (expected 172.16.0.0/24 subnet).",
+                        iface.ip_addresses
+                    ),
+                    remediation: Vec::new(),
+                });
+            }
+        } else if iface.name == "ethernet1/3" {
+            if iface.disabled {
+                findings.push(PaloAltoFinding {
+                    severity: Severity::Critical,
+                    check_id: "AUD-IFACE-EXTRA",
+                    target: iface.name.clone(),
+                    message: "Internal downlink interface 'ethernet1/3' is administratively disabled ('disabled yes'). All traffic through this interface is blocked.".to_string(),
+                    remediation: vec![format!("set network interface {} ethernet1/3 disabled no", iface.if_type)],
+                });
+            }
+            if let Some(ref z) = iface.zone {
+                if z != "Internal" {
+                    findings.push(PaloAltoFinding {
+                        severity: Severity::Medium,
+                        check_id: "AUD-IFACE-EXTRA",
+                        target: iface.name.clone(),
+                        message: format!(
+                            "Internal downlink interface 'ethernet1/3' is assigned to unexpected zone '{}' (expected 'Internal').",
+                            z
+                        ),
+                        remediation: Vec::new(),
+                    });
+                }
+            }
+            if !iface.ip_addresses.is_empty() && !iface.ip_addresses.iter().any(|ip| ip.starts_with("172.20.240.")) {
+                findings.push(PaloAltoFinding {
+                    severity: Severity::Medium,
+                    check_id: "AUD-IFACE-EXTRA",
+                    target: iface.name.clone(),
+                    message: format!(
+                        "Interface 'ethernet1/3' configured with unexpected IP(s) {:?} (expected 172.20.240.0/24 subnet).",
+                        iface.ip_addresses
+                    ),
+                    remediation: Vec::new(),
+                });
+            }
+        }
+    }
+
+    // 12. AUD-ZONE-MISMATCH: Security Rules Referencing Undefined Zones
+    if !zones.is_empty() {
+        let defined_zones: BTreeSet<&str> = zones.iter().map(|z| z.name.as_str()).collect();
+        for rule in &sec_rules {
+            for z in rule.from.iter().chain(rule.to.iter()) {
+                if z != "any" && !defined_zones.contains(z.as_str()) {
+                    findings.push(PaloAltoFinding {
+                        severity: Severity::High,
+                        check_id: "AUD-ZONE-MISMATCH",
+                        target: format!("{}:{}", rule.name, z),
+                        message: format!(
+                            "Security rule '{}' references undefined zone '{}'. Traffic will not match as expected.",
+                            rule.name, z
+                        ),
+                        remediation: Vec::new(),
+                    });
+                }
+            }
+        }
+    }
+
     findings
 }
 
@@ -1078,20 +1527,17 @@ pub fn diff_baseline(running: &XmlNode, baseline: &XmlNode) -> Vec<PaloAltoFindi
         baseline_rules.iter().map(|r| (r.name.clone(), r)).collect();
 
     // Check for rules present in baseline but missing from running
-    for (name, b_rule) in &baseline_map {
+    for (name, _b_rule) in &baseline_map {
         if !running_map.contains_key(name) {
             findings.push(PaloAltoFinding {
                 severity: Severity::High,
                 check_id: "DIFF-MISSING-RULE",
                 target: name.clone(),
                 message: format!(
-                    "Baseline rule '{}' is missing from running configuration.",
+                    "Baseline rule '{}' is missing from running configuration. Manual configuration required.",
                     name
                 ),
-                remediation: vec![format!(
-                    "set rulebase security rules \"{}\" action {}",
-                    name, b_rule.action
-                )],
+                remediation: Vec::new(),
             });
         }
     }
@@ -1099,15 +1545,20 @@ pub fn diff_baseline(running: &XmlNode, baseline: &XmlNode) -> Vec<PaloAltoFindi
     // Check for rules present in running but not in baseline
     for (name, r_rule) in &running_map {
         if !baseline_map.contains_key(name) {
+            let is_allow = r_rule.action == "allow";
             findings.push(PaloAltoFinding {
                 severity: Severity::Critical,
                 check_id: "DIFF-EXTRA-RULE",
                 target: name.clone(),
                 message: format!(
-                    "Running configuration contains unexpected rule '{}' not present in baseline.",
-                    name
+                    "Running configuration contains unexpected rule '{}' not present in baseline (action: '{}').",
+                    name, r_rule.action
                 ),
-                remediation: vec![format!("delete rulebase security rules \"{}\"", name)],
+                remediation: if is_allow {
+                    vec![format!("delete rulebase security rules \"{}\"", name)]
+                } else {
+                    Vec::new() // Flag only for non-allow extra rules
+                },
             });
         } else {
             let b_rule = baseline_map.get(name).unwrap();
@@ -1146,6 +1597,36 @@ pub fn diff_baseline(running: &XmlNode, baseline: &XmlNode) -> Vec<PaloAltoFindi
                     ],
                 });
             }
+        }
+    }
+
+    // Check NAT rules diff
+    let running_nat = extract_nat_rules(running);
+    let baseline_nat = extract_nat_rules(baseline);
+    let running_nat_map: BTreeMap<String, &NatRule> =
+        running_nat.iter().map(|r| (r.name.clone(), r)).collect();
+    let baseline_nat_map: BTreeMap<String, &NatRule> =
+        baseline_nat.iter().map(|r| (r.name.clone(), r)).collect();
+
+    for (name, _) in &running_nat_map {
+        if !baseline_nat_map.contains_key(name) {
+            let is_redundant = REDUNDANT_NAT_NAMES.contains(&name.as_str())
+                || name.ends_with("-StaticNAT")
+                || name == "LAN-OutboundPAT";
+            findings.push(PaloAltoFinding {
+                severity: Severity::High,
+                check_id: "DIFF-EXTRA-NAT",
+                target: name.clone(),
+                message: format!(
+                    "Running configuration contains unexpected NAT rule '{}' not present in baseline.",
+                    name
+                ),
+                remediation: if is_redundant {
+                    vec![format!("delete rulebase nat rules \"{}\"", name)]
+                } else {
+                    Vec::new() // Flag only, no automated fix
+                },
+            });
         }
     }
 

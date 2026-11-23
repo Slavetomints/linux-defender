@@ -21,7 +21,7 @@ impl BoxType {
             Self::Web => "Web",
             Self::Mail => "Mail",
             Self::Splunk => "Splunk",
-            Self::General => "General",
+            Self::General => "General/Workstation",
             Self::Router => "Router",
         }
     }
@@ -33,7 +33,7 @@ impl BoxType {
                 "Ubuntu Email — SMTP :25/:587  IMAP :143/:993  POP3 :110/:995  Webmail :80  SSH :22"
             }
             Self::Splunk => "Debian Splunk — Web :8000  Mgmt :8089  SSH :22",
-            Self::General => "SSH :22 + general system services",
+            Self::General => "SSH :22 + general system services + Palo Alto XML audit",
             Self::Router => "VyOS 1.4 Router — Routes, NAT, Host Firewall",
         }
     }

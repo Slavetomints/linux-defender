@@ -7,6 +7,8 @@ pub mod fail2ban;
 pub mod firewall;
 /// IPv6 static address configuration wizard.
 pub mod ipv6;
+/// Palo Alto PAN-OS XML configuration audit wizard.
+pub mod palo_alto;
 /// Splunk Universal Forwarder deployment wizard.
 pub mod splunk_forwarder;
 
@@ -39,20 +41,25 @@ pub enum ActiveWizard {
     Ipv6(ipv6::Ipv6Wizard),
     /// Splunk Universal Forwarder deployment wizard.
     SplunkForwarder(splunk_forwarder::SplunkForwarderWizard),
+    /// Palo Alto PAN-OS XML audit wizard.
+    PaloAlto(palo_alto::PaloAltoWizard),
 }
 
 impl ActiveWizard {
-    /// Instantiate the wizard at `idx` in `ALL_WIZARDS`.
+    /// Instantiate the wizard at `idx` in `wizards_for_box_type(box_type)`.
     pub fn new(idx: usize, box_type: BoxType) -> Option<Self> {
-        match idx {
-            0 => Some(ActiveWizard::Fail2Ban(fail2ban::Fail2BanWizard::new())),
-            1 => Some(ActiveWizard::Firewall(firewall::FirewallWizard::new(
+        let wizards = crate::tools::catalog::wizards_for_box_type(box_type);
+        let def = wizards.get(idx)?;
+        match def.name {
+            "deploy_fail2ban" => Some(ActiveWizard::Fail2Ban(fail2ban::Fail2BanWizard::new())),
+            "firewall_assessment" => Some(ActiveWizard::Firewall(firewall::FirewallWizard::new(
                 box_type,
             ))),
-            2 => Some(ActiveWizard::Ipv6(ipv6::Ipv6Wizard::new())),
-            3 => Some(ActiveWizard::SplunkForwarder(
+            "deploy_ipv6" => Some(ActiveWizard::Ipv6(ipv6::Ipv6Wizard::new())),
+            "splunk_forwarder" => Some(ActiveWizard::SplunkForwarder(
                 splunk_forwarder::SplunkForwarderWizard::new(box_type),
             )),
+            "palo_alto_audit" => Some(ActiveWizard::PaloAlto(palo_alto::PaloAltoWizard::new())),
             _ => None,
         }
     }
@@ -64,6 +71,7 @@ impl ActiveWizard {
             ActiveWizard::Firewall(w) => w.render(f, area),
             ActiveWizard::Ipv6(w) => w.render(f, area),
             ActiveWizard::SplunkForwarder(w) => w.render(f, area),
+            ActiveWizard::PaloAlto(w) => w.render(f, area),
         }
     }
 
@@ -74,6 +82,7 @@ impl ActiveWizard {
             ActiveWizard::Firewall(w) => w.handle_key(key),
             ActiveWizard::Ipv6(w) => w.handle_key(key),
             ActiveWizard::SplunkForwarder(w) => w.handle_key(key),
+            ActiveWizard::PaloAlto(w) => w.handle_key(key),
         }
     }
 }
@@ -235,4 +244,31 @@ pub(crate) fn cmd_output(args: &[&str]) -> String {
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn general_box_dispatches_palo_alto_at_index_4() {
+        let wiz = ActiveWizard::new(4, BoxType::General);
+        assert!(matches!(wiz, Some(ActiveWizard::PaloAlto(_))));
+    }
+
+    #[test]
+    fn non_general_box_rejects_index_4() {
+        for bt in [
+            BoxType::Router,
+            BoxType::Web,
+            BoxType::Mail,
+            BoxType::Splunk,
+        ] {
+            assert!(
+                ActiveWizard::new(4, bt).is_none(),
+                "{:?} should not have wizard at index 4",
+                bt
+            );
+        }
+    }
 }

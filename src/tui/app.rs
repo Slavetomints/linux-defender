@@ -450,7 +450,7 @@ pub(crate) struct RouterConfigDialog {
     focused: usize,
 }
 
-/// Auto-detect CCDC team number from WAN interface IP `172.31.{20+T}.2/29`.
+/// Auto-detect CCDC team number from WAN interface IP `172.31.{20+T}.2/29` or practice `172.31.40.2/29`.
 fn detect_vyos_team_number() -> Option<u8> {
     use std::process::Command;
     let out = Command::new("ip")
@@ -465,9 +465,14 @@ fn detect_vyos_team_number() -> Option<u8> {
                 && parts[0] == "172"
                 && parts[1] == "31"
                 && let Ok(octet) = parts[2].parse::<u8>()
-                && (20..=40).contains(&octet)
             {
-                return Some(octet - 20);
+                if octet == 40 {
+                    // Practice Environment WAN IP is 172.31.40.2/29
+                    return Some(0);
+                } else if (21..=39).contains(&octet) {
+                    // Competition teams 1..19
+                    return Some(octet - 20);
+                }
             }
         }
     }
@@ -1153,11 +1158,8 @@ impl App {
 
             std::thread::spawn(move || {
                 let report = crate::core::log_path("autoscan.log");
-                let mut ctx = DefenderContext::new(report, false);
+                let mut ctx = DefenderContext::new(report, false).with_silent_progress();
                 ctx.finding_tx = Some(finding_tx);
-                let (progress_sink_tx, progress_sink_rx) = mpsc::channel::<String>();
-                std::thread::spawn(move || while progress_sink_rx.recv().is_ok() {});
-                ctx.progress_tx = Some(progress_sink_tx);
                 run_scan_module(id_str, is_ap, &ctx, box_type);
                 let _ = done_tx.send(id_str);
             });
@@ -1195,11 +1197,8 @@ impl App {
 
         std::thread::spawn(move || {
             let report = crate::core::log_path("scan.log");
-            let mut ctx = DefenderContext::new(report, false);
+            let mut ctx = DefenderContext::new(report, false).with_silent_progress();
             ctx.finding_tx = Some(finding_tx);
-            let (progress_sink_tx, progress_sink_rx) = mpsc::channel::<String>();
-            std::thread::spawn(move || while progress_sink_rx.recv().is_ok() {});
-            ctx.progress_tx = Some(progress_sink_tx);
 
             for (id, is_ap) in selected {
                 let _ = progress_tx.send(id.to_string());
@@ -1506,7 +1505,9 @@ impl App {
                 let box_type = self.box_type;
                 std::thread::spawn(move || {
                     let report = crate::core::log_path("router_remediation_refresh.log");
-                    let mut ctx = DefenderContext::new(report, false).with_box_type(box_type);
+                    let mut ctx = DefenderContext::new(report, false)
+                        .with_box_type(box_type)
+                        .with_silent_progress();
                     ctx.finding_tx = Some(finding_tx);
                     crate::router::scan::run_module("router_nat", &ctx);
                     crate::router::scan::run_module("router_interfaces", &ctx);

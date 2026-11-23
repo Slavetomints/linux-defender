@@ -89,7 +89,7 @@ MODES:
   --interactive           Interactive configuration wizard
 
 OPTIONS:
-  --team <0-20>           CCDC Team number (0=practice 172.31.20.2/29, 1-20=competition 172.31.{20+T}.2/29)
+  --team <0-20>           CCDC Team number (0=practice 172.31.40.2/29, 1-20=competition 172.31.{20+T}.2/29)
   --dnat-target <tgt>     DNAT destination target: 'private' (172.20.240.x) or 'public' (172.25.x.x) [default: private]
   --restore-mode <mode>   Restore mode for --restore-nat: 'baseline', 'detected', or 'backup' [default: baseline]
   --config-source <path>  Path to detected or backup config file for restore
@@ -103,6 +103,7 @@ OPTIONS:
   --commit-timeout <min>  Rollback timer for commit-confirm (default: 5)
   --no-confirm            Bypass commit-confirm rollback (Instant commit; DANGEROUS)
   --force                 Bypass safety checks (e.g. running --console-lockdown over SSH)
+  --force-baseline        Force overwriting existing destination NAT rules with baseline
   --dry-run               Display commands without applying changes
   -h, --help              Show this help message
 EOF
@@ -229,6 +230,10 @@ while [[ $# -gt 0 ]]; do
             FORCE=true
             shift
             ;;
+        --force-baseline)
+            FORCE_BASELINE=true
+            shift
+            ;;
         --dry-run)
             DRY_RUN=true
             shift
@@ -313,19 +318,28 @@ if [ "$MODE" == "interactive" ]; then
 fi
 
 # ─── Auto-Derive Team Subnets ─────────────────────────────────────────────────
+derive_team_subnets() {
+    local t="$1"
+    if [ "$t" -eq 0 ]; then
+        OCTET=40
+        WAN_ROUTER_IP="172.31.40.2/29"
+        CORE_GATEWAY_IP="172.31.40.1"
+        PUBLIC_POOL="172.25.40.0/24"
+        log_info "Team 0 (Practice Environment): WAN Router=${WAN_ROUTER_IP}, Core Gateway=${CORE_GATEWAY_IP}, Public Pool=${PUBLIC_POOL}"
+    else
+        OCTET=$((20 + t))
+        WAN_ROUTER_IP="172.31.${OCTET}.2/29"
+        CORE_GATEWAY_IP="172.31.${OCTET}.1"
+        PUBLIC_POOL="172.25.${OCTET}.0/24"
+        log_info "Team $t Subnets: WAN Router=${WAN_ROUTER_IP}, Core Gateway=${CORE_GATEWAY_IP}, Public Pool=${PUBLIC_POOL}"
+    fi
+}
+
 if [ -n "$TEAM" ]; then
     if ! [[ "$TEAM" =~ ^[0-9]+$ ]] || [ "$TEAM" -lt 0 ] || [ "$TEAM" -gt 20 ]; then
         die "Invalid team number '$TEAM'. Must be between 0 (practice) and 20 (real competition)."
     fi
-    OCTET=$((20 + TEAM))
-    WAN_ROUTER_IP="172.31.${OCTET}.2/29"
-    CORE_GATEWAY_IP="172.31.${OCTET}.1"
-    PUBLIC_POOL="172.25.${OCTET}.0/24"
-    if [ "$TEAM" -eq 0 ]; then
-        log_info "Team 0 (Practice Environment): WAN Router=${WAN_ROUTER_IP}, Core Gateway=${CORE_GATEWAY_IP}, Public Pool=${PUBLIC_POOL}"
-    else
-        log_info "Team $TEAM Subnets: WAN Router=${WAN_ROUTER_IP}, Core Gateway=${CORE_GATEWAY_IP}, Public Pool=${PUBLIC_POOL}"
-    fi
+    derive_team_subnets "$TEAM"
 fi
 
 # Mandatory team validation for modes configuring network subnets
@@ -337,10 +351,7 @@ if [ "$MODE" == "harden" ] || [ "$MODE" == "restore-nat" ]; then
                 die "Invalid team number '$input_team'. Must be between 0 (practice) and 20 (real competition)."
             fi
             TEAM="$input_team"
-            OCTET=$((20 + TEAM))
-            WAN_ROUTER_IP="172.31.${OCTET}.2/29"
-            CORE_GATEWAY_IP="172.31.${OCTET}.1"
-            PUBLIC_POOL="172.25.${OCTET}.0/24"
+            derive_team_subnets "$TEAM"
         else
             die "Team number is required for --${MODE}. Pass --team <0-20> (0=practice, 1-20=competition)."
         fi
@@ -777,82 +788,74 @@ fi
 
 # ─── NAT Configuration Engine (Rules 10-14 DNAT & Rule 100 Outbound PAT) ───────
 apply_nat_configuration() {
-    log_info "Configuring Scored 1:1 DNAT Rules 10-14 (Target: $DNAT_TARGET)..."
-
-    # Dynamic IP-Centric conflict cleanup: detect any existing destination NAT rules
-    # translating to scored server targets (.10, .15, .20, .100, .120) regardless of rule number
-    for ip_suffix in "10" "15" "20" "100" "120"; do
-        if [ -x /opt/vyatta/bin/vyatta-op-cmd-wrapper ]; then
-            CONFLICT_RULES=$(/opt/vyatta/bin/vyatta-op-cmd-wrapper show configuration commands 2>/dev/null | grep "^set nat destination rule " | grep "translation address" | grep -E "(\.|\')${ip_suffix}('|$)" | awk '{print $5}' | grep -E '^[0-9]+$' | sort -u)
-            for cr in $CONFLICT_RULES; do
-                if [ -n "$cr" ]; then
-                    log_info "Wiping conflicting existing destination NAT rule $cr (translating to target .${ip_suffix})..."
-                    delete nat destination rule "$cr" inbound-interface group 2>/dev/null || true
-                    delete nat destination rule "$cr" inbound-interface name 2>/dev/null || true
-                    delete nat destination rule "$cr" 2>/dev/null || true
-                fi
-            done
-        fi
-    done
-
-    # Clean-slate deletion of destination NAT rules 10 through 14
-    for r in 10 11 12 13 14; do
-        delete nat destination rule "$r" inbound-interface group 2>/dev/null || true
-        delete nat destination rule "$r" inbound-interface name 2>/dev/null || true
-        delete nat destination rule "$r" 2>/dev/null || true
-    done
-    # Clean-slate deletion of source NAT rule 100
-    delete nat source rule 100 2>/dev/null || true
-
-    local ECOM_TARGET EMAIL_TARGET SPLUNK_TARGET AD_TARGET MSSQL_TARGET
-    if [ "$DNAT_TARGET" == "private" ]; then
-        ECOM_TARGET="172.20.240.10"
-        EMAIL_TARGET="172.20.240.15"
-        SPLUNK_TARGET="172.20.240.20"
-        AD_TARGET="172.20.240.100"
-        MSSQL_TARGET="172.20.240.120"
-    else
-        ECOM_TARGET="172.25.${OCTET}.10"
-        EMAIL_TARGET="172.25.${OCTET}.15"
-        SPLUNK_TARGET="172.25.${OCTET}.20"
-        AD_TARGET="172.25.${OCTET}.100"
-        MSSQL_TARGET="172.25.${OCTET}.120"
+    local EXISTING_DNAT_COUNT=0
+    if [ -x /opt/vyatta/bin/vyatta-op-cmd-wrapper ]; then
+        EXISTING_DNAT_COUNT=$(/opt/vyatta/bin/vyatta-op-cmd-wrapper show configuration commands 2>/dev/null | grep -c "^set nat destination rule" || true)
+    elif [ -f /config/config.boot ]; then
+        EXISTING_DNAT_COUNT=$(grep -c -E "set nat destination rule|rule [0-9]+ \{[[:space:]]*destination" /config/config.boot || true)
     fi
 
-    # Rule 10: Ecom (.10) - HTTP :80, HTTPS :443
-    set nat destination rule 10 description 'Ecom'
-    set nat destination rule 10 inbound-interface name 'eth0'
-    set nat destination rule 10 protocol 'tcp'
-    set nat destination rule 10 destination port '80,443'
-    set nat destination rule 10 translation address "$ECOM_TARGET"
+    if [ "$EXISTING_DNAT_COUNT" -gt 0 ] && [ "$FORCE_BASELINE" != true ]; then
+        log_info "Existing destination NAT rules detected (${EXISTING_DNAT_COUNT} rule directives found)."
+        log_info "Preserving existing destination NAT configuration (no destination rules modified)."
+    else
+        log_info "Configuring Scored 1:1 DNAT Rules 10-14 (Target: $DNAT_TARGET)..."
 
-    # Rule 11: Email (.15) - SMTP :25, IMAP :143, SMTPS :587, IMAPS :993
-    set nat destination rule 11 description 'Email'
-    set nat destination rule 11 inbound-interface name 'eth0'
-    set nat destination rule 11 protocol 'tcp'
-    set nat destination rule 11 destination port '25,143,587,993'
-    set nat destination rule 11 translation address "$EMAIL_TARGET"
+        # Clean-slate deletion of destination NAT rules 10 through 14
+        for r in 10 11 12 13 14; do
+            delete nat destination rule "$r" >/dev/null 2>&1 || true
+        done
 
-    # Rule 12: Splunk (.20) - Web :8000, Mgmt :8089, Forwarder :9997
-    set nat destination rule 12 description 'Splunk'
-    set nat destination rule 12 inbound-interface name 'eth0'
-    set nat destination rule 12 protocol 'tcp'
-    set nat destination rule 12 destination port '8000,8089,9997'
-    set nat destination rule 12 translation address "$SPLUNK_TARGET"
+        local ECOM_TARGET EMAIL_TARGET SPLUNK_TARGET AD_TARGET MSSQL_TARGET
+        if [ "$DNAT_TARGET" == "private" ]; then
+            ECOM_TARGET="172.20.240.10"
+            EMAIL_TARGET="172.20.240.15"
+            SPLUNK_TARGET="172.20.240.20"
+            AD_TARGET="172.20.240.100"
+            MSSQL_TARGET="172.20.240.120"
+        else
+            ECOM_TARGET="172.25.${OCTET}.10"
+            EMAIL_TARGET="172.25.${OCTET}.15"
+            SPLUNK_TARGET="172.25.${OCTET}.20"
+            AD_TARGET="172.25.${OCTET}.100"
+            MSSQL_TARGET="172.25.${OCTET}.120"
+        fi
 
-    # Rule 13: AD (.100) - DNS :53, WinRM :5985
-    set nat destination rule 13 description 'AD'
-    set nat destination rule 13 inbound-interface name 'eth0'
-    set nat destination rule 13 protocol 'tcp_udp'
-    set nat destination rule 13 destination port '53,5985'
-    set nat destination rule 13 translation address "$AD_TARGET"
+        # Rule 10: Ecom (.10) - HTTP :80, HTTPS :443
+        set nat destination rule 10 description 'Ecom'
+        set nat destination rule 10 inbound-interface name 'eth0'
+        set nat destination rule 10 protocol 'tcp'
+        set nat destination rule 10 destination port '80,443'
+        set nat destination rule 10 translation address "$ECOM_TARGET"
 
-    # Rule 14: MSSQL (.120) - MSSQL :1433, SMB :445, RDP :3389
-    set nat destination rule 14 description 'MSSQL'
-    set nat destination rule 14 inbound-interface name 'eth0'
-    set nat destination rule 14 protocol 'tcp'
-    set nat destination rule 14 destination port '445,1433,3389'
-    set nat destination rule 14 translation address "$MSSQL_TARGET"
+        # Rule 11: Email (.15) - SMTP :25, IMAP :143, SMTPS :587, IMAPS :993
+        set nat destination rule 11 description 'Email'
+        set nat destination rule 11 inbound-interface name 'eth0'
+        set nat destination rule 11 protocol 'tcp'
+        set nat destination rule 11 destination port '25,143,587,993'
+        set nat destination rule 11 translation address "$EMAIL_TARGET"
+
+        # Rule 12: Splunk (.20) - Web :8000, Mgmt :8089, Forwarder :9997
+        set nat destination rule 12 description 'Splunk'
+        set nat destination rule 12 inbound-interface name 'eth0'
+        set nat destination rule 12 protocol 'tcp'
+        set nat destination rule 12 destination port '8000,8089,9997'
+        set nat destination rule 12 translation address "$SPLUNK_TARGET"
+
+        # Rule 13: AD (.100) - DNS :53, WinRM :5985
+        set nat destination rule 13 description 'AD'
+        set nat destination rule 13 inbound-interface name 'eth0'
+        set nat destination rule 13 protocol 'tcp_udp'
+        set nat destination rule 13 destination port '53,5985'
+        set nat destination rule 13 translation address "$AD_TARGET"
+
+        # Rule 14: MSSQL (.120) - MSSQL :1433, SMB :445, RDP :3389
+        set nat destination rule 14 description 'MSSQL'
+        set nat destination rule 14 inbound-interface name 'eth0'
+        set nat destination rule 14 protocol 'tcp'
+        set nat destination rule 14 destination port '445,1433,3389'
+        set nat destination rule 14 translation address "$MSSQL_TARGET"
+    fi
 
     # Outbound PAT (Masquerade rule 100)
     if [ "$ENABLE_OUTBOUND_PAT" = true ]; then
@@ -864,18 +867,18 @@ apply_nat_configuration() {
     else
         log_ok "Outbound PAT is DISABLED by default (Anti-Reverse-Shell Protection)."
         log_info "Workstations cannot establish direct outbound internet connections unless --enable-outbound-pat is set."
-        delete nat source rule 100 2>/dev/null || true
+        delete nat source rule 100 >/dev/null 2>&1 || true
     fi
 }
 
 # ─── Routing Baseline Engine (Standard Transit Routes Grounded in Topology) ───
 apply_routing_baseline() {
     log_info "Configuring Standard Transit Routes Grounded in Topology..."
-    local WAN_GW="172.31.${OCTET}.1"
+    local WAN_GW="${CORE_GATEWAY_IP:-172.31.${OCTET}.1}"
     local SERVERS_NEXTHOP="172.16.0.254"
 
-    delete protocols static route 0.0.0.0/0 2>/dev/null || true
-    delete protocols static route 172.20.240.0/24 2>/dev/null || true
+    delete protocols static route 0.0.0.0/0 >/dev/null 2>&1 || true
+    delete protocols static route 172.20.240.0/24 >/dev/null 2>&1 || true
 
     set protocols static route 0.0.0.0/0 next-hop "$WAN_GW"
     set protocols static route 172.20.240.0/24 next-hop "$SERVERS_NEXTHOP"
@@ -978,15 +981,15 @@ EOF
 
     # Clean-slate deletion of destination NAT rules 10 through 14
     for r in 10 11 12 13 14; do
-        delete nat destination rule "$r" 2>/dev/null || true
+        delete nat destination rule "$r" >/dev/null 2>&1 || true
     done
-    delete nat source rule 100 2>/dev/null || true
+    delete nat source rule 100 >/dev/null 2>&1 || true
 
     # Extract clean IPv4 addresses
     local CLEAN_DEF_GW
     CLEAN_DEF_GW=$(echo "$DEF_GW" | grep -oE "([0-9]{1,3}\.){3}[0-9]{1,3}" | head -n1)
     if [ -z "$CLEAN_DEF_GW" ]; then
-        CLEAN_DEF_GW="172.31.${OCTET}.1"
+        CLEAN_DEF_GW="${CORE_GATEWAY_IP:-172.31.${OCTET}.1}"
     fi
 
     local CLEAN_SRV_NH

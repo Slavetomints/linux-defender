@@ -325,6 +325,15 @@ impl DefenderContext {
         self
     }
 
+    /// Attach a silent progress sink channel that discards all progress messages
+    /// without printing them to stdout. Useful for background audit threads in TUI mode.
+    pub fn with_silent_progress(mut self) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || while rx.recv().is_ok() {});
+        self.progress_tx = Some(tx);
+        self
+    }
+
     /// Emit a plain status line.
     ///
     /// In TUI mode (progress channel attached) the line is sent to the output

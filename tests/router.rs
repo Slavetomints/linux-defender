@@ -917,3 +917,44 @@ fn vyos_script_contains_detected_restore_mode_engine() {
         "Script must parse static_routes from detected state"
     );
 }
+
+#[test]
+fn vyos_script_preserves_existing_dnat_and_disables_pat() {
+    assert!(
+        VYOS_SCRIPT.contains("EXISTING_DNAT_COUNT"),
+        "Script must count existing destination NAT rules before modifying"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("Preserving existing destination NAT configuration"),
+        "Script must log preservation of existing destination NAT rules"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("Outbound PAT is DISABLED by default"),
+        "Script must disable Outbound PAT by default for anti-reverse-shell defense"
+    );
+}
+
+#[test]
+fn vyos_script_derives_team_0_practice_wan_ip_40() {
+    assert!(
+        VYOS_SCRIPT.contains("172.31.40.2/29"),
+        "Script must use 172.31.40.2/29 as WAN Router IP for Team 0 practice environment"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("172.31.40.1"),
+        "Script must use 172.31.40.1 as Core Gateway for Team 0 practice environment"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("172.25.40.0/24"),
+        "Script must use 172.25.40.0/24 as Public Pool for Team 0 practice environment"
+    );
+}
+
+#[test]
+fn test_context_silent_progress_absorbs_messages() {
+    let report = linux_defender::core::log_path("test_silent.log");
+    let ctx = linux_defender::core::DefenderContext::new(report, false)
+        .with_silent_progress();
+    ctx.progress("This message should be silently absorbed into the progress sink channel");
+    assert!(!ctx.interactive(), "Context with progress channel is not interactive");
+}

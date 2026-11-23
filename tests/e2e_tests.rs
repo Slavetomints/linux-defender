@@ -258,11 +258,11 @@ fn test_t1_f5_02_team_1_to_20_accepted() {
 #[test]
 fn test_t1_f5_03_team_0_wan_and_pool_derivation() {
     let team = 0u8;
-    let octet = 20 + team;
+    let octet = if team == 0 { 40 } else { 20 + team };
     let wan_ip = format!("172.31.{}.2/29", octet);
     let public_pool = format!("172.25.{}.0/24", octet);
-    assert_eq!(wan_ip, "172.31.20.2/29");
-    assert_eq!(public_pool, "172.25.20.0/24");
+    assert_eq!(wan_ip, "172.31.40.2/29");
+    assert_eq!(public_pool, "172.25.40.0/24");
 }
 
 #[test]
@@ -867,9 +867,9 @@ fn test_t2_f5_04_team_whitespace_and_symbols_rejected() {
 }
 
 #[test]
-fn test_t2_f5_05_team_octet_20_practice_auto_detect() {
-    let ip = "172.31.20.2/29";
-    let is_team_0 = ip.contains("172.31.20.");
+fn test_t2_f5_05_team_octet_40_practice_auto_detect() {
+    let ip = "172.31.40.2/29";
+    let is_team_0 = ip.contains("172.31.40.");
     assert!(is_team_0);
 }
 
@@ -1386,14 +1386,14 @@ fn test_t4_scenario_1_ccdc_router_hardening_day1() {
 #[test]
 fn test_t4_scenario_2_team_practice_and_ip_customization() {
     // Scenario 2: Practice session for Team 0.
-    // Verifies: Team 0 WAN 172.31.20.2/29, pool 172.25.20.0/24, PAT enabled temporarily then restored.
+    // Verifies: Team 0 WAN 172.31.40.2/29, pool 172.25.40.0/24, PAT enabled temporarily then restored.
     let (c1, s1, _) = run_vyos_script(&["--dry-run", "--restore-nat", "--team", "0", "--enable-outbound-pat"]);
     assert_eq!(c1, 0);
-    assert!(s1.contains("172.31.20.2/29"));
+    assert!(s1.contains("172.31.40.2/29"));
 
     let (c2, s2, _) = run_vyos_script(&["--dry-run", "--restore-nat", "--team", "0"]);
     assert_eq!(c2, 0);
-    assert!(s2.contains("172.25.20.0/24"));
+    assert!(s2.contains("172.25.40.0/24"));
 }
 
 #[test]

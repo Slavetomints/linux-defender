@@ -87,6 +87,8 @@ MODES:
   --purge-containers      Delete VyOS container config and stop running podman containers
   --console-lockdown      Phase 2: Pull SSH from vyos (Console-Only Administration)
   --confirm               Confirm and save pending commit-confirm changes
+  --rollback              Cancel and rollback pending commit-confirm changes immediately
+  --cancel-confirm        Synonym for --rollback
   --interactive           Interactive configuration wizard
 
 OPTIONS:
@@ -167,6 +169,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --confirm)
             MODE="confirm"
+            shift
+            ;;
+        --rollback|--cancel-confirm)
+            MODE="rollback"
             shift
             ;;
         --interactive)
@@ -295,8 +301,10 @@ if [ "$MODE" == "interactive" ]; then
     echo "4) Restore CCDC DNAT Rules 10, 20, 30, 40, 50 & Outbound PAT"
     echo "5) Dual Password Rotation & SSH Key Sanitization"
     echo "6) Phase 2: Console-Only Lockdown (Nuke SSH)"
-    echo "7) Exit"
-    read -r -p "Select an action [1-7]: " choice
+    echo "7) Confirm Pending Commit (Keep Changes)"
+    echo "8) Rollback Pending Commit (Cancel Changes)"
+    echo "9) Exit"
+    read -r -p "Select an action [1-9]: " choice
     case "$choice" in
         1) MODE="audit" ;;
         2) MODE="diff" ;;
@@ -304,6 +312,8 @@ if [ "$MODE" == "interactive" ]; then
         4) MODE="restore-nat" ;;
         5) MODE="rotate-passwords" ;;
         6) MODE="console-lockdown" ;;
+        7) MODE="confirm" ;;
+        8) MODE="rollback" ;;
         *) builtin exit 0 ;;
     esac
 
@@ -882,6 +892,77 @@ if [ "$MODE" == "confirm" ]; then
 
     vyos_exit_cfg
     log_ok "VyOS configuration confirmed and saved permanently."
+    builtin exit 0
+fi
+
+# ==============================================================================
+# MODE: ROLLBACK / CANCEL PENDING COMMIT-CONFIRM CHANGES
+# ==============================================================================
+if [ "$MODE" == "rollback" ] || [ "$MODE" == "cancel-confirm" ]; then
+    echo "======================================================================"
+    echo "         VyOS CANCEL & ROLLBACK PENDING CONFIGURATION"
+    echo "======================================================================"
+    if [ "$DRY_RUN" = true ]; then
+        log_ok "Dry run enabled. Exiting before configuration rollback."
+        builtin exit 0
+    fi
+
+    # 1. Stop any pending commit-confirm timer to prevent a second scheduled rollback
+    if systemctl is-active --quiet commit-confirm.timer 2>/dev/null; then
+        log_info "Active commit-confirm timer detected. Stopping timer..."
+        systemctl stop commit-confirm.timer 2>/dev/null || true
+    fi
+
+    # 2. Attempt immediate revert
+    REVERTED=false
+
+    # Tier 1: If VyOS systemd service or config-mgmt tool exists, trigger immediate soft revert
+    if [ -x /usr/bin/config-mgmt ]; then
+        log_info "Executing VyOS soft revert via config-mgmt..."
+        if sg vyattacfg "/usr/bin/config-mgmt revert_soft" 2>&1; then
+            log_ok "VyOS configuration rolled back via config-mgmt revert_soft."
+            REVERTED=true
+        else
+            log_warn "config-mgmt revert_soft returned non-zero, trying service fallback..."
+        fi
+    fi
+
+    # Tier 2: Configuration session rollback to saved /config/config.boot
+    if [ "$REVERTED" = false ]; then
+        log_info "Entering VyOS configuration mode to reload saved baseline..."
+        configure
+        if [ -f /config/config.boot ]; then
+            log_info "Loading saved boot configuration (/config/config.boot)..."
+            if load /config/config.boot; then
+                log_info "Committing saved baseline..."
+                if commit; then
+                    log_ok "Configuration reverted to /config/config.boot."
+                    REVERTED=true
+                else
+                    log_error "Commit failed while reloading /config/config.boot."
+                    discard 2>/dev/null || true
+                fi
+            else
+                log_error "Failed to load /config/config.boot."
+            fi
+        else
+            log_warn "No /config/config.boot found to reload."
+        fi
+        vyos_exit_cfg
+    fi
+
+    # Tier 3: If soft rollback failed and --force is given, reboot as fail-safe
+    if [ "$REVERTED" = false ]; then
+        if [ "$FORCE" = true ]; then
+            log_warn "--force specified and soft rollback failed. Initiating system reboot to revert..."
+            systemctl reboot 2>/dev/null || reboot
+        else
+            log_error "Rollback failed. You can re-run with --force to force a reboot into saved configuration."
+            builtin exit 1
+        fi
+    fi
+
+    log_ok "Pending commit-confirm cancelled. Configuration rolled back to pre-change state."
     builtin exit 0
 fi
 

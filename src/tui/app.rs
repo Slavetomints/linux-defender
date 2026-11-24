@@ -1585,6 +1585,7 @@ impl App {
         self.router_running = true;
         let label = match step_id {
             "confirm" => "Confirm Changes (confirm + save)",
+            "rollback" => "Rollback Changes (cancel commit-confirm)",
             other => crate::router::ROUTER_STEPS
                 .iter()
                 .find(|s| s.id == other)
@@ -1608,6 +1609,7 @@ impl App {
             purge_containers: step_id == "purge_containers",
             console_lockdown: step_id == "console_lockdown",
             confirm: step_id == "confirm",
+            rollback: step_id == "rollback",
             team: self.team,
             ..Default::default()
         });
@@ -1676,6 +1678,10 @@ impl App {
                     .push("✓ VyOS configuration confirmed and saved permanently.".to_string());
                 // When confirm fails, keep the pending state so the operator can retry.
                 // The error line is already recorded in router_log.
+            } else if id == "rollback" && success {
+                self.router_pending_confirm = None;
+                self.router_log
+                    .push("✓ VyOS configuration rolled back. Pending changes cancelled.".to_string());
             }
 
             if success && matches!(
@@ -1684,6 +1690,7 @@ impl App {
                     | "router_nat"
                     | "restore_nat"
                     | "confirm"
+                    | "rollback"
                     | "sanitize_hooks"
                     | "sanitize_cron"
                     | "rotate_passwords"
@@ -2148,6 +2155,18 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                             );
                         }
                     }
+                    KeyCode::Char('n') | KeyCode::Char('N') => {
+                        if !app.router_running {
+                            pending.modal_open = false;
+                            app.start_router(
+                                "rollback",
+                                Some(crate::router::CliArgs {
+                                    rollback: true,
+                                    ..Default::default()
+                                }),
+                            );
+                        }
+                    }
                     KeyCode::Esc => {
                         pending.modal_open = false;
                     }
@@ -2433,7 +2452,7 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                 || step_id == "router_nat")
                         {
                             app.router_log.push(
-                                "[WARN] Cannot start configuration while confirmation is pending. Press 'c' to confirm or wait for rollback."
+                                "[WARN] Cannot start configuration while confirmation is pending. Press 'c' to confirm/rollback or wait for timer."
                                     .to_string(),
                             );
                             continue;
@@ -2468,6 +2487,15 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                     "confirm",
                                     Some(crate::router::CliArgs {
                                         confirm: true,
+                                        ..Default::default()
+                                    }),
+                                );
+                            }
+                            "rollback" => {
+                                app.start_router(
+                                    "rollback",
+                                    Some(crate::router::CliArgs {
+                                        rollback: true,
                                         ..Default::default()
                                     }),
                                 );
@@ -2632,7 +2660,7 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                         app.start_backup("all");
                     }
                 }
-                KeyCode::Char('c') => {
+                KeyCode::Char('c') | KeyCode::Char('n') => {
                     if app.tab == Tab::Router
                         && let Some(ref mut pending) = app.router_pending_confirm
                     {
@@ -3208,7 +3236,7 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
                     right.extend(kb("Enter", "run", key_color));
                 }
                 if app.router_pending_confirm.is_some() {
-                    right.extend(kb("c", "confirm dialog", Color::Yellow));
+                    right.extend(kb("c/n", "confirm/rollback", Color::Yellow));
                 }
             }
             RouterFocus::Log => {
@@ -3216,7 +3244,7 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
                 right.extend(kb("↑↓", "scroll", key_color));
                 right.extend(kb("End", "bottom", key_color));
                 if app.router_pending_confirm.is_some() {
-                    right.extend(kb("c", "confirm dialog", Color::Yellow));
+                    right.extend(kb("c/n", "confirm/rollback", Color::Yellow));
                 }
             }
         },
@@ -4560,7 +4588,7 @@ fn render_router_confirm_modal(f: &mut ratatui::Frame, area: Rect, pending: &Rou
     let countdown = crate::router::format_countdown(remaining_secs);
 
     let title = format!(" VyOS Confirmation Required [Rollback in {}] ", countdown);
-    let inner = modal_popup(f, area, 65, 55, &title);
+    let inner = modal_popup(f, area, 70, 55, &title);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -4634,6 +4662,13 @@ fn render_router_confirm_modal(f: &mut ratatui::Frame, area: Rect, pending: &Rou
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("keep changes (confirm + save)   "),
+        Span::styled(
+            "[n] ",
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("cancel & rollback now   "),
         Span::styled(
             "[Esc] ",
             Style::default()

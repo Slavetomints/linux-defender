@@ -89,6 +89,11 @@ pub const ROUTER_STEPS: &[RouterStepDef] = &[
         label: "Confirm Pending Commit",
         description: "Confirm and save pending commit-confirm changes permanently",
     },
+    RouterStepDef {
+        id: "rollback",
+        label: "Rollback Pending Commit",
+        description: "Cancel pending commit-confirm and revert router configuration immediately",
+    },
 ];
 
 /// Default commit-confirm rollback timeout in minutes when none is explicitly specified.
@@ -200,6 +205,10 @@ pub struct CliArgs {
     /// Confirm and save pending commit-confirm changes
     #[arg(long)]
     pub confirm: bool,
+
+    /// Cancel and rollback pending commit-confirm changes immediately
+    #[arg(long, visible_alias = "cancel-confirm")]
+    pub rollback: bool,
 
     /// Interactive configuration wizard
     #[arg(long)]
@@ -455,6 +464,8 @@ pub fn build_script_args(args: &CliArgs) -> Vec<String> {
 
     if args.confirm {
         script_args.push("--confirm".into());
+    } else if args.rollback {
+        script_args.push("--rollback".into());
     } else if args.audit {
         script_args.push("--audit".into());
     } else if let Some(ref diff_opt) = args.diff {

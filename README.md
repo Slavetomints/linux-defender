@@ -117,6 +117,7 @@ Tab 4 provides single-key failsafe remediations with rollback protection:
 - **Purge Rogue Containers** (`--purge-containers`): Deletes VyOS container config and forcefully removes all Podman containers (`podman rm -f -a`).
 - **Phase 2: Console Lockdown** (`--console-lockdown`): Completely tears down SSH service and drops port 22 (Console-Only Administration).
 - **Confirm Pending Commit** (`--confirm`): Confirms and saves pending `commit-confirm` changes permanently.
+- **Rollback Pending Commit** (`--rollback` / `--cancel-confirm`): Cancels pending `commit-confirm` and immediately reverts to the pre-change baseline (also bound to `n` in the confirmation modal).
 ---
 
 ## CLI reference
@@ -251,6 +252,7 @@ VyOS router hardening, forensic audit, firewall deployment, and NAT restoration 
 | `--rotate-passwords` | prompts | Separately updates `vyos` and Linux `root` passwords; sanitizes `authorized_keys` |
 | `--console-lockdown` | prompts | Phase 2: Removes SSH service and drops port 22 (Console-Only Administration) |
 | `--confirm` | commit | Persists pending `commit-confirm` configuration permanently |
+| `--rollback` | rollback | Cancels pending `commit-confirm` and reverts configuration immediately (`--cancel-confirm`) |
 | `--interactive` | wizard | Interactive configuration wizard |
 | `--team <NUM>` | option | CCDC team number (1–20) used to derive WAN subnet `172.31.(20+T).2/29` |
 | `--dnat-target <IP>` | option | Target internal host for port forwarding / DNAT (e.g. `172.20.240.10`) |
@@ -269,6 +271,9 @@ sudo linux-defender router --harden --team 1 --commit-timeout 10
 
 # Confirm pending configuration after verifying connectivity
 sudo linux-defender router --confirm
+
+# Or immediately cancel and rollback pending configuration if an error was made
+sudo linux-defender router --rollback
 
 # Restore NAT and routes from clean-slate baseline grounded in topology
 sudo linux-defender router --restore-nat --team 1 --restore-mode baseline

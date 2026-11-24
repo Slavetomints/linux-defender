@@ -21,6 +21,7 @@ fn embedded_script_is_valid() {
     assert!(VYOS_SCRIPT.contains("--harden"));
     assert!(VYOS_SCRIPT.contains("--console-lockdown"));
     assert!(VYOS_SCRIPT.contains("--confirm"));
+    assert!(VYOS_SCRIPT.contains("--rollback"));
     assert!(VYOS_SCRIPT.contains("--audit"));
     assert!(VYOS_SCRIPT.contains("--diff"));
 }
@@ -66,6 +67,7 @@ fn failed_or_bypassed_harden_does_not_enter_pending_state() {
     assert!(!should_enter_pending_state("diff", false, true));
     assert!(!should_enter_pending_state("console_lockdown", false, true));
     assert!(!should_enter_pending_state("confirm", false, true));
+    assert!(!should_enter_pending_state("rollback", false, true));
 }
 
 #[test]
@@ -76,6 +78,16 @@ fn build_script_args_maps_confirm_flag() {
     };
     let script_args = build_script_args(&args);
     assert_eq!(script_args, vec!["--confirm"]);
+}
+
+#[test]
+fn build_script_args_maps_rollback_flag() {
+    let args = CliArgs {
+        rollback: true,
+        ..Default::default()
+    };
+    let script_args = build_script_args(&args);
+    assert_eq!(script_args, vec!["--rollback"]);
 }
 
 #[test]
@@ -100,7 +112,7 @@ fn build_script_args_maps_remediation_flags() {
 
 #[test]
 fn router_steps_registry_is_valid() {
-    assert_eq!(ROUTER_STEPS.len(), 12);
+    assert_eq!(ROUTER_STEPS.len(), 13);
     let ids: Vec<&str> = ROUTER_STEPS.iter().map(|s| s.id).collect();
     assert!(!ids.contains(&"audit"), "audit is superseded by Tab 3 modular scans");
     assert!(ids.contains(&"diff"));
@@ -115,6 +127,7 @@ fn router_steps_registry_is_valid() {
     assert!(ids.contains(&"user_permissions"));
     assert!(ids.contains(&"console_lockdown"));
     assert!(ids.contains(&"confirm"));
+    assert!(ids.contains(&"rollback"));
 }
 
 #[test]

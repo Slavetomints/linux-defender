@@ -174,3 +174,29 @@ fn router_confirm_flag_is_accepted_and_maps_to_confirm_mode() {
     assert!(out_help.status.success());
     assert!(stdout(&out_help).contains("--confirm"));
 }
+
+#[test]
+fn router_rollback_flag_is_accepted_and_maps_to_rollback_mode() {
+    let dir = TempDir::new().unwrap();
+    let out = run_in(dir.path(), &["router", "--rollback", "--dry-run"]);
+
+    assert!(
+        out.status.success(),
+        "router --rollback --dry-run should succeed"
+    );
+    let text = stdout(&out);
+    assert!(
+        text.contains("--rollback"),
+        "stdout should show script execution with --rollback, got: {}",
+        text
+    );
+    assert!(
+        text.contains("Dry run enabled"),
+        "script in --rollback --dry-run should report dry run enabled, got: {}",
+        text
+    );
+
+    let out_help = run_in(dir.path(), &["router", "--help"]);
+    assert!(out_help.status.success());
+    assert!(stdout(&out_help).contains("--rollback"));
+}

@@ -155,7 +155,7 @@ pub fn prompt_string_default(question: &str, default: &str) -> Result<String> {
 /// ```
 /// use linux_defender::core::truncate_chars;
 ///
-/// assert_eq!(truncate_chars("hello", 3), "hel");
+/// assert_eq!(truncate_chars("hello", 2), "he");
 /// assert_eq!(truncate_chars("héllo", 2), "hé");
 /// assert_eq!(truncate_chars("short", 80), "short");
 /// ```

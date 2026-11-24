@@ -296,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn unparseable_line_returns_none() {
+    fn unparsable_line_returns_none() {
         assert!(parse_log_timestamp("not a syslog line", now()).is_none());
         assert!(parse_log_timestamp("", now()).is_none());
     }

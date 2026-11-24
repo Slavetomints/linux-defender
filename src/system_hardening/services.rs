@@ -748,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn only_units_behind_this_boxs_scored_checks_are_auto_unmasked() {
+    fn only_units_behind_this_box_scored_checks_are_auto_unmasked() {
         let none_active = |_: &str| false;
         assert!(should_auto_unmask("postfix", BoxType::Mail, none_active));
         assert!(should_auto_unmask("sshd", BoxType::General, none_active));

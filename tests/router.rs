@@ -973,8 +973,56 @@ fn vyos_script_derives_team_0_practice_wan_ip_40() {
         "Script must use 172.31.40.1 as Core Gateway for Team 0 practice environment"
     );
     assert!(
-        VYOS_SCRIPT.contains("172.25.40.0/24"),
-        "Script must use 172.25.40.0/24 as Public Pool for Team 0 practice environment"
+        VYOS_SCRIPT.contains("172.25.20.0/24") || VYOS_SCRIPT.contains("PUBLIC_OCTET=20"),
+        "Script must use 172.25.20.0/24 as Public Pool baseline for Team 0 practice environment"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("172.16.0.1"),
+        "Script must route 172.20.240.0/24 to Palo Alto Outside next-hop 172.16.0.1"
+    );
+}
+
+#[test]
+fn vyos_script_canonical_rules_10_20_30_40_50_with_destination_address_filtering() {
+    assert!(
+        VYOS_SCRIPT.contains("destination address"),
+        "Script must enforce destination address filtering on DNAT rules"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("SET_SNAT") && VYOS_SCRIPT.contains("set nat source rule 10"),
+        "Script must reconcile and restore 1:1 SNAT rules 10, 20, 30, 40, 50"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("inbound-interface group 'OUTSIDE'"),
+        "Script must support inbound-interface group OUTSIDE per known-good config"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("ECOM_PUB"),
+        "Script must derive public IP for E-Commerce"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("EMAIL_PUB"),
+        "Script must derive public IP for Mail Server"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("SPLUNK_PUB"),
+        "Script must derive public IP for Splunk SIEM"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("AD_PUB"),
+        "Script must derive public IP for Active Directory"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("MSSQL_PUB"),
+        "Script must derive public IP for MSSQL"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("detect_existing_octet"),
+        "Script must define detect_existing_octet for resilient subnet detection"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("Wiping legacy script artifact destination NAT rule"),
+        "Script must wipe legacy rules 11-14"
     );
 }
 

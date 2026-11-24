@@ -344,6 +344,8 @@ pub struct ParsedDestNatRule {
     pub description: String,
     /// Target translation IP address.
     pub translation_address: String,
+    /// Inbound destination IP address filter (e.g. 172.25.20.10).
+    pub destination_address: String,
     /// Inbound destination port(s).
     pub destination_ports: String,
     /// Protocol (e.g. tcp, udp, tcp_udp).
@@ -1267,7 +1269,7 @@ pub fn scan_interfaces(ctx: &DefenderContext) {
             "Traffic to internal servers cannot route across firewall interface.",
         );
         finding.context.push(("Missing Route", "172.20.240.0/24".into()));
-        finding.recommendation = "Add static route 172.20.240.0/24 next-hop 172.16.0.254.".into();
+        finding.recommendation = "Add static route 172.20.240.0/24 next-hop 172.16.0.1.".into();
         ctx.emit(finding);
     }
 
@@ -1659,8 +1661,9 @@ pub fn parse_all_dest_nat_rules(content: &str) -> Vec<ParsedDestNatRule> {
                     if let Some(rule_body) = extract_braced_block(body, open_brace) {
                         let mut desc = String::new();
                         let mut trans_addr = String::new();
+                        let mut dest_addr = String::new();
                         let mut ports = String::new();
-                        let mut proto = "tcp".to_string();
+                        let mut proto = "any".to_string();
                         let mut iface = "eth0".to_string();
 
                         if let Some(p) = rule_body.find("description") {
@@ -1673,15 +1676,41 @@ pub fn parse_all_dest_nat_rules(content: &str) -> Vec<ParsedDestNatRule> {
                                 trans_addr = val.trim_matches(|c| c == '\'' || c == '"').to_string();
                             }
                         }
-                        if let Some(p) = rule_body.find("destination port") {
-                            let val: String = rule_body[p + 16..].trim_start().chars().take_while(|c| *c != ';' && *c != '\n' && *c != '}').collect();
-                            ports = val.trim_matches(|c| c == '\'' || c == '"' || c == ' ').to_string();
+                        if let Some(dest_blk) = find_named_block(rule_body, "destination") {
+                            if let Some(p) = dest_blk.find("address") {
+                                let val: String = dest_blk[p + 7..].trim_start().chars().take_while(|c| !c.is_whitespace() && *c != ';' && *c != '}').collect();
+                                dest_addr = val.trim_matches(|c| c == '\'' || c == '"').to_string();
+                            }
+                            if let Some(p) = dest_blk.find("port") {
+                                let val: String = dest_blk[p + 4..].trim_start().chars().take_while(|c| *c != ';' && *c != '\n' && *c != '}').collect();
+                                ports = val.trim_matches(|c| c == '\'' || c == '"' || c == ' ').to_string();
+                            }
+                        }
+                        if dest_addr.is_empty() {
+                            if let Some(p) = rule_body.find("destination address") {
+                                let val: String = rule_body[p + 19..].trim_start().chars().take_while(|c| *c != ';' && *c != '\n' && *c != '}').collect();
+                                dest_addr = val.trim_matches(|c| c == '\'' || c == '"' || c == ' ').to_string();
+                            }
+                        }
+                        if ports.is_empty() {
+                            if let Some(p) = rule_body.find("destination port") {
+                                let val: String = rule_body[p + 16..].trim_start().chars().take_while(|c| *c != ';' && *c != '\n' && *c != '}').collect();
+                                ports = val.trim_matches(|c| c == '\'' || c == '"' || c == ' ').to_string();
+                            }
                         }
                         if let Some(p) = rule_body.find("protocol") {
                             let val: String = rule_body[p + 8..].trim_start().chars().take_while(|c| !c.is_whitespace() && *c != ';' && *c != '}').collect();
                             proto = val.trim_matches(|c| c == '\'' || c == '"').to_string();
                         }
-                        if let Some(p) = rule_body.find("inbound-interface") {
+                        if let Some(iface_blk) = find_named_block(rule_body, "inbound-interface") {
+                            if let Some(p) = iface_blk.find("group") {
+                                let val: String = iface_blk[p + 5..].trim_start().chars().take_while(|c| !c.is_whitespace() && *c != ';' && *c != '}').collect();
+                                iface = val.trim_matches(|c| c == '\'' || c == '"').to_string();
+                            } else if let Some(p) = iface_blk.find("name") {
+                                let val: String = iface_blk[p + 4..].trim_start().chars().take_while(|c| !c.is_whitespace() && *c != ';' && *c != '}').collect();
+                                iface = val.trim_matches(|c| c == '\'' || c == '"').to_string();
+                            }
+                        } else if let Some(p) = rule_body.find("inbound-interface") {
                             let val: String = rule_body[p + 17..].trim_start().chars().take_while(|c| !c.is_whitespace() && *c != ';' && *c != '}').collect();
                             iface = val.trim_matches(|c| c == '\'' || c == '"').to_string();
                         }
@@ -1690,6 +1719,7 @@ pub fn parse_all_dest_nat_rules(content: &str) -> Vec<ParsedDestNatRule> {
                             rule_num,
                             description: desc,
                             translation_address: trans_addr,
+                            destination_address: dest_addr,
                             destination_ports: ports,
                             protocol: proto,
                             inbound_interface: iface,
@@ -1700,23 +1730,44 @@ pub fn parse_all_dest_nat_rules(content: &str) -> Vec<ParsedDestNatRule> {
         }
     }
 
-    // Also check flat commands: `set nat destination rule <num> translation address <ip>`
+    // Also check flat commands: `set nat destination rule <num> ...`
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("set nat destination rule ") && trimmed.contains(" translation address ") {
+        if trimmed.starts_with("set nat destination rule ") {
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
-            if parts.len() >= 8 {
+            if parts.len() >= 6 {
                 if let Ok(rule_num) = parts[4].parse::<u32>() {
-                    let trans_addr = parts[7].trim_matches(|c| c == '\'' || c == '"').to_string();
-                    if !parsed.iter().any(|r| r.rule_num == rule_num) {
-                        parsed.push(ParsedDestNatRule {
-                            rule_num,
-                            description: String::new(),
-                            translation_address: trans_addr,
-                            destination_ports: String::new(),
-                            protocol: "tcp".to_string(),
-                            inbound_interface: "eth0".to_string(),
-                        });
+                    let idx = parsed.iter().position(|r| r.rule_num == rule_num);
+                    if trimmed.contains(" destination address ") && parts.len() >= 8 {
+                        let addr = parts[7].trim_matches(|c| c == '\'' || c == '"').to_string();
+                        if let Some(i) = idx {
+                            parsed[i].destination_address = addr;
+                        } else {
+                            parsed.push(ParsedDestNatRule {
+                                rule_num,
+                                description: String::new(),
+                                translation_address: String::new(),
+                                destination_address: addr,
+                                destination_ports: String::new(),
+                                protocol: "tcp".to_string(),
+                                inbound_interface: "eth0".to_string(),
+                            });
+                        }
+                    } else if trimmed.contains(" translation address ") && parts.len() >= 8 {
+                        let trans = parts[7].trim_matches(|c| c == '\'' || c == '"').to_string();
+                        if let Some(i) = idx {
+                            parsed[i].translation_address = trans;
+                        } else {
+                            parsed.push(ParsedDestNatRule {
+                                rule_num,
+                                description: String::new(),
+                                translation_address: trans,
+                                destination_address: String::new(),
+                                destination_ports: String::new(),
+                                protocol: "tcp".to_string(),
+                                inbound_interface: "eth0".to_string(),
+                            });
+                        }
                     }
                 }
             }
@@ -1741,6 +1792,8 @@ pub fn audit_nat_rules_by_ip(parsed_rules: &[ParsedDestNatRule]) -> NatIpAuditOu
                 r.translation_address == target.internal_ip
                     || (r.translation_address.starts_with("172.25.")
                         && r.translation_address.ends_with(target.ip_suffix))
+                    || (r.destination_address.starts_with("172.25.")
+                        && r.destination_address.ends_with(target.ip_suffix))
             })
             .collect();
 
@@ -1764,7 +1817,11 @@ pub fn audit_nat_rules_by_ip(parsed_rules: &[ParsedDestNatRule]) -> NatIpAuditOu
                 detected_rules.push(DetectedNatRule {
                     rule_num: rule.rule_num,
                     description: target.name.to_string(),
-                    translation: rule.translation_address.clone(),
+                    translation: if !rule.translation_address.is_empty() {
+                        rule.translation_address.clone()
+                    } else {
+                        target.internal_ip.to_string()
+                    },
                     is_valid: false,
                 });
             } else {
@@ -1772,17 +1829,28 @@ pub fn audit_nat_rules_by_ip(parsed_rules: &[ParsedDestNatRule]) -> NatIpAuditOu
                 detected_rules.push(DetectedNatRule {
                     rule_num: rule.rule_num,
                     description: target.name.to_string(),
-                    translation: rule.translation_address.clone(),
+                    translation: if !rule.translation_address.is_empty() {
+                        rule.translation_address.clone()
+                    } else {
+                        target.internal_ip.to_string()
+                    },
                     is_valid: true,
                 });
             }
         } else {
             duplicate_conflicts.push((target, matching.into_iter().cloned().collect()));
-            for r in parsed_rules.iter().filter(|r| r.translation_address.ends_with(target.ip_suffix)) {
+            for r in parsed_rules.iter().filter(|r| {
+                r.translation_address.ends_with(target.ip_suffix)
+                    || r.destination_address.ends_with(target.ip_suffix)
+            }) {
                 detected_rules.push(DetectedNatRule {
                     rule_num: r.rule_num,
                     description: target.name.to_string(),
-                    translation: r.translation_address.clone(),
+                    translation: if !r.translation_address.is_empty() {
+                        r.translation_address.clone()
+                    } else {
+                        target.internal_ip.to_string()
+                    },
                     is_valid: false,
                 });
             }
@@ -1797,6 +1865,8 @@ pub fn audit_nat_rules_by_ip(parsed_rules: &[ParsedDestNatRule]) -> NatIpAuditOu
                     r.translation_address == s.internal_ip
                         || (r.translation_address.starts_with("172.25.")
                             && r.translation_address.ends_with(s.ip_suffix))
+                        || (r.destination_address.starts_with("172.25.")
+                            && r.destination_address.ends_with(s.ip_suffix))
                 })
         })
         .cloned()
@@ -1811,6 +1881,21 @@ pub fn audit_nat_rules_by_ip(parsed_rules: &[ParsedDestNatRule]) -> NatIpAuditOu
         rogue_rules,
         outbound_pat_active: false,
     }
+}
+
+/// Compatibility parser helper for tests and external consumers.
+pub fn parse_nat_rules_from_content(
+    content: &str,
+) -> (Vec<DetectedNatRule>, Vec<u32>, Vec<(u32, String)>) {
+    let parsed = parse_all_dest_nat_rules(content);
+    let outcome = audit_nat_rules_by_ip(&parsed);
+    let missing: Vec<u32> = outcome.missing_targets.iter().map(|_| 0).collect();
+    let drifted: Vec<(u32, String)> = outcome
+        .drifted_targets
+        .iter()
+        .map(|(_, r, reason)| (r.rule_num, reason.clone()))
+        .collect();
+    (outcome.detected_rules, missing, drifted)
 }
 
 /// Module 13: Audits destination NAT rules and outbound PAT using IP-centric matching.
@@ -1845,16 +1930,27 @@ pub fn scan_nat(ctx: &DefenderContext) {
 
     // 1. Report Valid Scored Targets
     for (target, rule) in &audit_outcome.valid_targets {
+        let dest_disp = if rule.destination_address.is_empty() {
+            "0.0.0.0/0".to_string()
+        } else {
+            rule.destination_address.clone()
+        };
+        let ports_disp = if rule.destination_ports.is_empty() {
+            "any (1:1)".to_string()
+        } else {
+            rule.destination_ports.clone()
+        };
         let mut finding = Finding::new(
             Severity::Info,
             "router_nat",
-            format!("Scored DNAT Active: {} (Rule {} -> {})", target.name, rule.rule_num, rule.translation_address),
-            format!("Discovered Rule {}: proto={}, ports='{}', target={}", rule.rule_num, rule.protocol, rule.destination_ports, rule.translation_address),
+            format!("Scored DNAT Active: {} (Rule {} {} -> {})", target.name, rule.rule_num, dest_disp, rule.translation_address),
+            format!("Discovered Rule {}: dest={}, in-int={}, proto={}, ports='{}', target={}", rule.rule_num, dest_disp, rule.inbound_interface, rule.protocol, ports_disp, rule.translation_address),
         );
         finding.context.push(("Target Server", target.name.to_string()));
         finding.context.push(("Discovered Rule", rule.rule_num.to_string()));
+        finding.context.push(("Destination IP", dest_disp));
         finding.context.push(("Translation IP", rule.translation_address.clone()));
-        finding.context.push(("Ports Bound", rule.destination_ports.clone()));
+        finding.context.push(("Ports Bound", ports_disp));
         ctx.emit(finding);
     }
 

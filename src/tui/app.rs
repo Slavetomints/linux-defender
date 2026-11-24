@@ -493,7 +493,12 @@ fn detect_vyos_team_number() -> Option<u8> {
                 && let Ok(octet) = parts[2].parse::<u8>()
             {
                 if octet == 40 {
-                    // Practice Environment WAN IP is 172.31.40.2/29
+                    // Distinguish Team 20 (172.25.40.x) from Practice Team 0 (172.25.20.x)
+                    if let Ok(cfg) = std::fs::read_to_string("/config/config.boot")
+                        && cfg.contains("172.25.40.")
+                    {
+                        return Some(20);
+                    }
                     return Some(0);
                 } else if (21..=39).contains(&octet) {
                     // Competition teams 1..19

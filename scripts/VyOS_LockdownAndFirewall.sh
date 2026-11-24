@@ -39,6 +39,7 @@ die()       { log_error "$*"; builtin exit 1; }
 
 # ─── Defaults & Global State ──────────────────────────────────────────────────
 TEAM=""
+PUBLIC_OCTET=""
 ADMIN_USER="vyos"
 ADMIN_PASS="${DEFENDER_ADMIN_PASS:-}"
 ROOT_PASS="${DEFENDER_ROOT_PASS:-}"
@@ -77,8 +78,8 @@ Usage: ./VyOS_LockdownAndFirewall.sh [MODE] [OPTIONS]
 MODES:
   --audit                 Run non-destructive forensic audit (14 sections) and save baseline
   --diff [log_file]       Diff current state against previous baseline
-  --harden                Phase 1: Hardening & Init Config (passwords, SSH, firewall, NAT rules 10-14)
-  --restore-nat           Restore CCDC DNAT Rules 10-14 & configure outbound PAT without full hardening
+  --harden                Phase 1: Hardening & Init Config (passwords, SSH, firewall, NAT rules 10, 20, 30, 40, 50)
+  --restore-nat           Restore CCDC DNAT Rules 10, 20, 30, 40, 50 & configure outbound PAT without full hardening
   --rotate-passwords      Separately rotate vyos and root passwords; sanitize authorized_keys
   --sanitize-hooks        Quarantine persistence hooks from /config/scripts/ and reset templates
   --sanitize-cron         Delete VyOS task-scheduler and flush /var/spool/cron/crontabs
@@ -89,7 +90,8 @@ MODES:
   --interactive           Interactive configuration wizard
 
 OPTIONS:
-  --team <0-20>           CCDC Team number (0=practice 172.31.40.2/29, 1-20=competition 172.31.{20+T}.2/29)
+  --team <0-20>           CCDC Team number (0=practice GW 172.31.40.1 / pool 172.25.20.0/24, 1-20=competition 20+T)
+  --public-octet <N>      Override Public NAT IP pool third octet 172.25.<N>.0/24 (auto-detected if omitted)
   --dnat-target <tgt>     DNAT destination target: 'private' (172.20.240.x) or 'public' (172.25.x.x) [default: private]
   --restore-mode <mode>   Restore mode for --restore-nat: 'baseline', 'detected', or 'backup' [default: baseline]
   --config-source <path>  Path to detected or backup config file for restore
@@ -173,6 +175,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --team)
             TEAM="$2"
+            shift 2
+            ;;
+        --public-octet)
+            PUBLIC_OCTET="$2"
             shift 2
             ;;
         --dnat-target)
@@ -286,7 +292,7 @@ if [ "$MODE" == "interactive" ]; then
     echo "1) Forensic Audit & Baseline (Read-Only)"
     echo "2) Diff Against Last Audit Baseline"
     echo "3) Phase 1: Hardened SSH + Password Rotation + Firewall + NAT"
-    echo "4) Restore CCDC DNAT Rules 10-14 & Outbound PAT"
+    echo "4) Restore CCDC DNAT Rules 10, 20, 30, 40, 50 & Outbound PAT"
     echo "5) Dual Password Rotation & SSH Key Sanitization"
     echo "6) Phase 2: Console-Only Lockdown (Nuke SSH)"
     echo "7) Exit"
@@ -318,19 +324,64 @@ if [ "$MODE" == "interactive" ]; then
 fi
 
 # ─── Auto-Derive Team Subnets ─────────────────────────────────────────────────
+detect_existing_wan_octet() {
+    local detected=""
+    if [ -x /opt/vyatta/bin/vyatta-op-cmd-wrapper ]; then
+        detected=$(/opt/vyatta/bin/vyatta-op-cmd-wrapper show configuration commands 2>/dev/null | grep -E "172\.31\.[0-9]+\." | sed -n 's/.*172\.31\.\([0-9]*\)\..*/\1/p' | head -n1)
+    fi
+    if [ -z "$detected" ] && [ -f /config/config.boot ]; then
+        detected=$(grep -E "172\.31\.[0-9]+\." /config/config.boot 2>/dev/null | sed -n 's/.*172\.31\.\([0-9]*\)\..*/\1/p' | head -n1)
+    fi
+    echo "$detected"
+}
+
+detect_existing_octet() {
+    local detected=""
+    if [ -x /opt/vyatta/bin/vyatta-op-cmd-wrapper ]; then
+        detected=$(/opt/vyatta/bin/vyatta-op-cmd-wrapper show configuration commands 2>/dev/null | grep -E "172\.25\.[0-9]+\." | sed -n 's/.*172\.25\.\([0-9]*\)\..*/\1/p' | head -n1)
+    fi
+    if [ -z "$detected" ] && [ -f /config/config.boot ]; then
+        detected=$(grep -E "172\.25\.[0-9]+\." /config/config.boot 2>/dev/null | sed -n 's/.*172\.25\.\([0-9]*\)\..*/\1/p' | head -n1)
+    fi
+    if [ -z "$detected" ]; then
+        for state_f in "/etc/linux-defender/vyos/detected_nat_routes.json" "/tmp/defender/vyos/detected_nat_routes.json"; do
+            if [ -f "$state_f" ]; then
+                detected=$(grep -E "172\.25\.[0-9]+\." "$state_f" 2>/dev/null | sed -n 's/.*172\.25\.\([0-9]*\)\..*/\1/p' | head -n1)
+                [ -n "$detected" ] && break
+            fi
+        done
+    fi
+    echo "$detected"
+}
+
 derive_team_subnets() {
     local t="$1"
+    local live_wan live_pub
+    live_wan=$(detect_existing_wan_octet)
+    live_pub=$(detect_existing_octet)
     if [ "$t" -eq 0 ]; then
-        OCTET=40
-        WAN_ROUTER_IP="172.31.40.2/29"
-        CORE_GATEWAY_IP="172.31.40.1"
-        PUBLIC_POOL="172.25.40.0/24"
+        OCTET="${live_wan:-40}"
+        if [ -z "$PUBLIC_OCTET" ]; then
+            if [ -n "$live_pub" ]; then
+                PUBLIC_OCTET="$live_pub"
+                log_info "Detected active public NAT pool octet: 172.25.${PUBLIC_OCTET}.0/24"
+            else
+                # Known-good Practice baseline: WAN 172.31.40.x, Public Pool 172.25.20.0/24
+                PUBLIC_OCTET=20
+            fi
+        fi
+        WAN_ROUTER_IP="172.31.${OCTET}.2/29"
+        CORE_GATEWAY_IP="172.31.${OCTET}.1"
+        PUBLIC_POOL="172.25.${PUBLIC_OCTET}.0/24"
         log_info "Team 0 (Practice Environment): WAN Router=${WAN_ROUTER_IP}, Core Gateway=${CORE_GATEWAY_IP}, Public Pool=${PUBLIC_POOL}"
     else
         OCTET=$((20 + t))
+        if [ -z "$PUBLIC_OCTET" ]; then
+            PUBLIC_OCTET="$OCTET"
+        fi
         WAN_ROUTER_IP="172.31.${OCTET}.2/29"
         CORE_GATEWAY_IP="172.31.${OCTET}.1"
-        PUBLIC_POOL="172.25.${OCTET}.0/24"
+        PUBLIC_POOL="172.25.${PUBLIC_OCTET}.0/24"
         log_info "Team $t Subnets: WAN Router=${WAN_ROUTER_IP}, Core Gateway=${CORE_GATEWAY_IP}, Public Pool=${PUBLIC_POOL}"
     fi
 }
@@ -399,7 +450,7 @@ if [ "$MODE" == "diff" ]; then
         echo "  ✓ No rogue interfaces or VPN tunnels (WireGuard, OpenVPN)"
         echo "  ✓ No unexpected listening ports or container services"
         echo "  ✓ No SUID binaries or /etc/ld.so.preload rootkits"
-        echo "  ✓ Scored 1:1 DNAT Rules 10-14 & Outbound PAT intact"
+        echo "  ✓ Scored 1:1 DNAT Rules 10, 20, 30, 40, 50 & Outbound PAT intact"
         echo "  ✓ Systemd services match VyOS curated whitelist"
         echo -e "${GREEN}======================================================================${RESET}"
     else
@@ -540,16 +591,33 @@ if [ "$MODE" == "audit" ]; then
     echo "[-] Active VyOS NAT Configuration Commands:"
     run_op show configuration commands | grep -E "^set nat" || echo "No NAT commands configured in VyOS."
 
-    echo -e "\n[-] Scored 1:1 DNAT Rules 10-14 Verification:"
-    for r in 10 11 12 13 14; do
+    echo -e "\n[-] Scored 1:1 DNAT Rules (10, 20, 30, 40, 50) Verification:"
+    for r in 10 20 30 40 50; do
         if run_op show configuration commands | grep -q "nat destination rule $r "; then
             r_desc=$(run_op show configuration commands | grep "nat destination rule $r description" | awk '{print $NF}' | tr -d "'\"")
+            r_dest=$(run_op show configuration commands | grep "nat destination rule $r destination address" | awk '{print $NF}' | tr -d "'\"")
             r_trans=$(run_op show configuration commands | grep "nat destination rule $r translation address" | awk '{print $NF}' | tr -d "'\"")
             r_port=$(run_op show configuration commands | grep "nat destination rule $r destination port" | awk '{print $NF}' | tr -d "'\"")
             r_proto=$(run_op show configuration commands | grep "nat destination rule $r protocol" | awk '{print $NF}' | tr -d "'\"")
-            echo "  [OK] Rule $r (${r_desc:-unnamed}): proto=${r_proto:-any} port=${r_port:-any} -> translation=${r_trans:-none}"
+            echo "  [OK] Rule $r (${r_desc:-unnamed}): dest=${r_dest:-0.0.0.0/0} proto=${r_proto:-any} port=${r_port:-any} -> translation=${r_trans:-none}"
         else
             echo "  [WARN] Scored DNAT Rule $r is NOT configured in active ruleset!"
+        fi
+    done
+    for lr in 11 12 13 14; do
+        if run_op show configuration commands | grep -q "nat destination rule $lr "; then
+            echo "  [WARN] Legacy artifact rule $lr detected in active ruleset! Run --restore-nat to clean up."
+        fi
+    done
+
+    echo -e "\n[-] Scored 1:1 SNAT Rules (10, 20, 30, 40, 50) Verification:"
+    for sr in 10 20 30 40 50; do
+        if run_op show configuration commands | grep -q "nat source rule $sr "; then
+            sr_src=$(run_op show configuration commands | grep "nat source rule $sr source address" | awk '{print $NF}' | tr -d "'\"")
+            sr_trans=$(run_op show configuration commands | grep "nat source rule $sr translation address" | awk '{print $NF}' | tr -d "'\"")
+            echo "  [OK] Source Rule $sr: src=${sr_src:-any} -> translation=${sr_trans:-none}"
+        else
+            echo "  [WARN] Scored SNAT Rule $sr is NOT configured in active ruleset!"
         fi
     done
 
@@ -786,9 +854,37 @@ if [ "$MODE" == "confirm" ]; then
     builtin exit 0
 fi
 
-# ─── NAT Configuration Engine (Rules 10-14 DNAT & Rule 100 Outbound PAT) ───────
+# ─── NAT Configuration Engine (Rules 10, 20, 30, 40, 50 DNAT/SNAT & Rule 100 PAT) ───
 apply_nat_configuration() {
     log_info "Executing IP-Centric NAT Baseline Reconciliation (Target: $DNAT_TARGET)..."
+
+    if [ -z "$OCTET" ]; then
+        local detected_wan
+        detected_wan=$(detect_existing_wan_octet)
+        if [ -n "$detected_wan" ]; then
+            OCTET="$detected_wan"
+        elif [ -n "$TEAM" ]; then
+            derive_team_subnets "$TEAM"
+        else
+            OCTET=40
+            log_warn "Neither team nor WAN octet detected; defaulting WAN octet to Team 0 practice (40)."
+        fi
+    fi
+
+    if [ -z "$PUBLIC_OCTET" ]; then
+        local detected_pub
+        detected_pub=$(detect_existing_octet)
+        if [ -n "$detected_pub" ]; then
+            PUBLIC_OCTET="$detected_pub"
+            log_info "Auto-detected public NAT pool octet from router config: 172.25.${PUBLIC_OCTET}.0/24"
+        elif [ -n "$TEAM" ] && [ "$TEAM" -gt 0 ]; then
+            PUBLIC_OCTET="$OCTET"
+        else
+            # Known-good Team 0 Practice Public Pool baseline is 172.25.20.0/24
+            PUBLIC_OCTET=20
+            log_info "Using Team 0 Practice Public NAT Pool baseline: 172.25.${PUBLIC_OCTET}.0/24"
+        fi
+    fi
 
     local ECOM_TARGET EMAIL_TARGET SPLUNK_TARGET AD_TARGET MSSQL_TARGET
     if [ "$DNAT_TARGET" == "private" ]; then
@@ -798,12 +894,18 @@ apply_nat_configuration() {
         AD_TARGET="172.20.240.100"
         MSSQL_TARGET="172.20.240.120"
     else
-        ECOM_TARGET="172.25.${OCTET}.10"
-        EMAIL_TARGET="172.25.${OCTET}.15"
-        SPLUNK_TARGET="172.25.${OCTET}.20"
-        AD_TARGET="172.25.${OCTET}.100"
-        MSSQL_TARGET="172.25.${OCTET}.120"
+        ECOM_TARGET="172.25.${PUBLIC_OCTET}.10"
+        EMAIL_TARGET="172.25.${PUBLIC_OCTET}.15"
+        SPLUNK_TARGET="172.25.${PUBLIC_OCTET}.20"
+        AD_TARGET="172.25.${PUBLIC_OCTET}.100"
+        MSSQL_TARGET="172.25.${PUBLIC_OCTET}.120"
     fi
+
+    local ECOM_PUB="172.25.${PUBLIC_OCTET}.10"
+    local EMAIL_PUB="172.25.${PUBLIC_OCTET}.15"
+    local SPLUNK_PUB="172.25.${PUBLIC_OCTET}.20"
+    local AD_PUB="172.25.${PUBLIC_OCTET}.100"
+    local MSSQL_PUB="172.25.${PUBLIC_OCTET}.120"
 
     local RAW_CONFIG=""
     if [ -x /opt/vyatta/bin/vyatta-op-cmd-wrapper ]; then
@@ -811,14 +913,6 @@ apply_nat_configuration() {
     fi
     if [ -z "$RAW_CONFIG" ] && [ -f /config/config.boot ]; then
         RAW_CONFIG=$(cat /config/config.boot 2>/dev/null || true)
-    fi
-    if [ -z "$RAW_CONFIG" ]; then
-        for cfg in "/config/config.boot" "/config/config.boot.test" "tests/fixtures/config.boot" "tests/fixtures/config.boot.test"; do
-            if [ -f "$cfg" ]; then
-                RAW_CONFIG=$(cat "$cfg" 2>/dev/null || true)
-                break
-            fi
-        done
     fi
 
     local RECONCILE_SUCCESS=false
@@ -836,18 +930,68 @@ email_tgt = sys.argv[4]
 splunk_tgt = sys.argv[5]
 ad_tgt = sys.argv[6]
 mssql_tgt = sys.argv[7]
+ecom_pub = sys.argv[8]
+email_pub = sys.argv[9]
+splunk_pub = sys.argv[10]
+ad_pub = sys.argv[11]
+mssql_pub = sys.argv[12]
 
 raw_config = os.environ.get("DEFENDER_RAW_CONFIG", "")
 
 targets = [
-    {'name': 'Ecom', 'rule': 10, 'suffix': '10', 'ip': ecom_tgt, 'ports': '80,443', 'proto': 'tcp'},
-    {'name': 'Email', 'rule': 11, 'suffix': '15', 'ip': email_tgt, 'ports': '25,143,587,993', 'proto': 'tcp'},
-    {'name': 'Splunk', 'rule': 12, 'suffix': '20', 'ip': splunk_tgt, 'ports': '8000,8089,9997', 'proto': 'tcp'},
-    {'name': 'AD', 'rule': 13, 'suffix': '100', 'ip': ad_tgt, 'ports': '53,88,389,636,5985', 'proto': 'tcp_udp'},
-    {'name': 'MSSQL', 'rule': 14, 'suffix': '120', 'ip': mssql_tgt, 'ports': '445,1433,3389', 'proto': 'tcp'},
+    {'name': 'Ecom',   'desc': 'host .10',  'rule': 10, 'suffix': '10',  'priv': '172.20.240.10',  'ip': ecom_tgt,   'pub_ip': ecom_pub,   'ports': '80,443'},
+    {'name': 'Email',  'desc': 'host .15',  'rule': 20, 'suffix': '15',  'priv': '172.20.240.15',  'ip': email_tgt,  'pub_ip': email_pub,  'ports': '25,143,587,993'},
+    {'name': 'Splunk', 'desc': 'host .20',  'rule': 30, 'suffix': '20',  'priv': '172.20.240.20',  'ip': splunk_tgt, 'pub_ip': splunk_pub, 'ports': '8000,8089,9997'},
+    {'name': 'AD',     'desc': 'host .100', 'rule': 40, 'suffix': '100', 'priv': '172.20.240.100', 'ip': ad_tgt,     'pub_ip': ad_pub,     'ports': '53,88,389,636,5985'},
+    {'name': 'MSSQL',  'desc': 'host .120', 'rule': 50, 'suffix': '120', 'priv': '172.20.240.120', 'ip': mssql_tgt,  'pub_ip': mssql_pub,  'ports': '445,1433,3389'},
 ]
 
-def parse_rules(text):
+has_outside_group = (
+    'interface-group OUTSIDE' in raw_config
+    or 'group OUTSIDE' in raw_config
+    or "group 'OUTSIDE'" in raw_config
+    or 'group "OUTSIDE"' in raw_config
+)
+
+def extract_named_block(text, name):
+    m = re.search(r'\b' + re.escape(name) + r'\s*\{', text)
+    if not m:
+        return None
+    open_brace = m.end() - 1
+    depth = 0
+    for idx in range(open_brace, len(text)):
+        if text[idx] == '{':
+            depth += 1
+        elif text[idx] == '}':
+            depth -= 1
+            if depth == 0:
+                return text[open_brace + 1:idx]
+    return None
+
+def iter_braced_rules(section_body):
+    if not section_body:
+        return
+    i = 0
+    while i < len(section_body):
+        m = re.search(r'\brule\s+(\d+)\s*\{', section_body[i:])
+        if not m:
+            break
+        rnum = int(m.group(1))
+        open_brace = i + m.end() - 1
+        depth = 0
+        j = open_brace
+        while j < len(section_body):
+            if section_body[j] == '{':
+                depth += 1
+            elif section_body[j] == '}':
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        yield rnum, section_body[open_brace + 1:j]
+        i = j + 1
+
+def parse_dnat_rules(text):
     rules = {}
     for line in text.splitlines():
         line = line.strip()
@@ -856,144 +1000,317 @@ def parse_rules(text):
             rnum = int(m.group(1))
             rest = m.group(2)
             if rnum not in rules:
-                rules[rnum] = {'rule': rnum, 'desc': '', 'trans': '', 'ports': '', 'proto': 'tcp', 'iface': 'eth0'}
+                rules[rnum] = {'rule': rnum, 'desc': '', 'trans': '', 'dest_addr': '', 'ports': '', 'proto': '', 'iface': 'eth0', 'iface_type': 'name'}
             if rest.startswith('description'):
                 rules[rnum]['desc'] = rest.split(None, 1)[1].strip("'\"")
             elif rest.startswith('translation address'):
                 rules[rnum]['trans'] = rest.split(None, 2)[2].strip("'\"")
+            elif rest.startswith('destination address'):
+                rules[rnum]['dest_addr'] = rest.split(None, 2)[2].strip("'\"")
             elif rest.startswith('destination port'):
                 rules[rnum]['ports'] = rest.split(None, 2)[2].strip("'\"")
             elif rest.startswith('protocol'):
                 rules[rnum]['proto'] = rest.split(None, 1)[1].strip("'\"")
             elif rest.startswith('inbound-interface name'):
                 rules[rnum]['iface'] = rest.split(None, 2)[2].strip("'\"")
+                rules[rnum]['iface_type'] = 'name'
+            elif rest.startswith('inbound-interface group'):
+                rules[rnum]['iface'] = rest.split(None, 2)[2].strip("'\"")
+                rules[rnum]['iface_type'] = 'group'
+            elif rest.startswith('inbound-interface'):
+                rules[rnum]['iface'] = rest.split(None, 1)[1].strip("'\"")
+                rules[rnum]['iface_type'] = 'bare'
     if rules:
         return rules
 
-    dest_pos = text.find('destination')
-    if dest_pos != -1:
-        s = text[dest_pos:]
-        i = 0
-        while i < len(s):
-            m = re.search(r'\brule\s+(\d+)\s*\{', s[i:])
-            if not m:
-                break
-            rnum = int(m.group(1))
-            open_brace = i + m.end() - 1
-            depth = 0
-            j = open_brace
-            while j < len(s):
-                if s[j] == '{':
-                    depth += 1
-                elif s[j] == '}':
-                    depth -= 1
-                    if depth == 0:
-                        break
-                j += 1
-            rule_body = s[open_brace+1:j]
-            i = j + 1
-            trans_m = re.search(r'translation\s*\{[^}]*address\s+[\'\"]?([^\s\'\";}]+)', rule_body)
-            port_m = re.search(r'destination\s*\{[^}]*port\s+[\'\"]?([^\s\'\";}]+)', rule_body)
-            proto_m = re.search(r'\bprotocol\s+[\'\"]?([^\s\'\";}]+)', rule_body)
-            desc_m = re.search(r'\bdescription\s+[\'\"]?([^\n\'\";}]+)', rule_body)
-            rules[rnum] = {
-                'rule': rnum,
-                'desc': desc_m.group(1).strip().strip('\'\"') if desc_m else '',
-                'trans': trans_m.group(1).strip().strip('\'\"') if trans_m else '',
-                'ports': port_m.group(1).strip().strip('\'\"') if port_m else '',
-                'proto': proto_m.group(1).strip().strip('\'\"') if proto_m else 'tcp',
-                'iface': 'eth0'
-            }
+    nat_blk = extract_named_block(text, 'nat')
+    dest_blk = extract_named_block(nat_blk, 'destination') if nat_blk else extract_named_block(text, 'destination')
+    for rnum, rule_body in iter_braced_rules(dest_blk):
+        trans_blk = extract_named_block(rule_body, 'translation') or ''
+        dest_sub = extract_named_block(rule_body, 'destination') or ''
+        iface_blk = extract_named_block(rule_body, 'inbound-interface') or ''
+
+        trans_m = re.search(r'\baddress\s+[\'\"]?([^\s\'\";}]+)', trans_blk)
+        dest_addr_m = re.search(r'\baddress\s+[\'\"]?([^\s\'\";}]+)', dest_sub)
+        port_m = re.search(r'\bport\s+[\'\"]?([^\s\'\";}]+)', dest_sub)
+        proto_m = re.search(r'\bprotocol\s+[\'\"]?([^\s\'\";}]+)', rule_body)
+        desc_m = re.search(r'\bdescription\s+[\'\"]?([^\n\'\";}]+)', rule_body)
+
+        iface_grp_m = re.search(r'\bgroup\s+[\'\"]?([^\s\'\";}]+)', iface_blk)
+        iface_name_m = re.search(r'\bname\s+[\'\"]?([^\s\'\";}]+)', iface_blk)
+        iface_bare_m = re.search(r'inbound-interface\s+[\'\"]?([^\s\'\";}{]+)', rule_body)
+
+        iface = 'eth0'
+        iface_type = 'name'
+        if iface_grp_m:
+            iface = iface_grp_m.group(1).strip().strip('\'\"')
+            iface_type = 'group'
+        elif iface_name_m:
+            iface = iface_name_m.group(1).strip().strip('\'\"')
+            iface_type = 'name'
+        elif iface_bare_m:
+            iface = iface_bare_m.group(1).strip().strip('\'\"')
+            iface_type = 'bare'
+
+        rules[rnum] = {
+            'rule': rnum,
+            'desc': desc_m.group(1).strip().strip('\'\"') if desc_m else '',
+            'trans': trans_m.group(1).strip().strip('\'\"') if trans_m else '',
+            'dest_addr': dest_addr_m.group(1).strip().strip('\'\"') if dest_addr_m else '',
+            'ports': port_m.group(1).strip().strip('\'\"') if port_m else '',
+            'proto': proto_m.group(1).strip().strip('\'\"') if proto_m else '',
+            'iface': iface,
+            'iface_type': iface_type
+        }
     return rules
 
-parsed = parse_rules(raw_config)
+def parse_snat_rules(text):
+    rules = {}
+    for line in text.splitlines():
+        line = line.strip()
+        m = re.match(r'set nat source rule (\d+)\s+(.+)', line)
+        if m:
+            rnum = int(m.group(1))
+            rest = m.group(2)
+            if rnum not in rules:
+                rules[rnum] = {'rule': rnum, 'desc': '', 'src_addr': '', 'trans': '', 'iface': 'eth1', 'iface_type': 'name'}
+            if rest.startswith('description'):
+                rules[rnum]['desc'] = rest.split(None, 1)[1].strip("'\"")
+            elif rest.startswith('source address'):
+                rules[rnum]['src_addr'] = rest.split(None, 2)[2].strip("'\"")
+            elif rest.startswith('translation address'):
+                rules[rnum]['trans'] = rest.split(None, 2)[2].strip("'\"")
+            elif rest.startswith('outbound-interface name'):
+                rules[rnum]['iface'] = rest.split(None, 2)[2].strip("'\"")
+                rules[rnum]['iface_type'] = 'name'
+            elif rest.startswith('outbound-interface group'):
+                rules[rnum]['iface'] = rest.split(None, 2)[2].strip("'\"")
+                rules[rnum]['iface_type'] = 'group'
+            elif rest.startswith('outbound-interface'):
+                rules[rnum]['iface'] = rest.split(None, 1)[1].strip("'\"")
+                rules[rnum]['iface_type'] = 'bare'
+    if rules:
+        return rules
+
+    nat_blk = extract_named_block(text, 'nat')
+    src_blk = extract_named_block(nat_blk, 'source') if nat_blk else extract_named_block(text, 'source')
+    for rnum, rule_body in iter_braced_rules(src_blk):
+        trans_blk = extract_named_block(rule_body, 'translation') or ''
+        src_sub = extract_named_block(rule_body, 'source') or ''
+        iface_blk = extract_named_block(rule_body, 'outbound-interface') or ''
+
+        trans_m = re.search(r'\baddress\s+[\'\"]?([^\s\'\";}]+)', trans_blk)
+        src_addr_m = re.search(r'\baddress\s+[\'\"]?([^\s\'\";}]+)', src_sub)
+        desc_m = re.search(r'\bdescription\s+[\'\"]?([^\n\'\";}]+)', rule_body)
+
+        iface_grp_m = re.search(r'\bgroup\s+[\'\"]?([^\s\'\";}]+)', iface_blk)
+        iface_name_m = re.search(r'\bname\s+[\'\"]?([^\s\'\";}]+)', iface_blk)
+        iface_bare_m = re.search(r'outbound-interface\s+[\'\"]?([^\s\'\";}{]+)', rule_body)
+
+        iface = 'eth1'
+        iface_type = 'name'
+        if iface_grp_m:
+            iface = iface_grp_m.group(1).strip().strip('\'\"')
+            iface_type = 'group'
+        elif iface_name_m:
+            iface = iface_name_m.group(1).strip().strip('\'\"')
+            iface_type = 'name'
+        elif iface_bare_m:
+            iface = iface_bare_m.group(1).strip().strip('\'\"')
+            iface_type = 'bare'
+
+        rules[rnum] = {
+            'rule': rnum,
+            'desc': desc_m.group(1).strip().strip('\'\"') if desc_m else '',
+            'src_addr': src_addr_m.group(1).strip().strip('\'\"') if src_addr_m else '',
+            'trans': trans_m.group(1).strip().strip('\'\"') if trans_m else '',
+            'iface': iface,
+            'iface_type': iface_type
+        }
+    return rules
+
+parsed_dnat = parse_dnat_rules(raw_config)
+parsed_snat = parse_snat_rules(raw_config)
+
+def emit_dnat_rule_set(rnum, desc, pub_ip, trans_ip, iface, iface_type):
+    # Pure 1:1 Host Destination NAT matching CCDC known-good golden image (no restrictive port/proto filters)
+    print(f"SET_DNAT {rnum} description '{desc}'")
+    print(f"SET_DNAT {rnum} destination address '{pub_ip}'")
+    if iface_type == 'group':
+        print(f"SET_DNAT {rnum} inbound-interface group '{iface}'")
+    elif iface_type == 'bare':
+        print(f"SET_DNAT {rnum} inbound-interface '{iface}'")
+    else:
+        print(f"SET_DNAT {rnum} inbound-interface name '{iface}'")
+    print(f"SET_DNAT {rnum} translation address '{trans_ip}'")
+
+def emit_snat_rule_set(rnum, desc, priv_ip, pub_ip, iface='eth1', iface_type='name'):
+    print(f"SET_SNAT {rnum} description '{desc}'")
+    if iface_type == 'group':
+        print(f"SET_SNAT {rnum} outbound-interface group '{iface}'")
+    elif iface_type == 'bare':
+        print(f"SET_SNAT {rnum} outbound-interface '{iface}'")
+    else:
+        print(f"SET_SNAT {rnum} outbound-interface name '{iface}'")
+    print(f"SET_SNAT {rnum} source address '{priv_ip}'")
+    print(f"SET_SNAT {rnum} translation address '{pub_ip}'")
+
+# Explicitly wipe legacy script artifact rules 11, 12, 13, 14
+for legacy_r in (11, 12, 13, 14):
+    if legacy_r in parsed_dnat:
+        print(f"LOG Wiping legacy script artifact destination NAT rule {legacy_r}...")
+        print(f"DELETE_DNAT {legacy_r}")
+
+default_dnat_iface = 'OUTSIDE' if has_outside_group else 'eth0'
+default_dnat_iface_type = 'group' if has_outside_group else 'name'
 
 for tgt in targets:
     s_rule = tgt['rule']
     s_ip = tgt['ip']
+    s_priv = tgt['priv']
+    s_pub = tgt['pub_ip']
     s_ports = tgt['ports']
-    s_proto = tgt['proto']
     s_name = tgt['name']
+    s_desc = tgt['desc']
     expected_port_set = set(p.strip() for p in s_ports.split(',') if p.strip())
 
+    # ── Reconcile Destination NAT ──
     matching = []
-    for rnum, r in parsed.items():
+    for rnum, r in parsed_dnat.items():
+        if rnum in (11, 12, 13, 14):
+            continue
         trans = r.get('trans', '')
+        dest_a = r.get('dest_addr', '')
         if trans == s_ip or (trans.endswith('.' + tgt['suffix']) and (trans.startswith('172.20.') or trans.startswith('172.25.'))):
+            matching.append(r)
+        elif dest_a == s_pub or (dest_a.endswith('.' + tgt['suffix']) and dest_a.startswith('172.25.')):
             matching.append(r)
 
     if force_baseline:
         for r in matching:
-            print(f"DELETE {r['rule']}")
-        print(f"DELETE {s_rule}")
-        print(f"SET {s_rule} description '{s_name}'")
-        print(f"SET {s_rule} inbound-interface name 'eth0'")
-        print(f"SET {s_rule} protocol '{s_proto}'")
-        print(f"SET {s_rule} destination port '{s_ports}'")
-        print(f"SET {s_rule} translation address '{s_ip}'")
-        continue
-
-    if len(matching) == 0:
-        print(f"LOG Deploying missing destination NAT rule {s_rule} for {s_name} ({s_ip}:{s_ports})")
-        print(f"DELETE {s_rule}")
-        print(f"SET {s_rule} description '{s_name}'")
-        print(f"SET {s_rule} inbound-interface name 'eth0'")
-        print(f"SET {s_rule} protocol '{s_proto}'")
-        print(f"SET {s_rule} destination port '{s_ports}'")
-        print(f"SET {s_rule} translation address '{s_ip}'")
+            print(f"DELETE_DNAT {r['rule']}")
+        print(f"DELETE_DNAT {s_rule}")
+        emit_dnat_rule_set(s_rule, s_desc, s_pub, s_ip, default_dnat_iface, default_dnat_iface_type)
+    elif len(matching) == 0:
+        print(f"LOG Deploying missing destination NAT rule {s_rule} for {s_name} ({s_pub} -> {s_ip})")
+        print(f"DELETE_DNAT {s_rule}")
+        emit_dnat_rule_set(s_rule, s_desc, s_pub, s_ip, default_dnat_iface, default_dnat_iface_type)
     elif len(matching) == 1:
         r = matching[0]
-        r_ports_set = set(p.strip() for p in r.get('ports', '').split(',') if p.strip())
-        ports_match = expected_port_set.issubset(r_ports_set)
-        if ports_match and (r.get('trans') == s_ip or not r.get('trans')):
-            print(f"LOG Preserving valid destination NAT rule {r['rule']} for {s_name} ({s_ip}:{s_ports})")
+        r_ports = r.get('ports', '')
+        if not r_ports or r_ports == 'any':
+            ports_match = True
         else:
-            if r['rule'] == s_rule:
-                print(f"LOG Correcting drifted destination NAT rule {s_rule} for {s_name} ({s_ip}:{s_ports})")
-                print(f"SET {s_rule} description '{s_name}'")
-                print(f"SET {s_rule} inbound-interface name 'eth0'")
-                print(f"SET {s_rule} protocol '{s_proto}'")
-                print(f"SET {s_rule} destination port '{s_ports}'")
-                print(f"SET {s_rule} translation address '{s_ip}'")
+            r_ports_set = set(p.strip() for p in r_ports.split(',') if p.strip())
+            ports_match = expected_port_set.issubset(r_ports_set)
+
+        dest_match = (r.get('dest_addr') == s_pub)
+        trans_match = (r.get('trans') == s_ip or not r.get('trans'))
+
+        if r['rule'] == s_rule and ports_match and dest_match and trans_match:
+            print(f"LOG Preserving valid destination NAT rule {r['rule']} for {s_name} ({s_pub} -> {s_ip})")
+        elif r['rule'] == s_rule:
+            print(f"LOG Correcting drifted destination NAT rule {s_rule} for {s_name} ({s_pub} -> {s_ip})")
+            if not ports_match:
+                print(f"DELETE_DNAT {s_rule}")
+                emit_dnat_rule_set(s_rule, r.get('desc') or s_desc, s_pub, s_ip, r.get('iface', default_dnat_iface), r.get('iface_type', default_dnat_iface_type))
             else:
-                print(f"LOG Replacing drifted non-standard rule {r['rule']} with standard rule {s_rule} for {s_name}")
-                print(f"DELETE {r['rule']}")
-                print(f"DELETE {s_rule}")
-                print(f"SET {s_rule} description '{s_name}'")
-                print(f"SET {s_rule} inbound-interface name 'eth0'")
-                print(f"SET {s_rule} protocol '{s_proto}'")
-                print(f"SET {s_rule} destination port '{s_ports}'")
-                print(f"SET {s_rule} translation address '{s_ip}'")
+                if not dest_match:
+                    print(f"SET_DNAT {s_rule} destination address '{s_pub}'")
+                if not trans_match:
+                    print(f"SET_DNAT {s_rule} translation address '{s_ip}'")
+        else:
+            print(f"LOG Replacing drifted non-standard rule {r['rule']} with standard rule {s_rule} for {s_name} ({s_pub} -> {s_ip})")
+            print(f"DELETE_DNAT {r['rule']}")
+            print(f"DELETE_DNAT {s_rule}")
+            emit_dnat_rule_set(s_rule, s_desc, s_pub, s_ip, r.get('iface', default_dnat_iface), r.get('iface_type', default_dnat_iface_type))
     else:
         rnums = [r['rule'] for r in matching]
         print(f"LOG Wiping conflicting duplicate rules {rnums} for {s_name}")
-        has_std = any(r['rule'] == s_rule for r in matching)
         for r in matching:
-            if r['rule'] != s_rule or not has_std:
-                print(f"DELETE {r['rule']}")
-        print(f"SET {s_rule} description '{s_name}'")
-        print(f"SET {s_rule} inbound-interface name 'eth0'")
-        print(f"SET {s_rule} protocol '{s_proto}'")
-        print(f"SET {s_rule} destination port '{s_ports}'")
-        print(f"SET {s_rule} translation address '{s_ip}'")
+            if r['rule'] != s_rule:
+                print(f"DELETE_DNAT {r['rule']}")
+        std_r = next((r for r in matching if r['rule'] == s_rule), None)
+        if std_r:
+            r_ports = std_r.get('ports', '')
+            if not r_ports or r_ports == 'any':
+                ports_match = True
+            else:
+                r_ports_set = set(p.strip() for p in r_ports.split(',') if p.strip())
+                ports_match = expected_port_set.issubset(r_ports_set)
+            if not ports_match:
+                print(f"DELETE_DNAT {s_rule}")
+            emit_dnat_rule_set(s_rule, std_r.get('desc') or s_desc, s_pub, s_ip, std_r.get('iface', default_dnat_iface), std_r.get('iface_type', default_dnat_iface_type))
+        else:
+            emit_dnat_rule_set(s_rule, s_desc, s_pub, s_ip, default_dnat_iface, default_dnat_iface_type)
+
+    # ── Reconcile 1:1 Source NAT (Rules 10, 20, 30, 40, 50) ──
+    snat_match = []
+    for rnum, r in parsed_snat.items():
+        if rnum == 100:
+            continue
+        sa = r.get('src_addr', '')
+        ta = r.get('trans', '')
+        if sa == s_priv or (sa.endswith('.' + tgt['suffix']) and sa.startswith('172.20.')) or ta == s_pub:
+            snat_match.append(r)
+
+    if force_baseline:
+        for r in snat_match:
+            print(f"DELETE_SNAT {r['rule']}")
+        print(f"DELETE_SNAT {s_rule}")
+        emit_snat_rule_set(s_rule, s_desc, s_priv, s_pub)
+    elif len(snat_match) == 0:
+        print(f"LOG Deploying missing source NAT rule {s_rule} for {s_name} ({s_priv} -> {s_pub})")
+        print(f"DELETE_SNAT {s_rule}")
+        emit_snat_rule_set(s_rule, s_desc, s_priv, s_pub)
+    elif len(snat_match) == 1:
+        r = snat_match[0]
+        if r['rule'] == s_rule and r.get('src_addr') == s_priv and r.get('trans') == s_pub:
+            print(f"LOG Preserving valid source NAT rule {r['rule']} for {s_name} ({s_priv} -> {s_pub})")
+        elif r['rule'] == s_rule:
+            print(f"LOG Correcting drifted source NAT rule {s_rule} for {s_name} ({s_priv} -> {s_pub})")
+            print(f"SET_SNAT {s_rule} source address '{s_priv}'")
+            print(f"SET_SNAT {s_rule} translation address '{s_pub}'")
+        else:
+            print(f"LOG Replacing non-standard source NAT rule {r['rule']} with rule {s_rule} for {s_name}")
+            print(f"DELETE_SNAT {r['rule']}")
+            print(f"DELETE_SNAT {s_rule}")
+            emit_snat_rule_set(s_rule, s_desc, s_priv, s_pub, r.get('iface', 'eth1'), r.get('iface_type', 'name'))
+    else:
+        for r in snat_match:
+            if r['rule'] != s_rule:
+                print(f"DELETE_SNAT {r['rule']}")
+        std_s = next((r for r in snat_match if r['rule'] == s_rule), None)
+        if std_s:
+            emit_snat_rule_set(s_rule, std_s.get('desc') or s_desc, s_priv, s_pub, std_s.get('iface', 'eth1'), std_s.get('iface_type', 'name'))
+        else:
+            emit_snat_rule_set(s_rule, s_desc, s_priv, s_pub)
 
 print("RECONCILE_OK")
 PY_RECONCILE_EOF
-        PYTHON_CMDS=$(DEFENDER_RAW_CONFIG="$RAW_CONFIG" python3 "$PY_TMP" "$DNAT_TARGET" "$FORCE_BASELINE" "$ECOM_TARGET" "$EMAIL_TARGET" "$SPLUNK_TARGET" "$AD_TARGET" "$MSSQL_TARGET" 2>/dev/null)
+        PYTHON_CMDS=$(DEFENDER_RAW_CONFIG="$RAW_CONFIG" python3 "$PY_TMP" "$DNAT_TARGET" "$FORCE_BASELINE" "$ECOM_TARGET" "$EMAIL_TARGET" "$SPLUNK_TARGET" "$AD_TARGET" "$MSSQL_TARGET" "$ECOM_PUB" "$EMAIL_PUB" "$SPLUNK_PUB" "$AD_PUB" "$MSSQL_PUB" 2>/dev/null)
         rm -f "$PY_TMP"
         if echo "$PYTHON_CMDS" | grep -q "RECONCILE_OK"; then
             RECONCILE_SUCCESS=true
             while IFS= read -r line; do
                 if [[ "$line" =~ ^LOG[[:space:]]+(.*) ]]; then
                     log_info "${BASH_REMATCH[1]}"
-                elif [[ "$line" =~ ^DELETE[[:space:]]+([0-9]+) ]]; then
+                elif [[ "$line" =~ ^DELETE_DNAT[[:space:]]+([0-9]+) ]]; then
                     local del_rule="${BASH_REMATCH[1]}"
                     log_info "Deleting destination NAT rule ${del_rule}..."
                     delete nat destination rule "$del_rule" >/dev/null 2>&1 || true
-                elif [[ "$line" =~ ^SET[[:space:]]+(.*) ]]; then
+                elif [[ "$line" =~ ^DELETE_SNAT[[:space:]]+([0-9]+) ]]; then
+                    local del_srule="${BASH_REMATCH[1]}"
+                    log_info "Deleting source NAT rule ${del_srule}..."
+                    delete nat source rule "$del_srule" >/dev/null 2>&1 || true
+                elif [[ "$line" =~ ^SET_DNAT[[:space:]]+(.*) ]]; then
                     local set_args="${BASH_REMATCH[1]}"
                     # shellcheck disable=SC2086
                     set nat destination rule $set_args
+                elif [[ "$line" =~ ^SET_SNAT[[:space:]]+(.*) ]]; then
+                    local set_sargs="${BASH_REMATCH[1]}"
+                    # shellcheck disable=SC2086
+                    set nat source rule $set_sargs
                 fi
             done <<< "$PYTHON_CMDS"
         fi
@@ -1002,60 +1319,93 @@ PY_RECONCILE_EOF
     # Shell fallback if Python3 unavailable or failed
     if [ "$RECONCILE_SUCCESS" != true ]; then
         log_warn "Python3 reconciliation unavailable; applying shell-based IP-centric cleanup..."
-        for r in 10 11 12 13 14; do
+        for r in 10 11 12 13 14 20 30 40 50; do
             delete nat destination rule "$r" >/dev/null 2>&1 || true
+        done
+        for r in 10 20 30 40 50; do
+            delete nat source rule "$r" >/dev/null 2>&1 || true
         done
         for ip_suffix in "10" "15" "20" "100" "120"; do
             local CONFLICT_RULES=""
             if [ -x /opt/vyatta/bin/vyatta-op-cmd-wrapper ]; then
-                CONFLICT_RULES=$(/opt/vyatta/bin/vyatta-op-cmd-wrapper show configuration commands 2>/dev/null | grep "^set nat destination rule " | grep "translation address" | grep -E "(\.|\')${ip_suffix}('|$)" | awk '{print $5}' | grep -E '^[0-9]+$' | sort -u)
+                CONFLICT_RULES=$(/opt/vyatta/bin/vyatta-op-cmd-wrapper show configuration commands 2>/dev/null | grep "^set nat destination rule " | grep -E "translation address|destination address" | grep -E "(\.|\')${ip_suffix}('|$)" | awk '{print $5}' | grep -E '^[0-9]+$' | sort -u)
             elif [ -n "$RAW_CONFIG" ]; then
-                CONFLICT_RULES=$(echo "$RAW_CONFIG" | grep "^set nat destination rule " 2>/dev/null | grep "translation address" | grep -E "(\.|\')${ip_suffix}('|$)" | awk '{print $5}' | grep -E '^[0-9]+$' | sort -u)
+                CONFLICT_RULES=$(echo "$RAW_CONFIG" | grep "^set nat destination rule " 2>/dev/null | grep -E "translation address|destination address" | grep -E "(\.|\')${ip_suffix}('|$)" | awk '{print $5}' | grep -E '^[0-9]+$' | sort -u)
             fi
             for cr in $CONFLICT_RULES; do
-                if [ -n "$cr" ] && [ "$cr" -lt 10 -o "$cr" -gt 14 ]; then
-                    log_info "Wiping conflicting duplicate rule $cr (translating to target .${ip_suffix})..."
+                if [ -n "$cr" ] && [ "$cr" != "10" -a "$cr" != "20" -a "$cr" != "30" -a "$cr" != "40" -a "$cr" != "50" ]; then
+                    log_info "Wiping conflicting duplicate rule $cr (target .${ip_suffix})..."
                     delete nat destination rule "$cr" >/dev/null 2>&1 || true
                 fi
             done
         done
 
-        # Deploy standard rules 10-14
-        set nat destination rule 10 description 'Ecom'
-        set nat destination rule 10 inbound-interface name 'eth0'
-        set nat destination rule 10 protocol 'tcp'
-        set nat destination rule 10 destination port '80,443'
+        local FB_IFACE_CMD="inbound-interface name 'eth0'"
+        if echo "$RAW_CONFIG" | grep -qE "interface-group OUTSIDE|group OUTSIDE"; then
+            FB_IFACE_CMD="inbound-interface group 'OUTSIDE'"
+        fi
+
+        # Deploy canonical pure 1:1 DNAT rules 10, 20, 30, 40, 50 matching known-good baseline
+        set nat destination rule 10 description 'host .10'
+        set nat destination rule 10 destination address "$ECOM_PUB"
+        # shellcheck disable=SC2086
+        set nat destination rule 10 $FB_IFACE_CMD
         set nat destination rule 10 translation address "$ECOM_TARGET"
 
-        set nat destination rule 11 description 'Email'
-        set nat destination rule 11 inbound-interface name 'eth0'
-        set nat destination rule 11 protocol 'tcp'
-        set nat destination rule 11 destination port '25,143,587,993'
-        set nat destination rule 11 translation address "$EMAIL_TARGET"
+        set nat destination rule 20 description 'host .15'
+        set nat destination rule 20 destination address "$EMAIL_PUB"
+        # shellcheck disable=SC2086
+        set nat destination rule 20 $FB_IFACE_CMD
+        set nat destination rule 20 translation address "$EMAIL_TARGET"
 
-        set nat destination rule 12 description 'Splunk'
-        set nat destination rule 12 inbound-interface name 'eth0'
-        set nat destination rule 12 protocol 'tcp'
-        set nat destination rule 12 destination port '8000,8089,9997'
-        set nat destination rule 12 translation address "$SPLUNK_TARGET"
+        set nat destination rule 30 description 'host .20'
+        set nat destination rule 30 destination address "$SPLUNK_PUB"
+        # shellcheck disable=SC2086
+        set nat destination rule 30 $FB_IFACE_CMD
+        set nat destination rule 30 translation address "$SPLUNK_TARGET"
 
-        set nat destination rule 13 description 'AD'
-        set nat destination rule 13 inbound-interface name 'eth0'
-        set nat destination rule 13 protocol 'tcp_udp'
-        set nat destination rule 13 destination port '53,88,389,636,5985'
-        set nat destination rule 13 translation address "$AD_TARGET"
+        set nat destination rule 40 description 'host .100'
+        set nat destination rule 40 destination address "$AD_PUB"
+        # shellcheck disable=SC2086
+        set nat destination rule 40 $FB_IFACE_CMD
+        set nat destination rule 40 translation address "$AD_TARGET"
 
-        set nat destination rule 14 description 'MSSQL'
-        set nat destination rule 14 inbound-interface name 'eth0'
-        set nat destination rule 14 protocol 'tcp'
-        set nat destination rule 14 destination port '445,1433,3389'
-        set nat destination rule 14 translation address "$MSSQL_TARGET"
+        set nat destination rule 50 description 'host .120'
+        set nat destination rule 50 destination address "$MSSQL_PUB"
+        # shellcheck disable=SC2086
+        set nat destination rule 50 $FB_IFACE_CMD
+        set nat destination rule 50 translation address "$MSSQL_TARGET"
+
+        # Deploy canonical 1:1 SNAT rules 10, 20, 30, 40, 50 matching known-good baseline
+        set nat source rule 10 description 'host .10'
+        set nat source rule 10 outbound-interface name 'eth1'
+        set nat source rule 10 source address '172.20.240.10'
+        set nat source rule 10 translation address "$ECOM_PUB"
+
+        set nat source rule 20 description 'host .15'
+        set nat source rule 20 outbound-interface name 'eth1'
+        set nat source rule 20 source address '172.20.240.15'
+        set nat source rule 20 translation address "$EMAIL_PUB"
+
+        set nat source rule 30 description 'host .20'
+        set nat source rule 30 outbound-interface name 'eth1'
+        set nat source rule 30 source address '172.20.240.20'
+        set nat source rule 30 translation address "$SPLUNK_PUB"
+
+        set nat source rule 40 description 'host .100'
+        set nat source rule 40 outbound-interface name 'eth1'
+        set nat source rule 40 source address '172.20.240.100'
+        set nat source rule 40 translation address "$AD_PUB"
+
+        set nat source rule 50 description 'host .120'
+        set nat source rule 50 outbound-interface name 'eth1'
+        set nat source rule 50 source address '172.20.240.120'
+        set nat source rule 50 translation address "$MSSQL_PUB"
     fi
 
     # Outbound PAT (Masquerade rule 100)
     if [ "$ENABLE_OUTBOUND_PAT" = true ]; then
         log_warn "Outbound PAT is ENABLED! Workstations and LAN hosts will masquerade to 172.31.${OCTET}.2."
-        set nat source rule 100 description 'workstation-outbound-pat'
         set nat source rule 100 outbound-interface name 'eth0'
         set nat source rule 100 source address '172.16.0.0/12'
         set nat source rule 100 translation address 'masquerade'
@@ -1070,7 +1420,7 @@ PY_RECONCILE_EOF
 apply_routing_baseline() {
     log_info "Configuring Standard Transit Routes Grounded in Topology..."
     local WAN_GW="${CORE_GATEWAY_IP:-172.31.${OCTET}.1}"
-    local SERVERS_NEXTHOP="172.16.0.254"
+    local SERVERS_NEXTHOP="172.16.0.1"
 
     delete protocols static route 0.0.0.0/0 >/dev/null 2>&1 || true
     delete protocols static route 172.20.240.0/24 >/dev/null 2>&1 || true
@@ -1088,6 +1438,31 @@ apply_detected_configuration() {
     fi
 
     log_info "Parsing detected configuration state from: $file"
+
+    if [ -z "$OCTET" ]; then
+        local detected_wan
+        detected_wan=$(detect_existing_wan_octet)
+        if [ -n "$detected_wan" ]; then
+            OCTET="$detected_wan"
+        elif [ -n "$TEAM" ]; then
+            derive_team_subnets "$TEAM"
+        else
+            OCTET=40
+        fi
+    fi
+
+    if [ -z "$PUBLIC_OCTET" ]; then
+        local detected_pub
+        detected_pub=$(detect_existing_octet)
+        if [ -n "$detected_pub" ]; then
+            PUBLIC_OCTET="$detected_pub"
+            log_info "Auto-detected public octet: 172.25.${PUBLIC_OCTET}.0/24"
+        elif [ -n "$TEAM" ] && [ "$TEAM" -gt 0 ]; then
+            PUBLIC_OCTET="$OCTET"
+        else
+            PUBLIC_OCTET=20
+        fi
+    fi
 
     local ECOM_TARGET="" EMAIL_TARGET="" SPLUNK_TARGET="" AD_TARGET="" MSSQL_TARGET=""
     local OUTBOUND_PAT="" DEF_GW="" SRV_NH=""
@@ -1115,20 +1490,20 @@ try:
     for r in nat_rules:
         if isinstance(r, dict):
             r_num = r.get("rule")
-            if r_num and r_num not in (10, 11, 12, 13, 14):
+            if r_num and r_num not in (10, 20, 30, 40, 50):
                 print(f"EXTRA_DEL_{r_num}=1")
             trans = r.get("translation", "")
             if trans and trans != "unknown":
                 if trans.endswith(".10"):
                     print(f"RULE_10={trans}")
                 elif trans.endswith(".15"):
-                    print(f"RULE_11={trans}")
+                    print(f"RULE_20={trans}")
                 elif trans.endswith(".20"):
-                    print(f"RULE_12={trans}")
+                    print(f"RULE_30={trans}")
                 elif trans.endswith(".100"):
-                    print(f"RULE_13={trans}")
+                    print(f"RULE_40={trans}")
                 elif trans.endswith(".120"):
-                    print(f"RULE_14={trans}")
+                    print(f"RULE_50={trans}")
 
     print(f"PAT={'true' if pat else 'false'}")
 
@@ -1148,10 +1523,10 @@ EOF
             while IFS='=' read -r key val; do
                 case "$key" in
                     RULE_10) ECOM_TARGET="$val" ;;
-                    RULE_11) EMAIL_TARGET="$val" ;;
-                    RULE_12) SPLUNK_TARGET="$val" ;;
-                    RULE_13) AD_TARGET="$val" ;;
-                    RULE_14) MSSQL_TARGET="$val" ;;
+                    RULE_20) EMAIL_TARGET="$val" ;;
+                    RULE_30) SPLUNK_TARGET="$val" ;;
+                    RULE_40) AD_TARGET="$val" ;;
+                    RULE_50) MSSQL_TARGET="$val" ;;
                     EXTRA_DEL_*)
                         del_r="${key#EXTRA_DEL_}"
                         EXTRA_DELETE_RULES="$EXTRA_DELETE_RULES $del_r"
@@ -1171,11 +1546,11 @@ EOF
             return 1
         fi
 
-        ECOM_TARGET=$(grep -E '"rule"[[:space:]]*:[[:space:]]*10[[:space:]]*,' "$file" | sed -n 's/.*"translation"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
-        EMAIL_TARGET=$(grep -E '"rule"[[:space:]]*:[[:space:]]*11[[:space:]]*,' "$file" | sed -n 's/.*"translation"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
-        SPLUNK_TARGET=$(grep -E '"rule"[[:space:]]*:[[:space:]]*12[[:space:]]*,' "$file" | sed -n 's/.*"translation"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
-        AD_TARGET=$(grep -E '"rule"[[:space:]]*:[[:space:]]*13[[:space:]]*,' "$file" | sed -n 's/.*"translation"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
-        MSSQL_TARGET=$(grep -E '"rule"[[:space:]]*:[[:space:]]*14[[:space:]]*,' "$file" | sed -n 's/.*"translation"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+        ECOM_TARGET=$(grep -E '"rule"[[:space:]]*:[[:space:]]*(10)[[:space:]]*,' "$file" | sed -n 's/.*"translation"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+        EMAIL_TARGET=$(grep -E '"rule"[[:space:]]*:[[:space:]]*(20|11)[[:space:]]*,' "$file" | sed -n 's/.*"translation"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+        SPLUNK_TARGET=$(grep -E '"rule"[[:space:]]*:[[:space:]]*(30|12)[[:space:]]*,' "$file" | sed -n 's/.*"translation"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+        AD_TARGET=$(grep -E '"rule"[[:space:]]*:[[:space:]]*(40|13)[[:space:]]*,' "$file" | sed -n 's/.*"translation"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+        MSSQL_TARGET=$(grep -E '"rule"[[:space:]]*:[[:space:]]*(50|14)[[:space:]]*,' "$file" | sed -n 's/.*"translation"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
 
         if grep -qE '"outbound_pat"[[:space:]]*:[[:space:]]*true' "$file"; then
             OUTBOUND_PAT="true"
@@ -1192,14 +1567,16 @@ EOF
         fi
     fi
 
-    # Clean-slate deletion of destination NAT rules 10 through 14 and conflicting rules
-    for r in 10 11 12 13 14; do
+    # Clean-slate deletion of destination NAT rules 10 through 14, 20, 30, 40, 50 and conflicting rules
+    for r in 10 11 12 13 14 20 30 40 50; do
         delete nat destination rule "$r" >/dev/null 2>&1 || true
     done
     for del_r in $EXTRA_DELETE_RULES; do
         delete nat destination rule "$del_r" >/dev/null 2>&1 || true
     done
-    delete nat source rule 100 >/dev/null 2>&1 || true
+    for sr in 10 20 30 40 50 100; do
+        delete nat source rule "$sr" >/dev/null 2>&1 || true
+    done
 
     # Extract clean IPv4 addresses
     local CLEAN_DEF_GW
@@ -1211,7 +1588,7 @@ EOF
     local CLEAN_SRV_NH
     CLEAN_SRV_NH=$(echo "$SRV_NH" | grep -oE "([0-9]{1,3}\.){3}[0-9]{1,3}" | head -n1)
     if [ -z "$CLEAN_SRV_NH" ]; then
-        CLEAN_SRV_NH="172.16.0.254"
+        CLEAN_SRV_NH="172.16.0.1"
     fi
 
     local FINAL_ECOM FINAL_EMAIL FINAL_SPLUNK FINAL_AD FINAL_MSSQL
@@ -1245,47 +1622,82 @@ EOF
         FINAL_MSSQL="172.20.240.120"
     fi
 
-    log_info "Configuring Scored DNAT Rules from detected state:"
-    log_info "  Rule 10 (Ecom)   -> $FINAL_ECOM"
-    log_info "  Rule 11 (Email)  -> $FINAL_EMAIL"
-    log_info "  Rule 12 (Splunk) -> $FINAL_SPLUNK"
-    log_info "  Rule 13 (AD)     -> $FINAL_AD"
-    log_info "  Rule 14 (MSSQL)  -> $FINAL_MSSQL"
+    local FINAL_ECOM_PUB="172.25.${PUBLIC_OCTET}.10"
+    local FINAL_EMAIL_PUB="172.25.${PUBLIC_OCTET}.15"
+    local FINAL_SPLUNK_PUB="172.25.${PUBLIC_OCTET}.20"
+    local FINAL_AD_PUB="172.25.${PUBLIC_OCTET}.100"
+    local FINAL_MSSQL_PUB="172.25.${PUBLIC_OCTET}.120"
 
-    set nat destination rule 10 description 'Ecom'
-    set nat destination rule 10 inbound-interface name 'eth0'
-    set nat destination rule 10 protocol 'tcp'
-    set nat destination rule 10 destination port '80,443'
+    local IFACE_CMD="inbound-interface name 'eth0'"
+    if [ -f /config/config.boot ] && grep -qE "interface-group OUTSIDE|group OUTSIDE" /config/config.boot 2>/dev/null; then
+        IFACE_CMD="inbound-interface group 'OUTSIDE'"
+    fi
+
+    log_info "Configuring Scored 1:1 DNAT & SNAT Rules from detected state:"
+    log_info "  Rule 10 (host .10)  : $FINAL_ECOM_PUB <-> $FINAL_ECOM"
+    log_info "  Rule 20 (host .15)  : $FINAL_EMAIL_PUB <-> $FINAL_EMAIL"
+    log_info "  Rule 30 (host .20)  : $FINAL_SPLUNK_PUB <-> $FINAL_SPLUNK"
+    log_info "  Rule 40 (host .100) : $FINAL_AD_PUB <-> $FINAL_AD"
+    log_info "  Rule 50 (host .120) : $FINAL_MSSQL_PUB <-> $FINAL_MSSQL"
+
+    set nat destination rule 10 description 'host .10'
+    set nat destination rule 10 destination address "$FINAL_ECOM_PUB"
+    # shellcheck disable=SC2086
+    set nat destination rule 10 $IFACE_CMD
     set nat destination rule 10 translation address "$FINAL_ECOM"
 
-    set nat destination rule 11 description 'Email'
-    set nat destination rule 11 inbound-interface name 'eth0'
-    set nat destination rule 11 protocol 'tcp'
-    set nat destination rule 11 destination port '25,143,587,993'
-    set nat destination rule 11 translation address "$FINAL_EMAIL"
+    set nat destination rule 20 description 'host .15'
+    set nat destination rule 20 destination address "$FINAL_EMAIL_PUB"
+    # shellcheck disable=SC2086
+    set nat destination rule 20 $IFACE_CMD
+    set nat destination rule 20 translation address "$FINAL_EMAIL"
 
-    set nat destination rule 12 description 'Splunk'
-    set nat destination rule 12 inbound-interface name 'eth0'
-    set nat destination rule 12 protocol 'tcp'
-    set nat destination rule 12 destination port '8000,8089,9997'
-    set nat destination rule 12 translation address "$FINAL_SPLUNK"
+    set nat destination rule 30 description 'host .20'
+    set nat destination rule 30 destination address "$FINAL_SPLUNK_PUB"
+    # shellcheck disable=SC2086
+    set nat destination rule 30 $IFACE_CMD
+    set nat destination rule 30 translation address "$FINAL_SPLUNK"
 
-    set nat destination rule 13 description 'AD'
-    set nat destination rule 13 inbound-interface name 'eth0'
-    set nat destination rule 13 protocol 'tcp_udp'
-    set nat destination rule 13 destination port '53,88,389,636,5985'
-    set nat destination rule 13 translation address "$FINAL_AD"
+    set nat destination rule 40 description 'host .100'
+    set nat destination rule 40 destination address "$FINAL_AD_PUB"
+    # shellcheck disable=SC2086
+    set nat destination rule 40 $IFACE_CMD
+    set nat destination rule 40 translation address "$FINAL_AD"
 
-    set nat destination rule 14 description 'MSSQL'
-    set nat destination rule 14 inbound-interface name 'eth0'
-    set nat destination rule 14 protocol 'tcp'
-    set nat destination rule 14 destination port '445,1433,3389'
-    set nat destination rule 14 translation address "$FINAL_MSSQL"
+    set nat destination rule 50 description 'host .120'
+    set nat destination rule 50 destination address "$FINAL_MSSQL_PUB"
+    # shellcheck disable=SC2086
+    set nat destination rule 50 $IFACE_CMD
+    set nat destination rule 50 translation address "$FINAL_MSSQL"
+
+    set nat source rule 10 description 'host .10'
+    set nat source rule 10 outbound-interface name 'eth1'
+    set nat source rule 10 source address "$FINAL_ECOM"
+    set nat source rule 10 translation address "$FINAL_ECOM_PUB"
+
+    set nat source rule 20 description 'host .15'
+    set nat source rule 20 outbound-interface name 'eth1'
+    set nat source rule 20 source address "$FINAL_EMAIL"
+    set nat source rule 20 translation address "$FINAL_EMAIL_PUB"
+
+    set nat source rule 30 description 'host .20'
+    set nat source rule 30 outbound-interface name 'eth1'
+    set nat source rule 30 source address "$FINAL_SPLUNK"
+    set nat source rule 30 translation address "$FINAL_SPLUNK_PUB"
+
+    set nat source rule 40 description 'host .100'
+    set nat source rule 40 outbound-interface name 'eth1'
+    set nat source rule 40 source address "$FINAL_AD"
+    set nat source rule 40 translation address "$FINAL_AD_PUB"
+
+    set nat source rule 50 description 'host .120'
+    set nat source rule 50 outbound-interface name 'eth1'
+    set nat source rule 50 source address "$FINAL_MSSQL"
+    set nat source rule 50 translation address "$FINAL_MSSQL_PUB"
 
     # Outbound PAT
     if [ "$OUTBOUND_PAT" == "true" ] || [ "$ENABLE_OUTBOUND_PAT" = true ]; then
         log_warn "Outbound PAT is ENABLED from detected state (Rule 100 masquerade)."
-        set nat source rule 100 description 'workstation-outbound-pat'
         set nat source rule 100 outbound-interface name 'eth0'
         set nat source rule 100 source address '172.16.0.0/12'
         set nat source rule 100 translation address 'masquerade'
@@ -1309,11 +1721,11 @@ EOF
 }
 
 # ==============================================================================
-# MODE: RESTORE NAT BASELINE (RULES 10-14 & PAT)
+# MODE: RESTORE NAT BASELINE (RULES 10, 20, 30, 40, 50 & PAT)
 # ==============================================================================
 if [ "$MODE" == "restore-nat" ]; then
     echo "======================================================================"
-    echo "          VyOS RESTORE NAT BASELINE (RULES 10-14 & PAT)"
+    echo "          VyOS RESTORE NAT BASELINE (RULES 10, 20, 30, 40, 50 & PAT)"
     echo "======================================================================"
 
     if [ "$DRY_RUN" = true ]; then
@@ -1965,7 +2377,7 @@ if [ "$MODE" == "harden" ]; then
     set firewall ipv4 forward filter rule 10 state related
 
     # Scored 1:1 DNAT and Outbound PAT
-    log_info "Step 7: Applying Scored 1:1 DNAT Rules 10-14 & Outbound PAT..."
+    log_info "Step 7: Applying Scored 1:1 DNAT Rules 10, 20, 30, 40, 50 & Outbound PAT..."
     apply_nat_configuration
 
     log_info "Step 7b: Applying Standard Transit Routes Grounded in Topology..."

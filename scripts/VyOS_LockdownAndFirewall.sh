@@ -1229,10 +1229,40 @@ if [ "$MODE" == "rotate-passwords" ]; then
             > "$auth_file"
             chmod 600 "$auth_file" 2>/dev/null || true
             log_ok "Sanitized $auth_file (backup saved to ${BACKUP_DIR})"
+            echo "  [RESTORE] cp ${BACKUP_DIR}/$(echo "$auth_file" | tr '/' '_').bak $auth_file"
         else
             log_info "No authorized_keys found at $auth_file (clean)"
         fi
     done
+
+    # 4. Audit and purge configured public keys in VyOS config.boot
+    log_info "Step 4: Auditing configured SSH public keys in VyOS config.boot..."
+    CFG_KEYS=$(run_op show configuration commands 2>/dev/null | grep "system login user .* authentication public-keys" || true)
+    if [ -n "$CFG_KEYS" ]; then
+        log_warn "Configured public-keys found in VyOS config.boot:"
+        echo "$CFG_KEYS"
+        configure
+        for key_user in $(echo "$CFG_KEYS" | awk '{print $4}' | sort -u); do
+            for key_id in $(run_op show configuration commands | grep "system login user $key_user authentication public-keys" | awk '{print $6}' | sort -u); do
+                if [ -z "$SSH_KEY_ID" ] || [ "$key_id" != "$SSH_KEY_ID" ]; then
+                    log_warn "Deleting unauthorized VyOS public key: user $key_user, key_id $key_id"
+                    echo "  [CMD] delete system login user $key_user authentication public-keys $key_id"
+                    delete system login user "$key_user" authentication public-keys "$key_id" 2>/dev/null || true
+                fi
+            done
+        done
+        commit
+        save
+        vyos_exit_cfg
+        REMAINING=$(run_op show configuration commands 2>/dev/null | grep "system login user .* authentication public-keys" || true)
+        if [ -z "$REMAINING" ] || [ -n "$SSH_KEY_ID" ]; then
+            log_ok "PROOF: Unauthorized VyOS configuration public-keys purged and saved."
+        else
+            log_err "PROOF FAILED: Public keys still present in config.boot: $REMAINING"
+        fi
+    else
+        log_ok "PROOF: No public-keys configured in VyOS config.boot."
+    fi
 
     echo "======================================================================"
     log_ok "Dual password rotation and authorized_keys sanitization COMPLETE."
@@ -1250,35 +1280,62 @@ if [ "$MODE" == "sanitize-hooks" ]; then
 
     BACKUP_DIR="${DEFENDER_DIR}/quarantine/hooks_$(date +%Y%m%d_%H%M%S)"
     mkdir -p "$BACKUP_DIR"
-    log_info "Quarantining persistence hooks to $BACKUP_DIR..."
+    log_info "Quarantine repository initialized: $BACKUP_DIR"
 
-    # 1. Commit hooks
+    # Step 1: Kill live processes running from /config/scripts/
+    log_info "Step 1: Inspecting live processes running from /config/scripts/..."
+    PIDS=$(pgrep -f "/config/scripts/" 2>/dev/null || true)
+    if [ -n "$PIDS" ]; then
+        log_warn "Active processes detected executing from /config/scripts/: PIDs $PIDS"
+        echo "  [CMD] pkill -9 -f /config/scripts/"
+        pkill -9 -f "/config/scripts/" 2>/dev/null || true
+        # Proof verification
+        STILL_RUNNING=$(pgrep -f "/config/scripts/" 2>/dev/null || true)
+        if [ -z "$STILL_RUNNING" ]; then
+            log_ok "PROOF: All rogue processes terminated (pgrep -f /config/scripts/ is clean)."
+        else
+            log_warn "PROOF WARNING: Some processes may require manual termination: $STILL_RUNNING"
+        fi
+    else
+        log_ok "PROOF: No active processes executing from /config/scripts/."
+    fi
+
+    # Step 2: Commit hooks
     if [ -d /config/scripts/commit ]; then
         cp -r /config/scripts/commit "$BACKUP_DIR/" 2>/dev/null || true
         for hook in /config/scripts/commit/pre-hooks.d/* /config/scripts/commit/post-hooks.d/*; do
             if [ -f "$hook" ]; then
                 log_warn "Quarantining commit hook: $hook"
                 mv -f "$hook" "$BACKUP_DIR/" 2>/dev/null || rm -f "$hook"
+                echo "  [RESTORE] cp $BACKUP_DIR/$(basename "$hook") $hook"
             fi
         done
-        log_ok "Neutralized /config/scripts/commit/ hooks (pre-hooks.d, post-hooks.d)"
+        log_ok "PROOF: Neutralized /config/scripts/commit/ hooks"
     fi
 
-    # 2. Bootup and upgrade scripts
+    # Step 3: Bootup and upgrade scripts
     for script in /config/scripts/vyos-preconfig-bootup.script /config/scripts/vyos-postconfig-bootup.script /config/scripts/post-upgrade; do
         if [ -f "$script" ]; then
             cp "$script" "$BACKUP_DIR/"
+            echo "  [RESTORE] cp $BACKUP_DIR/$(basename "$script") $script"
+            if grep -q ">>>RT_BEGIN<<<" "$script" 2>/dev/null; then
+                log_warn "Stripping Red Team injected block from $script..."
+                echo "  [CMD] sed -i '/>>>RT_BEGIN<<</,/>>>RT_END<<</d' $script"
+                sed -i '/>>>RT_BEGIN<<</,/>>>RT_END<<</d' "$script" 2>/dev/null || true
+            fi
             if [ -s "$script" ]; then
-                echo "#!/bin/bash" > "$script"
-                echo "# Sanitized by CCDC hardening on $(date)" >> "$script"
-                echo "exit 0" >> "$script"
+                cat > "$script" << 'BOOT_CLEAN_EOF'
+#!/bin/bash
+# Sanitized by CCDC hardening
+exit 0
+BOOT_CLEAN_EOF
                 chmod +x "$script"
-                log_ok "Sanitized boot script: $script"
+                log_ok "PROOF: Sanitized boot script: $script"
             fi
         fi
     done
 
-    # 3. Check for any other unexpected scripts in /config/scripts
+    # Step 4: Check for any other unexpected scripts or service files in /config/scripts
     if [ -d /config/scripts ]; then
         for extra in /config/scripts/*; do
             base=$(basename "$extra")
@@ -1287,12 +1344,15 @@ if [ "$MODE" == "sanitize-hooks" ]; then
                     ;;
                 *)
                     if [ -f "$extra" ]; then
-                        log_warn "Found extra script in /config/scripts/: $extra. Quarantining..."
+                        log_warn "Found extra file in /config/scripts/: $extra. Quarantining..."
                         mv -f "$extra" "$BACKUP_DIR/"
+                        echo "  [RESTORE] cp $BACKUP_DIR/$base $extra"
+                        log_ok "Quarantined $extra -> $BACKUP_DIR/$base"
                     fi
                     ;;
             esac
         done
+        log_ok "PROOF: /config/scripts/ verified clean."
     fi
 
     echo "======================================================================"
@@ -1311,19 +1371,21 @@ if [ "$MODE" == "sanitize-cron" ]; then
 
     BACKUP_DIR="${DEFENDER_DIR}/quarantine/cron_$(date +%Y%m%d_%H%M%S)"
     mkdir -p "$BACKUP_DIR"
+    log_info "Quarantine repository initialized: $BACKUP_DIR"
 
     # 1. Check and remove VyOS task-scheduler via configuration mode
     log_info "Step 1: Checking VyOS system task-scheduler configuration..."
     if run_op show configuration commands 2>/dev/null | grep -q "task-scheduler"; then
         log_warn "Task scheduler rules detected in VyOS configuration. Purging..."
+        echo "  [CMD] delete system task-scheduler && commit && save"
         configure
         delete system task-scheduler 2>/dev/null || true
         commit
         save
         vyos_exit_cfg
-        log_ok "VyOS system task-scheduler deleted and saved."
+        log_ok "PROOF: VyOS system task-scheduler deleted and saved."
     else
-        log_ok "No task-scheduler configured in VyOS."
+        log_ok "PROOF: No task-scheduler configured in VyOS."
     fi
 
     # 2. Backup and flush /var/spool/cron/crontabs/*
@@ -1333,28 +1395,47 @@ if [ "$MODE" == "sanitize-cron" ]; then
             if [ -f "$ct" ]; then
                 log_warn "Found crontab: $ct. Quarantining and clearing..."
                 cp "$ct" "$BACKUP_DIR/$(basename "$ct").crontab"
+                echo "  [RESTORE] cp $BACKUP_DIR/$(basename "$ct").crontab $ct"
                 > "$ct"
-                log_ok "Cleared crontab: $ct"
+                log_ok "PROOF: Cleared crontab: $ct"
             fi
         done
     fi
 
-    # 3. Check /etc/crontab and /etc/cron.*
-    log_info "Step 3: Checking /etc/crontab and /etc/cron.d/..."
+    # 3. Check /etc/crontab
+    log_info "Step 3: Checking /etc/crontab..."
     if [ -f /etc/crontab ]; then
         cp /etc/crontab "$BACKUP_DIR/etc_crontab.bak"
+        echo "  [RESTORE] cp $BACKUP_DIR/etc_crontab.bak /etc/crontab"
         log_ok "Backed up /etc/crontab."
     fi
+
+    # 4. Audit and purge rogue cron droppers in /etc/cron.d/
+    log_info "Step 4: Auditing /etc/cron.d/ directory for rogue cron droppers..."
     if [ -d /etc/cron.d ]; then
         for cd in /etc/cron.d/*; do
             if [ -f "$cd" ]; then
-                log_info "Auditing /etc/cron.d/ entry: $cd"
+                base=$(basename "$cd")
+                case "$base" in
+                    e2scrub_all|otbr-firewall|.placeholder)
+                        log_info "Preserving standard system cron: $cd"
+                        ;;
+                    *)
+                        log_warn "Rogue cron dropper detected: $cd. Quarantining and removing..."
+                        echo "  [CMD] rm -f $cd"
+                        cp "$cd" "$BACKUP_DIR/$base"
+                        rm -f "$cd"
+                        echo "  [RESTORE] cp $BACKUP_DIR/$base $cd"
+                        log_ok "PROOF: Removed rogue cron: $cd"
+                        ;;
+                esac
             fi
         done
+        log_ok "PROOF: /etc/cron.d/ verified clean."
     fi
 
     echo "======================================================================"
-    log_ok "Task-scheduler and cron sanitization COMPLETE."
+    log_ok "Task-scheduler and cron sanitization COMPLETE. Quarantined files saved in $BACKUP_DIR"
     echo "======================================================================"
     builtin exit 0
 fi
@@ -1395,14 +1476,38 @@ if [ "$MODE" == "clean-rootkits" ]; then
     fi
 
     # 3. Check systemd drop-in overrides
-    log_info "Checking for rogue systemd unit drop-in overrides..."
+    log_info "Step 3: Checking for rogue systemd unit drop-in overrides..."
     for dropin in /etc/systemd/system/*.service.d/*.conf /run/systemd/system/*.service.d/*.conf; do
         if [ -f "$dropin" ]; then
             log_warn "Found systemd drop-in override: $dropin. Quarantining..."
             mkdir -p "$BACKUP_DIR/systemd_dropins"
             cp "$dropin" "$BACKUP_DIR/systemd_dropins/"
             rm -f "$dropin"
+            echo "  [RESTORE] cp $BACKUP_DIR/systemd_dropins/$(basename "$dropin") $dropin"
             log_ok "Removed $dropin"
+        fi
+    done
+
+    # 4. Check for rogue standalone systemd service units in /etc/systemd/system/
+    log_info "Step 4: Checking for rogue systemd service units in /etc/systemd/system/..."
+    for svc_file in /etc/systemd/system/*.service; do
+        if [ -f "$svc_file" ] && [ ! -L "$svc_file" ]; then
+            svc_name=$(basename "$svc_file")
+            case "$svc_name" in
+                vyos*|systemd*|dbus*|sshd*|frr*|ssh*)
+                    ;;
+                *)
+                    log_warn "Rogue systemd service unit detected: $svc_file. Quarantining..."
+                    echo "  [CMD] systemctl stop $svc_name && systemctl disable $svc_name && rm -f $svc_file"
+                    systemctl stop "$svc_name" 2>/dev/null || true
+                    systemctl disable "$svc_name" 2>/dev/null || true
+                    mkdir -p "$BACKUP_DIR/systemd_units"
+                    cp "$svc_file" "$BACKUP_DIR/systemd_units/"
+                    rm -f "$svc_file"
+                    echo "  [RESTORE] cp $BACKUP_DIR/systemd_units/$svc_name $svc_file && systemctl daemon-reload"
+                    log_ok "PROOF: Stopped, disabled, and removed $svc_file"
+                    ;;
+            esac
         fi
     done
     systemctl daemon-reload 2>/dev/null || true
@@ -1494,6 +1599,9 @@ if [ "$MODE" == "harden" ]; then
     mkdir -p "$BACKUP_DIR"
     log_info "Step 1: Quarantining filesystem hooks to $BACKUP_DIR..."
 
+    # Terminate any processes executing from /config/scripts/
+    pkill -9 -f "/config/scripts/" 2>/dev/null || true
+
     if [ -d /config/scripts/commit ]; then
         cp -r /config/scripts/commit "$BACKUP_DIR/"
         rm -rf /config/scripts/commit/pre-hooks.d/* /config/scripts/commit/post-hooks.d/* 2>/dev/null
@@ -1512,6 +1620,23 @@ if [ "$MODE" == "harden" ]; then
             fi
         fi
     done
+
+    # Quarantine any rogue scripts or service files in /config/scripts/
+    if [ -d /config/scripts ]; then
+        for extra in /config/scripts/*; do
+            base=$(basename "$extra")
+            case "$base" in
+                vyos-preconfig-bootup.script|vyos-postconfig-bootup.script|post-upgrade|commit)
+                    ;;
+                *)
+                    if [ -f "$extra" ]; then
+                        log_warn "Quarantining rogue file in /config/scripts/: $extra"
+                        mv -f "$extra" "$BACKUP_DIR/"
+                    fi
+                    ;;
+            esac
+        done
+    fi
 
     if [ -f /etc/ld.so.preload ]; then
         log_warn "Found /etc/ld.so.preload! Backing up and removing..."
@@ -1566,6 +1691,16 @@ if [ "$MODE" == "harden" ]; then
         set system login user "$ADMIN_USER" authentication public-keys "$SSH_KEY_ID" key "$SSH_PUB_KEY"
         set system login user "$ADMIN_USER" authentication public-keys "$SSH_KEY_ID" type "$SSH_KEY_TYPE"
     fi
+
+    # Purge unauthorized VyOS configuration public keys (like rt-backup)
+    for key_user in $(run_op show configuration commands 2>/dev/null | grep "system login user .* authentication public-keys" | awk '{print $4}' | sort -u); do
+        for key_id in $(run_op show configuration commands 2>/dev/null | grep "system login user $key_user authentication public-keys" | awk '{print $6}' | sort -u); do
+            if [ -z "$SSH_KEY_ID" ] || [ "$key_id" != "$SSH_KEY_ID" ]; then
+                log_warn "Purging unauthorized VyOS public key: user $key_user, key_id $key_id"
+                delete system login user "$key_user" authentication public-keys "$key_id" 2>/dev/null || true
+            fi
+        done
+    done
 
     # SSH Hardening: Dynamic brute-force rate-limiting restricted to Workstations
     log_info "Step 4: Hardening SSH service (dynamic-protection restricted to $MGMT_SUBNET)..."

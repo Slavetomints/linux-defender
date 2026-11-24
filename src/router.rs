@@ -47,22 +47,22 @@ pub const ROUTER_STEPS: &[RouterStepDef] = &[
     RouterStepDef {
         id: "rotate_passwords",
         label: "Update VyOS & Linux Root Passwords",
-        description: "Separately update 'vyos' and 'root' passwords; sanitize authorized_keys",
+        description: "Separately update passwords; purge config.boot public-keys and sanitize keys",
     },
     RouterStepDef {
         id: "sanitize_hooks",
         label: "Sanitize Boot & Commit Hooks",
-        description: "Quarantine /config/scripts/commit hooks and reset bootup scripts",
+        description: "Quarantine /config/scripts/ hooks, reset bootup scripts, kill rogue processes",
     },
     RouterStepDef {
         id: "sanitize_cron",
         label: "Sanitize Task Scheduler & Crons",
-        description: "Delete VyOS system task-scheduler and flush /var/spool/cron/crontabs",
+        description: "Delete VyOS task-scheduler, flush crontabs, purge rogue /etc/cron.d/ drops",
     },
     RouterStepDef {
         id: "clean_rootkits",
         label: "Remove Dynamic Linker Overrides",
-        description: "Remove /etc/ld.so.preload and inspect systemd generator overrides",
+        description: "Remove /etc/ld.so.preload, drop-in overrides, and rogue systemd services",
     },
     RouterStepDef {
         id: "purge_containers",

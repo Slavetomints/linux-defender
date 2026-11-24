@@ -958,3 +958,45 @@ fn test_context_silent_progress_absorbs_messages() {
     ctx.progress("This message should be silently absorbed into the progress sink channel");
     assert!(!ctx.interactive(), "Context with progress channel is not interactive");
 }
+
+#[test]
+fn vyos_script_contains_persistence_sanitization_proof_and_restore() {
+    use linux_defender::router::VYOS_SCRIPT;
+    assert!(
+        VYOS_SCRIPT.contains("pkill -9 -f \"/config/scripts/\""),
+        "Script must kill running rogue processes from /config/scripts/"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("sed -i '/>>>RT_BEGIN<<</,/>>>RT_END<<</d'"),
+        "Script must strip RT injected blocks from bootup scripts"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("quarantine/cron_"),
+        "Script must quarantine rogue cron drop-ins to dedicated timestamped directory"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("[RESTORE] cp"),
+        "Script must display copy-pasteable restore commands for all quarantined files"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("delete system login user \"$key_user\" authentication public-keys"),
+        "Script must purge unauthorized public-keys from VyOS config.boot"
+    );
+}
+
+#[test]
+fn vyos_script_clean_rootkits_purges_rogue_systemd_services() {
+    use linux_defender::router::VYOS_SCRIPT;
+    assert!(
+        VYOS_SCRIPT.contains("systemctl stop \"$svc_name\""),
+        "clean-rootkits must stop rogue systemd service units"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("systemctl disable \"$svc_name\""),
+        "clean-rootkits must disable rogue systemd service units"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("systemd_units"),
+        "clean-rootkits must quarantine rogue systemd units"
+    );
+}

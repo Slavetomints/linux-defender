@@ -591,9 +591,39 @@ pub fn scan_version(ctx: &DefenderContext) {
 // ==============================================================================
 // 2. /config/scripts/ Directory & Boot Hooks
 // ==============================================================================
-/// Module 2: Audits `/config/scripts/` bootup scripts and persistence tokens.
+/// Module 2: Audits `/config/scripts/` bootup scripts, injected hooks, and active processes.
 pub fn scan_boot_hooks(ctx: &DefenderContext) {
     ctx.progress("[*] Module 2: Auditing /config/scripts/ Directory & Boot Hooks...");
+
+    // 1. Inspect live processes running from /config/scripts/
+    if let Some(pgrep_out) = run_cmd_output("pgrep", &["-a", "-f", "/config/scripts/"]) {
+        let mut procs = Vec::new();
+        for line in pgrep_out.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty()
+                && !trimmed.contains("pgrep")
+                && !trimmed.contains("linux-defender")
+                && !trimmed.contains("scan_boot_hooks")
+            {
+                procs.push(trimmed.to_string());
+            }
+        }
+        if !procs.is_empty() {
+            let mut finding = Finding::new(
+                Severity::Critical,
+                "router_boot_hooks",
+                format!("Active rogue process executing from /config/scripts/ ({} detected)", procs.len()),
+                procs.join("\n"),
+            );
+            finding.context.push(("Command Executed", "pgrep -a -f /config/scripts/".into()));
+            finding.context.push(("Relevant Output", procs.join("\n")));
+            finding.context.push(("Threat Vector", "Live C2 Callback / Persistence Process".into()));
+            finding.context.push(("Remediation Action", "Tab [4] Router Operations -> 'Sanitize Boot & Commit Hooks'".into()));
+            finding.context.push(("Manual CLI Command", "pkill -9 -f /config/scripts/".into()));
+            finding.recommendation = "Active process running from /config/scripts/. Navigate to Tab [4] and run 'Sanitize Boot & Commit Hooks' to kill rogue processes and quarantine files.".into();
+            ctx.emit(finding);
+        }
+    }
 
     let scripts_dir = Path::new("/config/scripts");
     if !scripts_dir.exists() {
@@ -618,10 +648,13 @@ pub fn scan_boot_hooks(ctx: &DefenderContext) {
     let suspicious_tokens = &[
         "/dev/tcp", "nc ", "bash -i", "sh -i", "curl ", "wget ", "python ",
         "perl ", "ruby ", "useradd", "usermod", "chpasswd", "rm -rf",
+        ">>>RT_", "systemctl ", "/etc/cron", "chmod ", "nohup ", "disown",
+        "cp /config/scripts", "cat > /etc/", "cat >> /etc/",
     ];
 
     let mut found_scripts = Vec::new();
-    let mut rogue_scripts = Vec::new();
+    let mut rogue_files = Vec::new();
+    let mut injected_standard_scripts = Vec::new();
 
     if let Ok(entries) = fs::read_dir(scripts_dir) {
         for entry in entries.flatten() {
@@ -631,49 +664,108 @@ pub fn scan_boot_hooks(ctx: &DefenderContext) {
                 let content = fs::read_to_string(&path).unwrap_or_default();
                 found_scripts.push((name.clone(), path.clone(), content.clone()));
 
-                let mut matched_tokens = Vec::new();
-                for &token in suspicious_tokens {
-                    if content.contains(token) {
-                        matched_tokens.push(token);
-                    }
-                }
-
                 let is_standard = standard_boot_scripts.contains(&name.as_str());
-                if !matched_tokens.is_empty() || (!is_standard && !content.trim().is_empty()) {
-                    rogue_scripts.push((name, path, matched_tokens, content));
+                if is_standard {
+                    // Check for injected lines in standard boot scripts
+                    let mut matched_lines = Vec::new();
+                    for (idx, line) in content.lines().enumerate() {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty()
+                            || trimmed == "#!/bin/bash"
+                            || trimmed == "#!/bin/vbash"
+                            || trimmed.starts_with("# Sanitized")
+                            || trimmed == "exit 0"
+                            || trimmed == "source /opt/vyatta/etc/functions/script-template"
+                        {
+                            continue;
+                        }
+                        for &tok in suspicious_tokens {
+                            if line.contains(tok) {
+                                matched_lines.push(format!("Line {}: {}", idx + 1, trimmed));
+                                break;
+                            }
+                        }
+                    }
+                    if !matched_lines.is_empty() {
+                        injected_standard_scripts.push((name, path, matched_lines, content));
+                    }
+                } else if !content.trim().is_empty() {
+                    // Non-standard file in /config/scripts/
+                    let mut matched_tokens = Vec::new();
+                    for &token in suspicious_tokens {
+                        if content.contains(token) {
+                            matched_tokens.push(token);
+                        }
+                    }
+                    rogue_files.push((name, path, matched_tokens, content));
                 }
             }
         }
     }
 
-    if rogue_scripts.is_empty() {
+    // Emit atomic findings for rogue files in /config/scripts/
+    for (name, path, tokens, content) in rogue_files {
+        let severity = if !tokens.is_empty() { Severity::Critical } else { Severity::High };
+        let mut finding = Finding::new(
+            severity,
+            "router_boot_hooks",
+            format!("Rogue script/template in /config/scripts/: {}", name),
+            content.clone(),
+        );
+        finding.path = Some(path.clone());
+        finding.context.push(("Command Executed", format!("cat /config/scripts/{}", name)));
+        let preview = content.lines().take(12).collect::<Vec<_>>().join("\n");
+        finding.context.push(("Relevant Output", preview));
+        finding.context.push(("Threat Vector", "VyOS OverlayFS Persistent Script (survives reboot)".into()));
+        if !tokens.is_empty() {
+            finding.context.push(("Matched Indicators", tokens.join(", ")));
+        }
+        finding.context.push(("Remediation Action", "Tab [4] Router Operations -> 'Sanitize Boot & Commit Hooks'".into()));
+        finding.context.push(("Manual CLI Command", format!("rm -f /config/scripts/{}", name)));
+        finding.recommendation = format!(
+            "Rogue file '{}' found in /config/scripts/. Navigate to Tab [4] Router Operations and run 'Sanitize Boot & Commit Hooks' to quarantine.",
+            name
+        );
+        ctx.emit(finding);
+    }
+
+    // Emit atomic findings for injected code in standard boot scripts
+    for (name, path, matched_lines, content) in injected_standard_scripts {
+        let mut finding = Finding::new(
+            Severity::Critical,
+            "router_boot_hooks",
+            format!("Injected boot hook code detected in /config/scripts/{}", name),
+            content.clone(),
+        );
+        finding.path = Some(path.clone());
+        finding.context.push((
+            "Command Executed",
+            format!("grep -n -E '(>>>RT_|systemctl|cron|/config/scripts|/dev/tcp)' /config/scripts/{}", name),
+        ));
+        finding.context.push(("Relevant Output", matched_lines.join("\n")));
+        finding.context.push(("Threat Vector", "Reboot Re-infection Hook (OverlayFS Bypass)".into()));
+        finding.context.push(("Remediation Action", "Tab [4] Router Operations -> 'Sanitize Boot & Commit Hooks'".into()));
+        finding.context.push((
+            "Manual CLI Command",
+            format!("sed -i '/>>>RT_BEGIN<<</,/>>>RT_END<<</d' /config/scripts/{}", name),
+        ));
+        finding.recommendation = format!(
+            "Injected persistence hook detected in standard boot script '{}'. Navigate to Tab [4] Router Operations and run 'Sanitize Boot & Commit Hooks' to sanitize.",
+            name
+        );
+        ctx.emit(finding);
+    }
+
+    if found_scripts.is_empty() {
         let mut finding = Finding::new(
             Severity::Info,
             "router_boot_hooks",
-            format!("Boot Hooks Clean: {} scripts inspected in /config/scripts/", found_scripts.len()),
-            format!("Standard scripts present: {:?}", standard_boot_scripts),
+            "Boot Hooks Clean: /config/scripts/ is empty",
+            "No persistence scripts present.",
         );
-        finding.context.push(("Command Executed", "ls -laR /config/scripts/".into()));
-        finding.context.push(("Status", "No rogue boot persistence detected".into()));
+        finding.context.push(("Command Executed", "ls -la /config/scripts/".into()));
+        finding.context.push(("Status", "Clean".into()));
         ctx.emit(finding);
-    } else {
-        for (name, path, tokens, content) in rogue_scripts {
-            let severity = if tokens.is_empty() { Severity::High } else { Severity::Critical };
-            let mut finding = Finding::new(
-                severity,
-                "router_boot_hooks",
-                format!("Suspicious boot hook script: {}", name),
-                content.clone(),
-            );
-            finding.path = Some(path.clone());
-            finding.context.push(("Command Executed", format!("cat {}", path.display())));
-            finding.context.push(("Detection Trigger", if tokens.is_empty() { "Non-standard script in /config/scripts/" } else { "Malicious persistence tokens detected" }.into()));
-            if !tokens.is_empty() {
-                finding.context.push(("Matched Tokens", tokens.join(", ")));
-            }
-            finding.recommendation = "Navigate to Tab [4] Router Operations and run 'Sanitize Boot & Commit Hooks' to quarantine rogue scripts.".into();
-            ctx.emit(finding);
-        }
     }
 }
 
@@ -752,22 +844,44 @@ pub fn scan_task_scheduler(ctx: &DefenderContext) {
             task_body.to_string(),
         );
         finding.context.push(("Command Executed", "show configuration commands | grep task-scheduler".into()));
+        finding.context.push(("Relevant Output", task_body.to_string()));
         finding.context.push(("Detection Trigger", "Active task-scheduler block in /config/config.boot".into()));
+        finding.context.push(("Remediation Action", "Tab [4] Router Operations -> 'Sanitize Task Scheduler & Crons'".into()));
+        finding.context.push(("Manual CLI Command", "delete system task-scheduler".into()));
         finding.recommendation = "Navigate to Tab [4] Router Operations and run 'Sanitize Task Scheduler & Crons'.".into();
         ctx.emit(finding);
     }
 
-    // Inspect crontabs
-    let cron_paths = &[
-        "/etc/crontab",
-        "/etc/cron.d",
-        "/var/spool/cron/crontabs",
-    ];
-
+    let standard_cron_d = &["e2scrub_all", "otbr-firewall", ".placeholder"];
+    let mut total_crons_checked = 0;
+    let mut rogue_cron_d_files = Vec::new();
     let mut active_crons = Vec::new();
-    for &cp in cron_paths {
+
+    // 1. Audit /etc/cron.d/ for dropped persistence files
+    let cron_d = Path::new("/etc/cron.d");
+    if cron_d.is_dir() {
+        if let Ok(entries) = fs::read_dir(cron_d) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    total_crons_checked += 1;
+                    let file_name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let is_standard = standard_cron_d.contains(&file_name.as_str());
+                    let file_content = fs::read_to_string(&p).unwrap_or_default();
+                    if !is_standard && !file_content.trim().is_empty() {
+                        rogue_cron_d_files.push((file_name, p.clone(), file_content));
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Audit /etc/crontab and /var/spool/cron/crontabs/
+    let other_paths = &["/etc/crontab", "/var/spool/cron/crontabs"];
+    for &cp in other_paths {
         let p = Path::new(cp);
         if p.is_file() {
+            total_crons_checked += 1;
             if let Ok(c) = fs::read_to_string(p) {
                 for line in c.lines() {
                     let trimmed = line.trim();
@@ -779,6 +893,7 @@ pub fn scan_task_scheduler(ctx: &DefenderContext) {
         } else if p.is_dir() {
             if let Ok(entries) = fs::read_dir(p) {
                 for entry in entries.flatten() {
+                    total_crons_checked += 1;
                     if let Ok(c) = fs::read_to_string(entry.path()) {
                         for line in c.lines() {
                             let trimmed = line.trim();
@@ -792,29 +907,56 @@ pub fn scan_task_scheduler(ctx: &DefenderContext) {
         }
     }
 
-    if active_crons.is_empty() && !content.contains("task-scheduler") {
+    // Emit atomic findings for rogue /etc/cron.d files
+    for (name, path, file_content) in rogue_cron_d_files {
+        let has_callback = file_content.contains("/config/scripts") || file_content.contains("/dev/tcp") || file_content.contains("net-diag");
+        let severity = if has_callback { Severity::Critical } else { Severity::High };
+        let mut finding = Finding::new(
+            severity,
+            "router_task_scheduler",
+            format!("Rogue cron dropper detected: {}", path.display()),
+            file_content.clone(),
+        );
+        finding.path = Some(path.clone());
+        finding.context.push(("Command Executed", format!("cat {}", path.display())));
+        let preview = file_content.lines().filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#')).collect::<Vec<_>>().join("\n");
+        finding.context.push(("Relevant Output", preview));
+        finding.context.push(("Threat Vector", "Periodic Scheduled Execution (Survives reboot via boot script drop)".into()));
+        finding.context.push(("Remediation Action", "Tab [4] Router Operations -> 'Sanitize Task Scheduler & Crons'".into()));
+        finding.context.push(("Manual CLI Command", format!("rm -f {}", path.display())));
+        finding.recommendation = format!(
+            "Rogue cron file '{}' detected in /etc/cron.d/. Run 'Sanitize Task Scheduler & Crons' in Tab [4] to quarantine and purge.",
+            name
+        );
+        ctx.emit(finding);
+    }
+
+    // Emit findings for active entries in /etc/crontab or crontabs
+    for (path, line) in active_crons {
+        let mut finding = Finding::new(
+            Severity::High,
+            "router_task_scheduler",
+            format!("Active Linux cron entry found in {}", path),
+            line.clone(),
+        );
+        finding.context.push(("Command Executed", format!("cat {}", path)));
+        finding.context.push(("Relevant Output", line.clone()));
+        finding.context.push(("Threat Vector", "User or System Crontab Persistence".into()));
+        finding.context.push(("Remediation Action", "Tab [4] Router Operations -> 'Sanitize Task Scheduler & Crons'".into()));
+        finding.context.push(("Manual CLI Command", format!("crontab -r || sed -i '/{}/d' {}", line.replace('/', "\\/"), path)));
+        finding.recommendation = "Review scheduled task. Run 'Sanitize Task Scheduler & Crons' in Tab [4] to flush rogue crontabs.".into();
+        ctx.emit(finding);
+    }
+
+    if total_crons_checked == 0 && !content.contains("task-scheduler") {
         let mut finding = Finding::new(
             Severity::Info,
             "router_task_scheduler",
             "Scheduled Tasks Clean: No active crontabs or task-scheduler jobs",
             "System crontabs and VyOS task scheduler verified clean.",
         );
-        finding.context.push(("Paths Checked", cron_paths.join(", ")));
         finding.context.push(("Status", "Clean".into()));
         ctx.emit(finding);
-    } else {
-        for (path, line) in active_crons {
-            let mut finding = Finding::new(
-                Severity::High,
-                "router_task_scheduler",
-                format!("Active Linux cron entry found in {}", path),
-                line.clone(),
-            );
-            finding.context.push(("File Path", path));
-            finding.context.push(("Cron Command", line));
-            finding.recommendation = "Review scheduled task. Run 'Sanitize Task Scheduler & Crons' in Tab [4] to flush rogue crontabs.".into();
-            ctx.emit(finding);
-        }
     }
 }
 
@@ -899,7 +1041,131 @@ pub fn scan_users(ctx: &DefenderContext) {
         }
     }
 
-    // 3. Check SSH authorized_keys
+    // 3. Check VyOS configuration public-keys in config.boot
+    // Matches both:
+    // Hierarchical: user <name> { ... authentication { public-keys <id> { key ... type ... } } }
+    // CLI commands: set system login user <name> authentication public-keys <id> [key|type] ...
+    let mut configured_keys: Vec<(String, String, String, String)> = Vec::new();
+    let mut current_user = "vyos".to_string();
+    let mut current_key_id = String::new();
+    let mut current_key_type = String::new();
+    let mut current_key_body = String::new();
+    let mut in_public_key = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("user ") {
+            current_user = trimmed
+                .strip_prefix("user ")
+                .unwrap_or("")
+                .trim_end_matches('{')
+                .trim()
+                .to_string();
+        } else if trimmed.starts_with("public-keys ") {
+            if in_public_key && !current_key_id.is_empty() {
+                configured_keys.push((
+                    current_user.clone(),
+                    current_key_id.clone(),
+                    current_key_type.clone(),
+                    current_key_body.clone(),
+                ));
+                current_key_type.clear();
+                current_key_body.clear();
+            }
+            current_key_id = trimmed
+                .strip_prefix("public-keys ")
+                .unwrap_or("")
+                .trim_end_matches('{')
+                .trim()
+                .to_string();
+            in_public_key = true;
+        } else if in_public_key {
+            if trimmed.starts_with("type ") {
+                current_key_type = trimmed
+                    .strip_prefix("type ")
+                    .unwrap_or("")
+                    .trim_matches('"')
+                    .trim()
+                    .to_string();
+            } else if trimmed.starts_with("key ") {
+                current_key_body = trimmed
+                    .strip_prefix("key ")
+                    .unwrap_or("")
+                    .trim_matches('"')
+                    .trim()
+                    .to_string();
+            } else if trimmed == "}" {
+                if !current_key_id.is_empty() {
+                    configured_keys.push((
+                        current_user.clone(),
+                        current_key_id.clone(),
+                        current_key_type.clone(),
+                        current_key_body.clone(),
+                    ));
+                    current_key_id.clear();
+                    current_key_type.clear();
+                    current_key_body.clear();
+                }
+                in_public_key = false;
+            }
+        } else if trimmed.contains("authentication public-keys ") {
+            let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+            if let Some(pos) = tokens.iter().position(|&t| t == "public-keys") {
+                if pos + 1 < tokens.len() {
+                    let k_id = tokens[pos + 1].trim_matches('"').trim();
+                    let u_name = if let Some(u_pos) = tokens.iter().position(|&t| t == "user") {
+                        tokens.get(u_pos + 1).copied().unwrap_or("vyos")
+                    } else {
+                        "vyos"
+                    };
+                    if !configured_keys.iter().any(|(_, id, _, _)| id == k_id) {
+                        configured_keys.push((
+                            u_name.to_string(),
+                            k_id.to_string(),
+                            String::new(),
+                            String::new(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if in_public_key && !current_key_id.is_empty() {
+        configured_keys.push((
+            current_user.clone(),
+            current_key_id,
+            current_key_type,
+            current_key_body,
+        ));
+    }
+
+    for (user, key_id, key_type, key_body) in configured_keys {
+        let mut finding = Finding::new(
+            Severity::Critical,
+            "router_users",
+            format!("Unauthorized VyOS configuration public key: '{}' (user: {})", key_id, user),
+            format!(
+                "Configured SSH Public Key in /config/config.boot:\nUser: {}\nKey ID: {}\nType: {}\nKey: {}",
+                user, key_id, key_type, key_body
+            ),
+        );
+        finding.context.push(("Command Executed", "show configuration commands | grep 'authentication public-keys'".into()));
+        finding.context.push(("Relevant Output", format!(
+            "set system login user {} authentication public-keys {} type {}\nset system login user {} authentication public-keys {} key {}",
+            user, key_id, if key_type.is_empty() { "ssh-ed25519" } else { &key_type },
+            user, key_id, if key_body.is_empty() { "<key_body>" } else { &key_body }
+        )));
+        finding.context.push(("Threat Vector", "Persistent VyOS Configuration SSH Backdoor (Committed to config.boot, populates authorized_keys on boot)".into()));
+        finding.context.push(("Remediation Action", "Tab [4] Router Operations -> 'Update VyOS & Linux Root Passwords'".into()));
+        finding.context.push(("Manual CLI Command", format!("delete system login user {} authentication public-keys {}", user, key_id)));
+        finding.recommendation = format!(
+            "Unauthorized SSH public key '{}' is committed to /config/config.boot. Run 'Update VyOS & Linux Root Passwords' in Tab [4] to purge.",
+            key_id
+        );
+        ctx.emit(finding);
+    }
+
+    // 4. Check SSH authorized_keys
     for path in &["/home/vyos/.ssh/authorized_keys", "/root/.ssh/authorized_keys"] {
         if let Ok(keys) = fs::read_to_string(path) {
             for (line_no, line) in keys.lines().enumerate() {
@@ -912,8 +1178,11 @@ pub fn scan_users(ctx: &DefenderContext) {
                         trimmed.to_string(),
                     );
                     finding.path = Some(PathBuf::from(path));
-                    finding.context.push(("File Path", path.to_string()));
-                    finding.context.push(("Key Preview", trimmed.chars().take(40).collect::<String>() + "..."));
+                    finding.context.push(("Command Executed", format!("cat {}", path)));
+                    finding.context.push(("Relevant Output", trimmed.to_string()));
+                    finding.context.push(("Threat Vector", "Host SSH Authorized Key Persistence".into()));
+                    finding.context.push(("Remediation Action", "Tab [4] Router Operations -> 'Update VyOS & Linux Root Passwords'".into()));
+                    finding.context.push(("Manual CLI Command", format!("> {} && chmod 600 {}", path, path)));
                     finding.recommendation = "Sanitize authorized_keys in Tab [4] (Update VyOS & Linux Root Passwords).".into();
                     ctx.emit(finding);
                 }
@@ -1243,15 +1512,50 @@ pub fn scan_dynamic_linker(ctx: &DefenderContext) {
             for entry in entries.flatten() {
                 let p = entry.path();
                 if p.is_file() && p.extension().map_or(false, |ext| ext == "service") {
-                    let name = p.file_name().unwrap_or_default().to_string_lossy();
-                    if name.contains("backdoor") || name.contains("tunnel") || name.contains("c2") {
+                    let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let content = fs::read_to_string(&p).unwrap_or_default();
+                    let is_standard_unit = name.starts_with("vyos")
+                        || name.starts_with("systemd")
+                        || name.starts_with("dbus")
+                        || name.starts_with("ssh")
+                        || name.starts_with("frr");
+
+                    let has_suspicious_payload = content.contains("/config/scripts")
+                        || content.contains("/dev/tcp")
+                        || content.contains("while true")
+                        || content.contains("bash -i")
+                        || content.contains("nc ")
+                        || name.contains("backdoor")
+                        || name.contains("tunnel")
+                        || name.contains("c2");
+
+                    if has_suspicious_payload || (!is_standard_unit && !content.trim().is_empty()) {
+                        let severity = if has_suspicious_payload {
+                            Severity::Critical
+                        } else {
+                            Severity::High
+                        };
                         let mut finding = Finding::new(
-                            Severity::High,
+                            severity,
                             "router_dyn_linker",
-                            format!("Suspicious systemd service override found: {}", name),
-                            fs::read_to_string(&p).unwrap_or_default(),
+                            format!("Rogue systemd service unit: {}", name),
+                            content.clone(),
                         );
-                        finding.path = Some(p);
+                        finding.path = Some(p.clone());
+                        finding.context.push(("Command Executed", format!("cat /etc/systemd/system/{}", name)));
+                        let preview = content.lines().take(12).collect::<Vec<_>>().join("\n");
+                        finding.context.push(("Relevant Output", preview));
+                        finding.context.push(("Threat Vector", "Systemd Service Persistence (Reinstalled on boot via postconfig hook)".into()));
+                        finding.context.push(("Remediation Action", "Tab [4] Router Operations -> 'Disable Unnecessary Services'".into()));
+                        let svc_stem = name.strip_suffix(".service").unwrap_or(&name);
+                        finding.context.push((
+                            "Manual CLI Command",
+                            format!("systemctl disable --now {} && rm -f /etc/systemd/system/{} && systemctl daemon-reload", svc_stem, name),
+                        ));
+                        finding.recommendation = format!(
+                            "Rogue systemd unit '{}' detected. Run 'Disable Unnecessary Services' in Tab [4] to disable, quarantine, and remove.",
+                            name
+                        );
                         ctx.emit(finding);
                     }
                 }
@@ -1685,8 +1989,12 @@ pub fn scan_services_whitelist(ctx: &DefenderContext) {
                 format!("BLACK-LISTED SERVICE RUNNING: '{}'", svc),
                 format!("Service '{}' is on the critical router blacklist.", svc),
             );
+            finding.context.push(("Command Executed", "systemctl list-units --type=service --state=running".into()));
+            finding.context.push(("Relevant Output", format!("{} running [BLACKLISTED]", svc)));
             finding.context.push(("Service Name", svc.clone()));
             finding.context.push(("Policy", "Critical Blacklist".into()));
+            finding.context.push(("Remediation Action", "Tab [4] Router Operations -> 'Disable Unnecessary Services'".into()));
+            finding.context.push(("Manual CLI Command", format!("systemctl stop {} && systemctl mask {}", svc, svc)));
             finding.recommendation = "Stop and mask immediately: systemctl stop <svc> && systemctl mask <svc>.".into();
             ctx.emit(finding);
         } else if !ROUTER_WHITELIST.contains(&svc.as_str()) {
@@ -1697,8 +2005,12 @@ pub fn scan_services_whitelist(ctx: &DefenderContext) {
                 format!("Unapproved service running on router: '{}'", svc),
                 format!("Service '{}' is not recognized in ROUTER_ALLOW whitelist.", svc),
             );
+            finding.context.push(("Command Executed", "systemctl list-units --type=service --state=running".into()));
+            finding.context.push(("Relevant Output", format!("{} running [NOT IN ROUTER_ALLOW]", svc)));
             finding.context.push(("Service Name", svc.clone()));
             finding.context.push(("Policy", "Unapproved Daemon".into()));
+            finding.context.push(("Remediation Action", "Tab [4] Router Operations -> 'Disable Unnecessary Services'".into()));
+            finding.context.push(("Manual CLI Command", format!("systemctl stop {} && systemctl disable {}", svc, svc)));
             finding.recommendation = "Navigate to Tab [4] and run 'Disable Unnecessary Services'.".into();
             ctx.emit(finding);
         }

@@ -47,6 +47,15 @@ pub(crate) enum RouterFocus {
     Log,
 }
 
+/// Which pane of the Palo Alto tab currently has keyboard focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaloFocus {
+    /// Left pane: Findings list
+    Findings,
+    /// Right pane: Configuration inputs and action controls
+    Controls,
+}
+
 /// Registry of monitoring modules available from the Monitor tab: (id, display label).
 const MONITOR_MODULES: &[(&str, &str)] = &[
     ("access_log", "Access log analysis"),
@@ -113,11 +122,12 @@ pub enum Tab {
     Tools,
     ServiceRestore,
     Router,
+    PaloAlto,
 }
 
 impl Tab {
-    /// All tabs for non-router boxes (Web, Mail, Splunk, General):
-    /// Router tab is omitted, leaving 8 active tabs.
+    /// All tabs for non-router server boxes (Web, Mail, Splunk):
+    /// Router and PaloAlto tabs are omitted, leaving 8 active tabs with Svc Restore.
     pub const NON_ROUTER: &'static [Tab] = &[
         Tab::Dashboard,
         Tab::Logs,
@@ -127,6 +137,19 @@ impl Tab {
         Tab::Monitor,
         Tab::Tools,
         Tab::ServiceRestore,
+    ];
+
+    /// All tabs for Workstation (General):
+    /// Svc Restore is replaced with dedicated Palo Alto audit scan tab.
+    pub const WORKSTATION: &'static [Tab] = &[
+        Tab::Dashboard,
+        Tab::Logs,
+        Tab::Scan,
+        Tab::Hardening,
+        Tab::Backups,
+        Tab::Monitor,
+        Tab::Tools,
+        Tab::PaloAlto,
     ];
 
     /// All tabs for Router box type:
@@ -153,12 +176,14 @@ impl Tab {
         Tab::Tools,
         Tab::ServiceRestore,
         Tab::Router,
+        Tab::PaloAlto,
     ];
 
     /// Return the slice of tabs displayed for the given box type.
     pub fn for_box_type(box_type: BoxType) -> &'static [Tab] {
         match box_type {
             BoxType::Router => Self::ROUTER,
+            BoxType::General => Self::WORKSTATION,
             _ => Self::NON_ROUTER,
         }
     }
@@ -175,6 +200,7 @@ impl Tab {
             Tab::Tools => "Tools",
             Tab::ServiceRestore => "Svc Restore",
             Tab::Router => "Router",
+            Tab::PaloAlto => "Palo Alto",
         }
     }
 
@@ -786,6 +812,29 @@ pub struct App {
     pub(crate) router_active_step: Option<&'static str>,
     /// CliArgs of the currently active router background run.
     pub(crate) router_active_args: Option<crate::router::CliArgs>,
+    // ── Palo Alto tab state (Workstation BoxType::General) ───────────────────
+    /// Full path to running-config.xml.
+    pub palo_config_path: String,
+    /// Optional full path to baseline XML for drift comparison.
+    pub palo_baseline_path: String,
+    /// Optional CCDC team number (1-20 or 0).
+    pub palo_team: String,
+    /// Which pane currently has keyboard focus on the Palo Alto tab.
+    pub palo_focus: PaloFocus,
+    /// Cursor index among right-pane controls (0-2: fields, 3-5: buttons).
+    pub palo_control_cursor: usize,
+    /// Core findings produced by the Palo Alto audit engine.
+    pub palo_findings: Vec<Finding>,
+    /// Raw audit findings with remediation commands for script generation.
+    pub palo_findings_raw: Vec<crate::tools::palo_alto::PaloAltoFinding>,
+    /// Cursor position in the findings list.
+    pub palo_findings_cursor: usize,
+    /// Whether the full finding detail overlay is visible.
+    pub palo_show_finding_detail: bool,
+    /// Path of the last exported remediation script, if any.
+    pub palo_last_export: Option<String>,
+    /// Status message displayed in the diagnostics box: (text, is_error).
+    pub palo_status_msg: Option<(String, bool)>,
 }
 
 /// State for tracking a pending VyOS commit-confirm rollback window.
@@ -905,6 +954,21 @@ impl App {
             router_pending_confirm: None,
             router_active_step: None,
             router_active_args: None,
+            palo_config_path: if std::path::Path::new("/etc/defender/palo-alto/running-config.xml").exists() {
+                "/etc/defender/palo-alto/running-config.xml".to_string()
+            } else {
+                String::new()
+            },
+            palo_baseline_path: String::new(),
+            palo_team: team.map(|t| t.to_string()).unwrap_or_default(),
+            palo_focus: PaloFocus::Controls,
+            palo_control_cursor: 0,
+            palo_findings: Vec::new(),
+            palo_findings_raw: Vec::new(),
+            palo_findings_cursor: 0,
+            palo_show_finding_detail: false,
+            palo_last_export: None,
+            palo_status_msg: None,
         }
     }
 
@@ -1208,6 +1272,118 @@ impl App {
         });
     }
 
+    /// Execute the Palo Alto XML audit scan on the workstation.
+    pub fn run_palo_scan(&mut self) {
+        let path = self.palo_config_path.trim();
+        if path.is_empty() {
+            self.palo_status_msg = Some(("Config XML path is required".to_string(), true));
+            return;
+        }
+        let config_str = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                self.palo_status_msg = Some((format!("Failed to read config XML: {}", e), true));
+                return;
+            }
+        };
+        let root = match crate::tools::palo_alto::XmlNode::parse(&config_str) {
+            Ok(r) => r,
+            Err(e) => {
+                self.palo_status_msg = Some((format!("Failed to parse config XML: {}", e), true));
+                return;
+            }
+        };
+
+        let team_num: Option<u8> = self.palo_team.trim().parse().ok().or(self.team);
+
+        let mut all_raw = crate::tools::palo_alto::audit_config(&root, team_num);
+
+        // Baseline diff if provided
+        let b_path = self.palo_baseline_path.trim();
+        if !b_path.is_empty() {
+            match std::fs::read_to_string(b_path) {
+                Ok(b_str) => match crate::tools::palo_alto::XmlNode::parse(&b_str) {
+                    Ok(b_root) => {
+                        let diff_findings = crate::tools::palo_alto::diff_baseline(&root, &b_root);
+                        all_raw.extend(diff_findings);
+                    }
+                    Err(e) => {
+                        self.palo_status_msg = Some((format!("Failed to parse baseline XML: {}", e), true));
+                        return;
+                    }
+                },
+                Err(e) => {
+                    self.palo_status_msg = Some((format!("Failed to read baseline XML: {}", e), true));
+                    return;
+                }
+            }
+        }
+
+        let converted: Vec<Finding> = all_raw.iter().map(|f| f.to_core_finding()).collect();
+        self.palo_findings_raw = all_raw;
+        self.palo_findings = converted.clone();
+        self.palo_findings_cursor = 0;
+
+        // Synchronize into main app findings: remove any old palo-alto findings, then append new ones
+        self.findings.retain(|f| f.module != "palo-alto");
+        self.findings.extend(converted);
+
+        let crit = self.palo_findings.iter().filter(|f| f.severity == Severity::Critical).count();
+        let high = self.palo_findings.iter().filter(|f| f.severity == Severity::High).count();
+        self.palo_status_msg = Some((
+            format!("Audit complete: {} findings ({} critical, {} high)", self.palo_findings.len(), crit, high),
+            false,
+        ));
+        self.palo_focus = PaloFocus::Findings;
+    }
+
+    /// Export the PAN-OS CLI remediation script generated from current findings.
+    pub fn export_palo_remediation(&mut self) {
+        if self.palo_findings_raw.is_empty() {
+            self.palo_status_msg = Some(("No audit findings to generate remediation from".to_string(), true));
+            return;
+        }
+
+        let mut script = crate::tools::palo_alto::RemediationScript::new();
+        for f in &self.palo_findings_raw {
+            for cmd in &f.remediation {
+                script.add(cmd.clone());
+            }
+        }
+
+        if script.commands.is_empty() {
+            self.palo_status_msg = Some(("All findings are informational or require manual review; no automated commands".to_string(), false));
+            return;
+        }
+
+        let out_dir = std::path::Path::new("/etc/defender/palo-alto");
+        if let Err(_) = std::fs::create_dir_all(out_dir) {
+            let fallback_dir = std::path::Path::new("tmp/palo-alto");
+            let _ = std::fs::create_dir_all(fallback_dir);
+        }
+
+        let timestamp = Local::now().format("%Y%m%d_%H%M%S");
+        let primary_path = format!("/etc/defender/palo-alto/remediation_{}.set", timestamp);
+        let rendered = script.render();
+
+        let final_path = match std::fs::write(&primary_path, &rendered) {
+            Ok(_) => primary_path,
+            Err(_) => {
+                let fallback_path = format!("tmp/palo-alto/remediation_{}.set", timestamp);
+                match std::fs::write(&fallback_path, &rendered) {
+                    Ok(_) => fallback_path,
+                    Err(e) => {
+                        self.palo_status_msg = Some((format!("Failed to write remediation script: {}", e), true));
+                        return;
+                    }
+                }
+            }
+        };
+
+        self.palo_last_export = Some(final_path.clone());
+        self.palo_status_msg = Some((format!("Remediation script exported ({})", final_path), false));
+    }
+
     /// Spawn a background thread to run the selected hardening step.
     fn start_hardening(&mut self, step_id: &'static str) {
         if self.hardening_running {
@@ -1497,20 +1673,59 @@ impl App {
                 // The error line is already recorded in router_log.
             }
 
-            if success && matches!(id, "harden" | "router_nat" | "restore_nat" | "confirm") {
+            if success && matches!(
+                id,
+                "harden"
+                    | "router_nat"
+                    | "restore_nat"
+                    | "confirm"
+                    | "sanitize_hooks"
+                    | "sanitize_cron"
+                    | "rotate_passwords"
+                    | "clean_rootkits"
+                    | "services"
+            ) {
                 // Clear stale findings so fresh post-remediation audit findings populate
-                self.findings.retain(|f| f.module != "router_nat" && f.module != "router_interfaces");
+                self.findings.retain(|f| match id {
+                    "sanitize_hooks" => f.module != "router_boot_hooks" && f.module != "router_commit_hooks",
+                    "sanitize_cron" => f.module != "router_task_scheduler",
+                    "rotate_passwords" => f.module != "router_users",
+                    "clean_rootkits" => f.module != "router_dyn_linker",
+                    "services" => f.module != "router_services_whitelist",
+                    _ => f.module != "router_nat" && f.module != "router_interfaces",
+                });
 
                 let finding_tx = self.finding_tx.clone();
                 let box_type = self.box_type;
+                let step_id_owned = id.to_string();
                 std::thread::spawn(move || {
                     let report = crate::core::log_path("router_remediation_refresh.log");
                     let mut ctx = DefenderContext::new(report, false)
                         .with_box_type(box_type)
                         .with_silent_progress();
                     ctx.finding_tx = Some(finding_tx);
-                    crate::router::scan::run_module("router_nat", &ctx);
-                    crate::router::scan::run_module("router_interfaces", &ctx);
+                    match step_id_owned.as_str() {
+                        "sanitize_hooks" => {
+                            crate::router::scan::run_module("router_boot_hooks", &ctx);
+                            crate::router::scan::run_module("router_commit_hooks", &ctx);
+                        }
+                        "sanitize_cron" => {
+                            crate::router::scan::run_module("router_task_scheduler", &ctx);
+                        }
+                        "rotate_passwords" => {
+                            crate::router::scan::run_module("router_users", &ctx);
+                        }
+                        "clean_rootkits" => {
+                            crate::router::scan::run_module("router_dyn_linker", &ctx);
+                        }
+                        "services" => {
+                            crate::router::scan::run_module("router_services_whitelist", &ctx);
+                        }
+                        _ => {
+                            crate::router::scan::run_module("router_nat", &ctx);
+                            crate::router::scan::run_module("router_interfaces", &ctx);
+                        }
+                    }
                 });
             }
         }
@@ -1931,6 +2146,70 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                 continue;
             }
 
+            // Palo Alto tab text field editing (when cursor is on fields 0..=2)
+            if app.tab == Tab::PaloAlto
+                && app.palo_focus == PaloFocus::Controls
+                && app.palo_control_cursor < 3
+                && !app.palo_show_finding_detail
+            {
+                match key.code {
+                    KeyCode::Esc => {
+                        app.palo_focus = PaloFocus::Findings;
+                        continue;
+                    }
+                    KeyCode::Tab | KeyCode::Down => {
+                        app.palo_control_cursor = (app.palo_control_cursor + 1) % 6;
+                        continue;
+                    }
+                    KeyCode::BackTab | KeyCode::Up => {
+                        app.palo_control_cursor =
+                            app.palo_control_cursor.checked_sub(1).unwrap_or(5);
+                        continue;
+                    }
+                    KeyCode::Enter => {
+                        if app.palo_control_cursor < 2 {
+                            app.palo_control_cursor += 1;
+                        } else {
+                            app.palo_control_cursor = 3;
+                        }
+                        continue;
+                    }
+                    KeyCode::Backspace => {
+                        match app.palo_control_cursor {
+                            0 => {
+                                app.palo_config_path.pop();
+                            }
+                            1 => {
+                                app.palo_baseline_path.pop();
+                            }
+                            2 => {
+                                app.palo_team.pop();
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    KeyCode::Char(c) => {
+                        match app.palo_control_cursor {
+                            0 => {
+                                app.palo_config_path.push(c);
+                            }
+                            1 => {
+                                app.palo_baseline_path.push(c);
+                            }
+                            2 => {
+                                if c.is_ascii_digit() {
+                                    app.palo_team.push(c);
+                                }
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
             match key.code {
                 KeyCode::Char('q') => break,
                 KeyCode::Char(d @ '1'..='9') => {
@@ -1942,6 +2221,8 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                     if app.show_finding_detail {
                         app.show_finding_detail = false;
                         app.action_feedback = None;
+                    } else if app.palo_show_finding_detail {
+                        app.palo_show_finding_detail = false;
                     }
                 }
                 KeyCode::Up => match app.tab {
@@ -2015,6 +2296,19 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                             app.router_log_scroll = (app.router_log_scroll + 1).min(max);
                         }
                     },
+                    Tab::PaloAlto => match app.palo_focus {
+                        PaloFocus::Findings => {
+                            let n = app.palo_findings.len();
+                            if n > 0 {
+                                app.palo_findings_cursor =
+                                    app.palo_findings_cursor.checked_sub(1).unwrap_or(n - 1);
+                            }
+                        }
+                        PaloFocus::Controls => {
+                            app.palo_control_cursor =
+                                app.palo_control_cursor.checked_sub(1).unwrap_or(5);
+                        }
+                    },
                     _ => {}
                 },
                 KeyCode::Down => match app.tab {
@@ -2071,6 +2365,17 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                         }
                         RouterFocus::Log => {
                             app.router_log_scroll = app.router_log_scroll.saturating_sub(1);
+                        }
+                    },
+                    Tab::PaloAlto => match app.palo_focus {
+                        PaloFocus::Findings => {
+                            let n = app.palo_findings.len();
+                            if n > 0 {
+                                app.palo_findings_cursor = (app.palo_findings_cursor + 1) % n;
+                            }
+                        }
+                        PaloFocus::Controls => {
+                            app.palo_control_cursor = (app.palo_control_cursor + 1) % 6;
                         }
                     },
                     _ => {}
@@ -2161,6 +2466,42 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                 app.start_router(step_id, None);
                             }
                         }
+                    } else if app.tab == Tab::PaloAlto {
+                        if app.palo_show_finding_detail {
+                            app.palo_show_finding_detail = false;
+                        } else {
+                            match app.palo_focus {
+                                PaloFocus::Findings => {
+                                    if !app.palo_findings.is_empty() {
+                                        app.palo_show_finding_detail = true;
+                                    }
+                                }
+                                PaloFocus::Controls => {
+                                    match app.palo_control_cursor {
+                                        0 | 1 => {
+                                            app.palo_control_cursor += 1;
+                                        }
+                                        2 => {
+                                            app.palo_control_cursor = 3;
+                                        }
+                                        3 => {
+                                            app.run_palo_scan();
+                                        }
+                                        4 => {
+                                            app.export_palo_remediation();
+                                        }
+                                        5 => {
+                                            app.active_wizard = Some(
+                                                crate::wizards::ActiveWizard::PaloAlto(
+                                                    crate::wizards::palo_alto::PaloAltoWizard::new(),
+                                                ),
+                                            );
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 KeyCode::Char('x') => {
@@ -2205,6 +2546,8 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                 KeyCode::Char('s') => {
                     if app.tab == Tab::Scan && app.scan_focus == ScanFocus::Modules {
                         app.start_scan();
+                    } else if app.tab == Tab::PaloAlto {
+                        app.run_palo_scan();
                     }
                 }
                 KeyCode::Char('S') => {
@@ -2238,6 +2581,12 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                             // Reset restart counts when watchdog is freshly enabled.
                             app.watchdog_restart_count.clear();
                         }
+                    } else if app.tab == Tab::PaloAlto {
+                        app.active_wizard = Some(
+                            crate::wizards::ActiveWizard::PaloAlto(
+                                crate::wizards::palo_alto::PaloAltoWizard::new(),
+                            ),
+                        );
                     }
                 }
                 KeyCode::Char('u') => {
@@ -2266,6 +2615,8 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                             Ok(path) => app.action_feedback = Some(format!("Exported: {}", path)),
                             Err(e) => app.action_feedback = Some(format!("Export failed: {}", e)),
                         }
+                    } else if app.tab == Tab::PaloAlto {
+                        app.export_palo_remediation();
                     }
                 }
                 KeyCode::Char('d') => {
@@ -2403,11 +2754,21 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                             RouterFocus::Operations => RouterFocus::Log,
                             RouterFocus::Log => RouterFocus::Operations,
                         };
+                    } else if app.tab == Tab::PaloAlto {
+                        app.palo_focus = match app.palo_focus {
+                            PaloFocus::Findings => PaloFocus::Controls,
+                            PaloFocus::Controls => PaloFocus::Findings,
+                        };
                     }
                 }
                 KeyCode::BackTab => {
                     if app.tab == Tab::Logs {
                         app.log_dashboard.prev_pane();
+                    } else if app.tab == Tab::PaloAlto {
+                        app.palo_focus = match app.palo_focus {
+                            PaloFocus::Findings => PaloFocus::Controls,
+                            PaloFocus::Controls => PaloFocus::Findings,
+                        };
                     }
                 }
                 KeyCode::Char('p') if app.tab == Tab::Logs => {
@@ -2494,6 +2855,9 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
         Tab::Router => {
             render_router(f, rows[1], app);
         }
+        Tab::PaloAlto => {
+            crate::tui::palo_view::render(f, rows[1], app);
+        }
     }
 
     // Wizard overlay renders on top of the full terminal area.
@@ -2521,6 +2885,13 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
     // User input modal renders on top of everything.
     if app.user_input_active {
         render_user_input_modal(f, size, &app.user_input_buf);
+    }
+
+    // Palo Alto finding detail overlay
+    if app.tab == Tab::PaloAlto && app.palo_show_finding_detail {
+        if let Some(finding) = app.palo_findings.get(app.palo_findings_cursor) {
+            render_finding_detail(f, rows[1], finding, app.action_feedback.as_deref());
+        }
     }
 
     render_statusbar(f, rows[2], app);
@@ -2808,6 +3179,26 @@ fn render_statusbar(f: &mut ratatui::Frame, area: Rect, app: &App) {
                 if app.router_pending_confirm.is_some() {
                     right.extend(kb("c", "confirm dialog", Color::Yellow));
                 }
+            }
+        },
+        Tab::PaloAlto if app.palo_show_finding_detail => {
+            right.extend(kb("Esc", "close", key_color));
+        }
+        Tab::PaloAlto => match app.palo_focus {
+            PaloFocus::Findings => {
+                right.extend(kb("Tab", "→ config", key_color));
+                right.extend(kb("↑↓", "select", key_color));
+                right.extend(kb("Enter", "detail", key_color));
+                right.extend(kb("s", "scan", key_color));
+                right.extend(kb("e", "export", key_color));
+                right.extend(kb("w", "wizard", key_color));
+            }
+            PaloFocus::Controls => {
+                right.extend(kb("Tab", "→ findings", key_color));
+                right.extend(kb("↑↓", "field", key_color));
+                right.extend(kb("Enter", "action/next", key_color));
+                right.extend(kb("s", "scan", key_color));
+                right.extend(kb("e", "export", key_color));
             }
         },
     }
@@ -4354,12 +4745,14 @@ fn render_router(f: &mut ratatui::Frame, area: Rect, app: &App) {
             .skip(start)
             .take(visible)
             .map(|s| {
-                let style = if s.starts_with('✓') || s.contains("[ OK ]") {
+                let style = if s.starts_with('✓') || s.contains("[ OK ]") || s.contains("PROOF:") {
                     Style::default().fg(Color::Green)
                 } else if s.starts_with('✗') || s.contains("[ERR ]") || s.contains("ERROR") {
                     Style::default().fg(Color::Red)
-                } else if s.starts_with('→') || s.contains("[INFO]") {
+                } else if s.starts_with('→') || s.contains("[INFO]") || s.contains("[RESTORE]") {
                     Style::default().fg(Color::Cyan)
+                } else if s.contains("[CMD]") {
+                    Style::default().fg(Color::Magenta)
                 } else if s.contains("[WARN]") || s.contains("[!]") {
                     Style::default().fg(Color::Yellow)
                 } else {
@@ -4379,12 +4772,11 @@ mod tests {
     use crate::core::BoxType;
 
     #[test]
-    fn non_router_tabs_exclude_router_and_include_service_restore() {
+    fn server_tabs_include_service_restore() {
         for bt in [
             BoxType::Web,
             BoxType::Mail,
             BoxType::Splunk,
-            BoxType::General,
         ] {
             let tabs = Tab::for_box_type(bt);
             assert_eq!(tabs.len(), 8, "Expected 8 tabs for {:?}", bt);
@@ -4402,6 +4794,7 @@ mod tests {
                 ]
             );
             assert!(!tabs.contains(&Tab::Router));
+            assert!(!tabs.contains(&Tab::PaloAlto));
             assert_eq!(tabs[0], Tab::Dashboard);
             assert_eq!(tabs[1], Tab::Logs);
             assert_eq!(tabs[7], Tab::ServiceRestore);
@@ -4417,6 +4810,39 @@ mod tests {
             assert_eq!(Tab::from_digit('9', bt), None);
             assert_eq!(Tab::from_digit('0', bt), None);
         }
+    }
+
+    #[test]
+    fn workstation_tabs_replace_service_restore_with_palo_alto() {
+        let ws_tabs = Tab::for_box_type(BoxType::General);
+        assert_eq!(ws_tabs.len(), 8, "Expected 8 tabs for General/Workstation");
+        assert_eq!(
+            ws_tabs,
+            &[
+                Tab::Dashboard,
+                Tab::Logs,
+                Tab::Scan,
+                Tab::Hardening,
+                Tab::Backups,
+                Tab::Monitor,
+                Tab::Tools,
+                Tab::PaloAlto,
+            ]
+        );
+        assert!(!ws_tabs.contains(&Tab::ServiceRestore));
+        assert!(!ws_tabs.contains(&Tab::Router));
+        assert_eq!(ws_tabs[0], Tab::Dashboard);
+        assert_eq!(ws_tabs[1], Tab::Logs);
+        assert_eq!(ws_tabs[7], Tab::PaloAlto);
+
+        assert_eq!(Tab::from_digit('1', BoxType::General), Some(Tab::Dashboard));
+        assert_eq!(Tab::from_digit('8', BoxType::General), Some(Tab::PaloAlto));
+        assert_eq!(Tab::from_digit('9', BoxType::General), None);
+
+        assert_eq!(Tab::digit_for(Tab::PaloAlto, BoxType::General), Some('8'));
+        assert_eq!(Tab::digit_for(Tab::ServiceRestore, BoxType::General), None);
+        assert_eq!(Tab::digit_for(Tab::PaloAlto, BoxType::Web), None);
+        assert_eq!(Tab::digit_for(Tab::PaloAlto, BoxType::Router), None);
     }
 
     #[test]

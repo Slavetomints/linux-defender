@@ -892,6 +892,28 @@ impl PaloAltoFinding {
             Severity::Info => Verdict::Info,
         };
 
+        let drift_reason = match self.check_id {
+            "AUD-DEST-PUB" => "Incoming packets translated to private IP by upstream VyOS will hit DENYINBOUND on firewall",
+            "AUD-RED-NAT" => "Static NAT rule duplicates upstream VyOS DNAT, causing routing and state desync",
+            "AUD-DIS-RULE" => "Scored service security rule administratively disabled",
+            "AUD-MISS-RULE" => "Required scored rule absent from security rulebase",
+            "AUD-ROG-ALLOW" => "Allow rule not present in approved CCDC baseline whitelist",
+            "AUD-MGMT-OPEN" => "Permitted-IP list is empty or contains unrestricted wildcard",
+            "AUD-MGMT-SUB" => "Permitted-IP exposes management to entire internal subnet",
+            "AUD-AD-EXPOSE" => "AllowAD-AppID exposes non-scored AD services to External zone",
+            "AUD-IFACE-SETUP" => "Current interface configuration captured",
+            "AUD-IFACE-MGMT" => "Management profile attached to data-plane interface",
+            "AUD-IFACE-NO-ZONE" => "Layer 3 interface has configured IP but is unassigned to any security zone",
+            "AUD-IFACE-EXTRA" => "Non-baseline interface or standard interface configured with unexpected zone/subnet",
+            "AUD-ZONE-MISMATCH" => "Rule references security zone not defined in firewall zone table",
+            "DIFF-MISSING-RULE" => "Baseline rule missing from running configuration",
+            "DIFF-EXTRA-RULE" => "Unexpected rule present in running configuration",
+            "DIFF-STATE-MISMATCH" => "Rule disabled status differs from baseline",
+            "DIFF-DEST-MISMATCH" => "Rule destination addresses differ from baseline",
+            "DIFF-EXTRA-NAT" => "Unexpected NAT rule present in running configuration",
+            _ => "Configuration anomaly detected",
+        };
+
         let mut finding = Finding::new(
             self.severity,
             "palo-alto",
@@ -900,7 +922,12 @@ impl PaloAltoFinding {
         )
         .with_context("Check ID", self.check_id)
         .with_context("Target", &self.target)
+        .with_context("Drift Reason", drift_reason)
         .with_verdict(verdict, "Apply recommended PAN-OS CLI remediation");
+
+        if !self.remediation.is_empty() {
+            finding = finding.with_context("CLI Fix", &self.remediation.join(" ; "));
+        }
 
         if let Some(cmd) = self.remediation.first() {
             finding = finding.with_action(Action::Manual(cmd.clone()));

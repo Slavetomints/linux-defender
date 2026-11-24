@@ -2466,6 +2466,26 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                 app.start_router(step_id, None);
                             }
                         }
+                    } else if app.tab == Tab::Tools {
+                        use crate::tui::tools_view::SelectedTool;
+                        if let SelectedTool::Wizard(idx) =
+                            SelectedTool::from_cursor(app.tools_cursor)
+                        {
+                            let wizards = crate::tools::catalog::wizards_for_box_type(app.box_type);
+                            if let Some(w_def) = wizards.get(idx) {
+                                if w_def.name == "palo_alto_audit" && app.box_type == BoxType::General {
+                                    app.tab = Tab::PaloAlto;
+                                    app.palo_focus = PaloFocus::Controls;
+                                    app.action_feedback = Some("Switched to Palo Alto Audit tab [8]".into());
+                                    continue;
+                                }
+                            }
+                            if let Some(w) =
+                                crate::wizards::ActiveWizard::new(idx, app.box_type)
+                            {
+                                app.active_wizard = Some(w);
+                            }
+                        }
                     } else if app.tab == Tab::PaloAlto {
                         if app.palo_show_finding_detail {
                             app.palo_show_finding_detail = false;
@@ -2678,6 +2698,15 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resul
                                 });
                             }
                             SelectedTool::Wizard(idx) => {
+                                let wizards = crate::tools::catalog::wizards_for_box_type(app.box_type);
+                                if let Some(w_def) = wizards.get(idx) {
+                                    if w_def.name == "palo_alto_audit" && app.box_type == BoxType::General {
+                                        app.tab = Tab::PaloAlto;
+                                        app.palo_focus = PaloFocus::Controls;
+                                        app.action_feedback = Some("Switched to Palo Alto Audit tab [8]".into());
+                                        continue;
+                                    }
+                                }
                                 if let Some(w) =
                                     crate::wizards::ActiveWizard::new(idx, app.box_type)
                                 {
@@ -4892,6 +4921,15 @@ mod tests {
 
         assert_eq!(Tab::digit_for(Tab::Scan, BoxType::Web), Some('3'));
         assert_eq!(Tab::digit_for(Tab::Hardening, BoxType::Web), Some('4'));
+    }
+
+    #[test]
+    fn general_box_tools_wizard_selection_identifies_palo_alto() {
+        let wizards = crate::tools::catalog::wizards_for_box_type(BoxType::General);
+        let pa_idx = wizards.iter().position(|w| w.name == "palo_alto_audit");
+        assert!(pa_idx.is_some(), "Palo Alto wizard should exist for General");
+        let idx = pa_idx.unwrap();
+        assert_eq!(wizards[idx].name, "palo_alto_audit");
     }
 }
 

@@ -430,8 +430,41 @@ pub fn evaluate_config_nat_status(content: &str) -> (RouterSubsystemStatus, Stri
     }
 }
 
-/// Evaluates raw VyOS configuration text for static routing and rogue tunnel status.
-pub fn evaluate_config_routes_status(content: &str) -> (RouterSubsystemStatus, String) {
+/// Parsed static route record extracted from VyOS `protocols static` configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedStaticRoute {
+    /// Destination CIDR prefix (e.g. "0.0.0.0/0", "172.20.240.0/24").
+    pub prefix: String,
+    /// Configured next-hop IP address, if present.
+    pub next_hop: Option<String>,
+    /// True if configured as `blackhole` or `reject`.
+    pub is_blackhole: bool,
+}
+
+/// Comprehensive protocol and routing drift audit outcome.
+#[derive(Debug, Clone)]
+pub struct ProtocolDriftOutcome {
+    /// Expected Core Gateway IP derived from WAN interface (`172.31.{OCTET}.1`), if determinable.
+    pub expected_wan_gw: Option<String>,
+    /// Configured next-hop for default route `0.0.0.0/0`.
+    pub default_route_nh: Option<String>,
+    /// Configured next-hop for Servers DMZ transit route `172.20.240.0/24`.
+    pub dmz_transit_nh: Option<String>,
+    /// Unexpected, blackhole, or hijacked static routes outside baseline `{0.0.0.0/0, 172.20.240.0/24}`.
+    pub unexpected_static_routes: Vec<ParsedStaticRoute>,
+    /// Unauthorized dynamic routing protocols configured under `protocols` (anything other than `static`).
+    pub rogue_protocols: Vec<String>,
+    /// Discrepancies detected in live kernel routing table (`ip -4 route show`) vs baseline.
+    pub kernel_drift: Vec<String>,
+    /// Validated routes cached for Tab [4] detected-state restore.
+    pub detected_routes: Vec<DetectedRoute>,
+}
+
+/// Evaluates raw VyOS configuration text (and optional kernel FIB) for protocol/route drift and rogue tunnels.
+pub fn evaluate_config_routes_status_with_kernel(
+    content: &str,
+    kernel_routes: Option<&str>,
+) -> (RouterSubsystemStatus, String) {
     if content.trim().is_empty() {
         return (
             RouterSubsystemStatus::PendingScan,
@@ -449,30 +482,72 @@ pub fn evaluate_config_routes_status(content: &str) -> (RouterSubsystemStatus, S
         }
     }
 
-    let has_default = detect_static_route(content, "0.0.0.0/0").is_some();
-    let has_transit = detect_static_route(content, "172.20.240.0/24").is_some();
+    let outcome = audit_protocols_and_routes(content, kernel_routes);
 
-    if has_default && has_transit {
-        (
-            RouterSubsystemStatus::Valid,
-            "Configured & Valid (WAN Default & DMZ Transit Active)".into(),
-        )
-    } else if !has_default && !has_transit {
-        (
+    if let Some(proto) = outcome.rogue_protocols.first() {
+        return (
             RouterSubsystemStatus::Invalid,
-            "Missing Default (0.0.0.0/0) & DMZ Transit (172.20.240.0/24) Routes".into(),
-        )
-    } else if !has_default {
-        (
-            RouterSubsystemStatus::Invalid,
-            "Missing Default Route (0.0.0.0/0)".into(),
-        )
-    } else {
-        (
-            RouterSubsystemStatus::Invalid,
-            "Missing DMZ Transit Route (172.20.240.0/24)".into(),
-        )
+            format!("Unauthorized routing protocol configured: '{}'", proto),
+        );
     }
+
+    match (&outcome.default_route_nh, &outcome.dmz_transit_nh) {
+        (None, None) => {
+            return (
+                RouterSubsystemStatus::Invalid,
+                "Missing Default (0.0.0.0/0) & DMZ Transit (172.20.240.0/24) Routes".into(),
+            );
+        }
+        (None, _) => {
+            return (
+                RouterSubsystemStatus::Invalid,
+                "Missing Default Route (0.0.0.0/0)".into(),
+            );
+        }
+        (_, None) => {
+            return (
+                RouterSubsystemStatus::Invalid,
+                "Missing DMZ Transit Route (172.20.240.0/24)".into(),
+            );
+        }
+        (Some(def_nh), Some(dmz_nh)) => {
+            if let Some(ref exp_gw) = outcome.expected_wan_gw
+                && def_nh != exp_gw
+            {
+                return (
+                    RouterSubsystemStatus::Invalid,
+                    format!("Default route drift: 0.0.0.0/0 -> {} (expected {})", def_nh, exp_gw),
+                );
+            }
+            if dmz_nh != "172.16.0.1" {
+                return (
+                    RouterSubsystemStatus::Invalid,
+                    format!("DMZ transit drift: 172.20.240.0/24 -> {} (expected 172.16.0.1)", dmz_nh),
+                );
+            }
+        }
+    }
+
+    if let Some(extra) = outcome.unexpected_static_routes.first() {
+        return (
+            RouterSubsystemStatus::Invalid,
+            format!("Unexpected static route configured: {}", extra.prefix),
+        );
+    }
+
+    if let Some(kd) = outcome.kernel_drift.first() {
+        return (RouterSubsystemStatus::Invalid, kd.clone());
+    }
+
+    (
+        RouterSubsystemStatus::Valid,
+        "Configured & Valid (WAN Default & DMZ Transit Active)".into(),
+    )
+}
+
+/// Evaluates raw VyOS configuration text for static routing, protocol baseline, and rogue tunnel status.
+pub fn evaluate_config_routes_status(content: &str) -> (RouterSubsystemStatus, String) {
+    evaluate_config_routes_status_with_kernel(content, None)
 }
 
 /// Evaluates live NAT status from persistent configuration or cached runtime state.
@@ -484,19 +559,22 @@ pub fn evaluate_live_nat_status() -> Option<(RouterSubsystemStatus, String)> {
     }
 }
 
-/// Evaluates live routing status from persistent configuration or system routing table.
+/// Evaluates live routing status from persistent configuration and system routing table.
 pub fn evaluate_live_routes_status() -> Option<(RouterSubsystemStatus, String)> {
+    let live_kernel = run_cmd_output("ip", &["-4", "route", "show"])
+        .or_else(|| run_cmd_output("ip", &["route", "show"]));
+
     if let Some((_, content)) = load_config_boot() {
-        let (st, desc) = evaluate_config_routes_status(&content);
-        if st == RouterSubsystemStatus::Valid {
-            return Some((st, desc));
-        }
+        return Some(evaluate_config_routes_status_with_kernel(
+            &content,
+            live_kernel.as_deref(),
+        ));
     }
 
-    // Check kernel routing table fallback via `ip route show` or `/proc/net/route`
-    if let Some(out) = run_cmd_output("ip", &["route", "show"]) {
+    // Fallback to kernel routing table if config.boot unavailable
+    if let Some(out) = live_kernel {
         let has_default = out.contains("default via");
-        let has_transit = out.contains("172.20.240.0/24 via");
+        let has_transit = out.contains("172.20.240.0/24 via 172.16.0.1");
         if has_default && has_transit {
             return Some((
                 RouterSubsystemStatus::Valid,
@@ -505,11 +583,7 @@ pub fn evaluate_live_routes_status() -> Option<(RouterSubsystemStatus, String)> 
         }
     }
 
-    if let Some((_, content)) = load_config_boot() {
-        Some(evaluate_config_routes_status(&content))
-    } else {
-        None
-    }
+    None
 }
 
 /// IP-Centric NAT audit outcome.
@@ -531,7 +605,7 @@ pub struct NatIpAuditOutcome {
     pub outbound_pat_active: bool,
 }
 
-/// Dispatch execution for any of the 14 router audit scan modules by ID.
+/// Dispatch execution for any of the 15 router audit scan modules by ID.
 pub fn run_module(id: &str, ctx: &DefenderContext) {
     match id {
         "router_version" => scan_version(ctx),
@@ -548,6 +622,7 @@ pub fn run_module(id: &str, ctx: &DefenderContext) {
         "router_commit_history" => scan_commit_history(ctx),
         "router_nat" => scan_nat(ctx),
         "router_services_whitelist" => scan_services_whitelist(ctx),
+        "router_protocols" => scan_protocols(ctx),
         _ => {
             ctx.progress(&format!("Unknown router scan module ID: {}", id));
         }
@@ -1196,88 +1271,30 @@ pub fn scan_users(ctx: &DefenderContext) {
 // ==============================================================================
 // 6. Network Interfaces, Tunnels & VPNs
 // ==============================================================================
-/// Module 6: Audits network interface addresses, rogue tunnels, and static routes.
+/// Module 6: Audits network interface definitions and detects rogue tunnels/VPNs.
+/// (Protocol and static route drift checks live in Module 15: `router_protocols`.)
 pub fn scan_interfaces(ctx: &DefenderContext) {
-    ctx.progress("[*] Module 6: Auditing Network Interfaces, Tunnels & Static Routes...");
+    ctx.progress("[*] Module 6: Auditing Network Interfaces, Tunnels & VPNs...");
 
     let (_, content) = match load_config_boot() {
         Some(pair) => pair,
         None => (PathBuf::from("/config/config.boot"), String::new()),
     };
 
-    let mut detected_routes: Vec<DetectedRoute> = Vec::new();
+    let mut rogue_tunnel_found = false;
+    let iface_block = find_named_block(&content, "interfaces");
 
-    // Default route check
-    let (has_default_route, def_gateway) = match detect_static_route(&content, "0.0.0.0/0") {
-        Some(nh) if !nh.is_empty() => (true, nh),
-        _ => (false, String::new()),
-    };
-
-    if has_default_route {
-        detected_routes.push(DetectedRoute {
-            prefix: "0.0.0.0/0".into(),
-            next_hop: def_gateway.clone(),
-            is_valid: true,
-        });
-        let mut finding = Finding::new(
-            Severity::Info,
-            "router_interfaces",
-            format!("Default Route Active: 0.0.0.0/0 via {}", def_gateway),
-            format!("Upstream WAN gateway: {}", def_gateway),
-        );
-        finding.context.push(("Route", "0.0.0.0/0".into()));
-        finding.context.push(("Next-Hop", def_gateway));
-        ctx.emit(finding);
-    } else {
-        let mut finding = Finding::new(
-            Severity::Critical,
-            "router_interfaces",
-            "Missing Default Route (0.0.0.0/0): WAN egress gateway unreachable",
-            "Router cannot reach upstream competition network.",
-        );
-        finding.context.push(("Missing Route", "0.0.0.0/0".into()));
-        finding.recommendation = "Deploy transit routes in Tab [4] Router Operations.".into();
-        ctx.emit(finding);
-    }
-
-    // Transit route check
-    let (has_servers_route, srv_gateway) = match detect_static_route(&content, "172.20.240.0/24") {
-        Some(nh) if !nh.is_empty() => (true, nh),
-        _ => (false, String::new()),
-    };
-
-    if has_servers_route {
-        detected_routes.push(DetectedRoute {
-            prefix: "172.20.240.0/24".into(),
-            next_hop: srv_gateway.clone(),
-            is_valid: true,
-        });
-        let mut finding = Finding::new(
-            Severity::Info,
-            "router_interfaces",
-            format!("Servers DMZ Transit Route Active: 172.20.240.0/24 via {}", srv_gateway),
-            format!("Firewall next-hop: {}", srv_gateway),
-        );
-        finding.context.push(("Route", "172.20.240.0/24".into()));
-        finding.context.push(("Next-Hop", srv_gateway));
-        ctx.emit(finding);
-    } else {
-        let mut finding = Finding::new(
-            Severity::High,
-            "router_interfaces",
-            "Missing Static Transit Route to Servers DMZ (172.20.240.0/24)",
-            "Traffic to internal servers cannot route across firewall interface.",
-        );
-        finding.context.push(("Missing Route", "172.20.240.0/24".into()));
-        finding.recommendation = "Add static route 172.20.240.0/24 next-hop 172.16.0.1.".into();
-        ctx.emit(finding);
-    }
-
-    save_detected_nat_routes(&[], &detected_routes, false);
-
-    // Check rogue tunnels
+    // Check rogue tunnels in both flat commands and hierarchical `interfaces { <tunnel> ... }`
     for tunnel in &["wireguard", "openvpn", "vti", "tunnel", "pseudo-ethernet", "vxlan"] {
-        if content.contains(&format!("interfaces {} ", tunnel)) {
+        let in_flat = content.contains(&format!("interfaces {} ", tunnel));
+        let in_hier = iface_block.is_some_and(|ib| {
+            ib.lines().any(|l| {
+                let t = l.trim_start();
+                t.starts_with(&format!("{} ", tunnel)) || t == format!("{}{{", tunnel)
+            })
+        });
+        if in_flat || in_hier {
+            rogue_tunnel_found = true;
             let mut finding = Finding::new(
                 Severity::Critical,
                 "router_interfaces",
@@ -1288,6 +1305,20 @@ pub fn scan_interfaces(ctx: &DefenderContext) {
             finding.recommendation = "Remove rogue tunnel interface: delete interfaces <type>.".into();
             ctx.emit(finding);
         }
+    }
+
+    if !rogue_tunnel_found {
+        let wan_gw = derive_expected_wan_gateway(&content)
+            .unwrap_or_else(|| "not configured in interfaces".to_string());
+        let mut finding = Finding::new(
+            Severity::Info,
+            "router_interfaces",
+            "Network Interfaces Clean: No unauthorized tunnels or VPN interfaces detected",
+            format!("Expected WAN gateway from interface addressing: {}", wan_gw),
+        );
+        finding.context.push(("Tunnel Check", "Clean (0 rogue tunnels)".into()));
+        finding.context.push(("Derived WAN Gateway", wan_gw));
+        ctx.emit(finding);
     }
 }
 
@@ -2122,6 +2153,466 @@ pub fn scan_services_whitelist(ctx: &DefenderContext) {
         finding.context.push(("Status", "Clean".into()));
         ctx.emit(finding);
     }
+}
+
+// ==============================================================================
+// 15. Routing Protocols & Default Route Drift
+// ==============================================================================
+
+/// Derives the expected upstream Core Gateway IP (`172.31.{OCTET}.1`) from configured WAN interface addressing.
+pub fn derive_expected_wan_gateway(content: &str) -> Option<String> {
+    let iface_scope = find_named_block(content, "interfaces").unwrap_or(content);
+    for token in iface_scope.split(|c: char| c.is_whitespace() || matches!(c, '{' | '}' | ';' | '\'' | '"')) {
+        let ip = token.split('/').next().unwrap_or("");
+        let parts: Vec<&str> = ip.split('.').collect();
+        if parts.len() == 4
+            && parts[0] == "172"
+            && parts[1] == "31"
+            && parts[3] == "2"
+            && let Ok(octet) = parts[2].parse::<u8>()
+            && (21..=40).contains(&octet)
+        {
+            return Some(format!("172.31.{}.1", octet));
+        }
+    }
+    None
+}
+
+/// Parses configured routing protocol stanzas (`protocols { ... }`) and all static routes.
+pub fn parse_protocols_and_routes(content: &str) -> (Vec<String>, Vec<ParsedStaticRoute>) {
+    let mut protocols: Vec<String> = Vec::new();
+    let mut routes: Vec<ParsedStaticRoute> = Vec::new();
+
+    let mut push_proto = |p: &str| {
+        let trimmed = p.trim_matches(|c| c == '\'' || c == '"');
+        if !trimmed.is_empty() && !protocols.iter().any(|x| x == trimmed) {
+            protocols.push(trimmed.to_string());
+        }
+    };
+
+    let mut upsert_route = |prefix: &str, nh: Option<String>, blackhole: bool| {
+        let p = prefix.trim_matches(|c| c == '\'' || c == '"').to_string();
+        if p.is_empty() {
+            return;
+        }
+        if let Some(existing) = routes.iter_mut().find(|r| r.prefix == p) {
+            if let Some(n) = nh {
+                existing.next_hop = Some(n);
+            }
+            if blackhole {
+                existing.is_blackhole = true;
+            }
+        } else {
+            routes.push(ParsedStaticRoute {
+                prefix: p,
+                next_hop: nh,
+                is_blackhole: blackhole,
+            });
+        }
+    };
+
+    // 1. Parse flat `set protocols ...` commands
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("set protocols ") {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if let Some(&proto) = parts.first() {
+                push_proto(proto);
+                if proto == "static" && parts.len() >= 4 && parts[1] == "route" {
+                    let prefix = parts[2];
+                    if parts[3] == "next-hop" && parts.len() >= 5 {
+                        let nh = parts[4].trim_matches(|c| c == '\'' || c == '"').to_string();
+                        upsert_route(prefix, Some(nh), false);
+                    } else if parts[3] == "blackhole" || parts[3] == "reject" {
+                        upsert_route(prefix, None, true);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Parse hierarchical `protocols { ... }` block
+    if let Some(proto_body) = find_named_block(content, "protocols") {
+        let mut depth: usize = 0;
+        let mut token = String::new();
+        let mut in_comment = false;
+        let chars: Vec<char> = proto_body.chars().collect();
+        let mut idx = 0;
+        while idx < chars.len() {
+            let c = chars[idx];
+            if in_comment {
+                if c == '\n' {
+                    in_comment = false;
+                }
+                idx += 1;
+                continue;
+            }
+            if depth == 0 && (c == '#' || (c == '/' && idx + 1 < chars.len() && chars[idx + 1] == '/')) {
+                in_comment = true;
+                token.clear();
+                idx += 1;
+                continue;
+            }
+            if c == '{' {
+                if depth == 0 {
+                    let name = token.split_whitespace().last().unwrap_or("");
+                    if !name.is_empty() {
+                        push_proto(name);
+                    }
+                }
+                token.clear();
+                depth += 1;
+            } else if c == '}' {
+                token.clear();
+                depth = depth.saturating_sub(1);
+            } else if depth == 0 {
+                if c == '\n' || c == ';' {
+                    token.clear();
+                } else {
+                    token.push(c);
+                }
+            }
+            idx += 1;
+        }
+
+        if let Some(static_body) = find_named_block(proto_body, "static") {
+            let mut search_idx = 0;
+            while let Some(rel) = static_body[search_idx..].find("route ") {
+                let pos = search_idx + rel;
+                search_idx = pos + 6;
+                if pos > 0 {
+                    let prev = static_body[..pos].chars().last().unwrap();
+                    if !prev.is_whitespace() && prev != '{' && prev != ';' {
+                        continue;
+                    }
+                }
+                let after = &static_body[pos + 6..];
+                let prefix: String = after
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| !c.is_whitespace() && *c != '{')
+                    .collect();
+                if prefix.is_empty() {
+                    continue;
+                }
+                let leading_ws = after.len() - after.trim_start().len();
+                let after_prefix = &after[leading_ws + prefix.len()..];
+                if let Some(brace_rel) = after_prefix.find('{') {
+                    let open_brace = pos + 6 + leading_ws + prefix.len() + brace_rel;
+                    if let Some(route_body) = extract_braced_block(static_body, open_brace) {
+                        let is_blackhole = route_body.contains("blackhole") || route_body.contains("reject");
+                        let nh = route_body.find("next-hop").and_then(|nh_idx| {
+                            let ip_tok: String = route_body[nh_idx + 8..]
+                                .trim_start()
+                                .chars()
+                                .take_while(|c| {
+                                    !c.is_whitespace()
+                                        && *c != '{'
+                                        && *c != ';'
+                                        && *c != '\''
+                                        && *c != '"'
+                                })
+                                .collect();
+                            if ip_tok.is_empty() {
+                                None
+                            } else {
+                                Some(ip_tok)
+                            }
+                        });
+                        upsert_route(&prefix, nh, is_blackhole);
+                    }
+                }
+            }
+        }
+    }
+
+    (protocols, routes)
+}
+
+/// Audits VyOS protocols, baseline static routes, unexpected routes, and optional live kernel FIB output.
+pub fn audit_protocols_and_routes(
+    content: &str,
+    kernel_routes: Option<&str>,
+) -> ProtocolDriftOutcome {
+    let (protocols, routes) = parse_protocols_and_routes(content);
+    let expected_wan_gw = derive_expected_wan_gateway(content);
+
+    let rogue_protocols: Vec<String> = protocols
+        .into_iter()
+        .filter(|p| p != "static")
+        .collect();
+
+    let mut default_route_nh: Option<String> = None;
+    let mut dmz_transit_nh: Option<String> = None;
+    let mut unexpected_static_routes: Vec<ParsedStaticRoute> = Vec::new();
+    let mut detected_routes: Vec<DetectedRoute> = Vec::new();
+
+    for r in routes {
+        if r.prefix == "0.0.0.0/0" {
+            if r.is_blackhole {
+                unexpected_static_routes.push(r.clone());
+            } else if let Some(ref nh) = r.next_hop {
+                default_route_nh = Some(nh.clone());
+                let gw_ok = expected_wan_gw.as_ref().is_none_or(|exp| exp == nh);
+                detected_routes.push(DetectedRoute {
+                    prefix: "0.0.0.0/0".into(),
+                    next_hop: nh.clone(),
+                    is_valid: gw_ok,
+                });
+            }
+        } else if r.prefix == "172.20.240.0/24" {
+            if r.is_blackhole {
+                unexpected_static_routes.push(r.clone());
+            } else if let Some(ref nh) = r.next_hop {
+                dmz_transit_nh = Some(nh.clone());
+                detected_routes.push(DetectedRoute {
+                    prefix: "172.20.240.0/24".into(),
+                    next_hop: nh.clone(),
+                    is_valid: nh == "172.16.0.1",
+                });
+            }
+        } else {
+            unexpected_static_routes.push(r);
+        }
+    }
+
+    let mut kernel_drift: Vec<String> = Vec::new();
+    if let Some(kr) = kernel_routes
+        && !kr.trim().is_empty()
+    {
+        let mut live_default_nh: Option<String> = None;
+        let mut live_dmz_nh: Option<String> = None;
+
+        for line in kr.lines() {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            if tokens.is_empty() {
+                continue;
+            }
+            if tokens[0] == "default" {
+                if let Some(via_idx) = tokens.iter().position(|&t| t == "via")
+                    && let Some(&nh) = tokens.get(via_idx + 1)
+                {
+                    live_default_nh = Some(nh.to_string());
+                }
+            } else if tokens[0] == "172.20.240.0/24" {
+                if let Some(via_idx) = tokens.iter().position(|&t| t == "via")
+                    && let Some(&nh) = tokens.get(via_idx + 1)
+                {
+                    live_dmz_nh = Some(nh.to_string());
+                }
+            } else if tokens[0] == "0.0.0.0/1"
+                || tokens[0] == "128.0.0.0/1"
+                || tokens[0] == "blackhole"
+                || tokens[0] == "prohibit"
+                || tokens[0].starts_with("172.20.240.")
+                || tokens[0].starts_with("172.25.")
+            {
+                kernel_drift.push(format!("Suspicious runtime kernel route: '{}'", line.trim()));
+            }
+        }
+
+        match &live_default_nh {
+            None => kernel_drift.push("Missing default route in live kernel FIB (`ip -4 route show`)".into()),
+            Some(live_gw) => {
+                if let Some(ref exp) = expected_wan_gw
+                    && live_gw != exp
+                {
+                    kernel_drift.push(format!(
+                        "Kernel default route drift: live 'default via {}' differs from expected '{}'",
+                        live_gw, exp
+                    ));
+                } else if let Some(ref cfg_gw) = default_route_nh
+                    && live_gw != cfg_gw
+                {
+                    kernel_drift.push(format!(
+                        "Kernel default route out of sync with config.boot: live '{}' vs config '{}'",
+                        live_gw, cfg_gw
+                    ));
+                }
+            }
+        }
+
+        match &live_dmz_nh {
+            None => kernel_drift.push("Missing 172.20.240.0/24 DMZ transit route in live kernel FIB".into()),
+            Some(live_nh) => {
+                if live_nh != "172.16.0.1" {
+                    kernel_drift.push(format!(
+                        "Kernel DMZ transit drift: live '172.20.240.0/24 via {}' differs from expected '172.16.0.1'",
+                        live_nh
+                    ));
+                }
+            }
+        }
+    }
+
+    ProtocolDriftOutcome {
+        expected_wan_gw,
+        default_route_nh,
+        dmz_transit_nh,
+        unexpected_static_routes,
+        rogue_protocols,
+        kernel_drift,
+        detected_routes,
+    }
+}
+
+/// Module 15: Dedicated VyOS audit for `protocols` baseline and default/DMZ route drift.
+pub fn scan_protocols(ctx: &DefenderContext) {
+    ctx.progress("[*] Module 15: Auditing Routing Protocols & Baseline Route Drift...");
+
+    let (_, mut content) = match load_config_boot() {
+        Some(pair) => pair,
+        None => (PathBuf::from("/config/config.boot"), String::new()),
+    };
+
+    let live_kernel = run_cmd_output("ip", &["-4", "route", "show"])
+        .or_else(|| run_cmd_output("ip", &["route", "show"]));
+
+    // If config.boot lacks eth0 WAN IP, supplement expected GW derivation from live `ip -4 addr show`
+    if derive_expected_wan_gateway(&content).is_none()
+        && let Some(addr_out) = run_cmd_output("ip", &["-4", "addr", "show"])
+        && let Some(gw) = derive_expected_wan_gateway(&addr_out)
+    {
+        let wan_octet = gw.split('.').nth(2).unwrap_or("40");
+        content.push_str(&format!("\ninterfaces {{ ethernet eth0 {{ address 172.31.{}.2/29 }} }}\n", wan_octet));
+    }
+
+    let outcome = audit_protocols_and_routes(&content, live_kernel.as_deref());
+
+    // 1. Unauthorized dynamic routing protocols (anything other than `protocols static`)
+    for proto in &outcome.rogue_protocols {
+        let mut finding = Finding::new(
+            Severity::Critical,
+            "router_protocols",
+            format!("Unauthorized Routing Protocol Enabled: 'protocols {}'", proto),
+            format!("VyOS CCDC baseline permits only 'protocols static'; found active '{}' stanza.", proto),
+        );
+        finding.context.push(("Protocol", proto.clone()));
+        finding.recommendation = format!("Remove rogue protocol in VyOS: delete protocols {} && commit && save.", proto);
+        ctx.emit(finding);
+    }
+
+    // 2. Default Route (0.0.0.0/0) presence and gateway drift
+    match (&outcome.default_route_nh, &outcome.expected_wan_gw) {
+        (None, _) => {
+            let mut finding = Finding::new(
+                Severity::Critical,
+                "router_protocols",
+                "Missing Default Route (0.0.0.0/0): WAN egress gateway unreachable",
+                "No valid `protocols static route 0.0.0.0/0` configured in VyOS.",
+            );
+            finding.context.push(("Route", "0.0.0.0/0".into()));
+            if let Some(ref exp) = outcome.expected_wan_gw {
+                finding.context.push(("Expected Next-Hop", exp.clone()));
+            }
+            finding.recommendation = "Restore baseline routes in Tab [4] Router Operations ('Restore NAT Baseline on Router').".into();
+            ctx.emit(finding);
+        }
+        (Some(actual_gw), Some(expected_gw)) if actual_gw != expected_gw => {
+            let mut finding = Finding::new(
+                Severity::Critical,
+                "router_protocols",
+                format!("Default Route Gateway Drift: 0.0.0.0/0 -> {} (expected {})", actual_gw, expected_gw),
+                format!("Default route next-hop '{}' does not match Team Core Gateway '{}'.", actual_gw, expected_gw),
+            );
+            finding.context.push(("Route", "0.0.0.0/0".into()));
+            finding.context.push(("Configured Next-Hop", actual_gw.clone()));
+            finding.context.push(("Expected Next-Hop", expected_gw.clone()));
+            finding.recommendation = format!("Run Tab [4] route restore or set protocols static route 0.0.0.0/0 next-hop {}.", expected_gw);
+            ctx.emit(finding);
+        }
+        (Some(actual_gw), _) => {
+            let mut finding = Finding::new(
+                Severity::Info,
+                "router_protocols",
+                format!("Default Route Valid: 0.0.0.0/0 via {}", actual_gw),
+                format!("Upstream WAN Core Gateway matches baseline: {}", actual_gw),
+            );
+            finding.context.push(("Route", "0.0.0.0/0".into()));
+            finding.context.push(("Next-Hop", actual_gw.clone()));
+            ctx.emit(finding);
+        }
+    }
+
+    // 3. Servers DMZ Transit Route (172.20.240.0/24 -> 172.16.0.1 Palo Alto Outside)
+    match &outcome.dmz_transit_nh {
+        None => {
+            let mut finding = Finding::new(
+                Severity::High,
+                "router_protocols",
+                "Missing Static Transit Route to Servers DMZ (172.20.240.0/24)",
+                "Traffic to scored DMZ servers cannot route across Palo Alto Outside (172.16.0.1).",
+            );
+            finding.context.push(("Route", "172.20.240.0/24".into()));
+            finding.context.push(("Expected Next-Hop", "172.16.0.1".into()));
+            finding.recommendation = "Run Tab [4] route restore or set protocols static route 172.20.240.0/24 next-hop 172.16.0.1.".into();
+            ctx.emit(finding);
+        }
+        Some(actual_nh) if actual_nh != "172.16.0.1" => {
+            let mut finding = Finding::new(
+                Severity::High,
+                "router_protocols",
+                format!("DMZ Transit Route Drift: 172.20.240.0/24 -> {} (expected 172.16.0.1)", actual_nh),
+                format!("Configured next-hop '{}' does not point to Palo Alto Outside (172.16.0.1).", actual_nh),
+            );
+            finding.context.push(("Route", "172.20.240.0/24".into()));
+            finding.context.push(("Configured Next-Hop", actual_nh.clone()));
+            finding.context.push(("Expected Next-Hop", "172.16.0.1".into()));
+            finding.recommendation = "Run Tab [4] route restore or set protocols static route 172.20.240.0/24 next-hop 172.16.0.1.".into();
+            ctx.emit(finding);
+        }
+        Some(actual_nh) => {
+            let mut finding = Finding::new(
+                Severity::Info,
+                "router_protocols",
+                format!("Servers DMZ Transit Route Valid: 172.20.240.0/24 via {}", actual_nh),
+                "Firewall next-hop matches Palo Alto Outside baseline (172.16.0.1).",
+            );
+            finding.context.push(("Route", "172.20.240.0/24".into()));
+            finding.context.push(("Next-Hop", actual_nh.clone()));
+            ctx.emit(finding);
+        }
+    }
+
+    // 4. Unexpected / Rogue static routes & blackholes
+    for extra in &outcome.unexpected_static_routes {
+        let is_hijack = extra.is_blackhole
+            || extra.prefix == "0.0.0.0/1"
+            || extra.prefix == "128.0.0.0/1"
+            || extra.prefix.starts_with("172.20.240.")
+            || extra.prefix.starts_with("172.25.");
+        let sev = if is_hijack { Severity::Critical } else { Severity::High };
+        let target_desc = if extra.is_blackhole {
+            "blackhole/reject".to_string()
+        } else {
+            extra.next_hop.clone().unwrap_or_else(|| "interface/unknown".into())
+        };
+        let mut finding = Finding::new(
+            sev,
+            "router_protocols",
+            format!("Unexpected Static Route Drift: {} -> {}", extra.prefix, target_desc),
+            "Static route is outside the CCDC baseline ({0.0.0.0/0, 172.20.240.0/24}) and may hijack or blackhole traffic.",
+        );
+        finding.context.push(("Unexpected Prefix", extra.prefix.clone()));
+        finding.context.push(("Target", target_desc));
+        finding.recommendation = format!("Verify and remove rogue route: delete protocols static route {}.", extra.prefix);
+        ctx.emit(finding);
+    }
+
+    // 5. Live kernel FIB drift vs baseline/config
+    for drift in &outcome.kernel_drift {
+        let mut finding = Finding::new(
+            Severity::Critical,
+            "router_protocols",
+            drift.clone(),
+            "Runtime kernel routing table (`ip -4 route show`) differs from VyOS baseline.",
+        );
+        finding.context.push(("Source", "ip -4 route show".into()));
+        finding.recommendation = "Investigate unauthorized `ip route` manipulation and restore routes via Tab [4].".into();
+        ctx.emit(finding);
+    }
+
+    save_detected_nat_routes(&[], &outcome.detected_routes, false);
 }
 
 #[cfg(test)]

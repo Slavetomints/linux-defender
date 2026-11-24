@@ -315,9 +315,9 @@ fn should_enter_pending_state_accepts_harden_and_restore_nat() {
 }
 
 #[test]
-fn router_box_type_scan_modules_returns_fourteen_dedicated_modules() {
+fn router_box_type_scan_modules_returns_fifteen_dedicated_modules() {
     let router_mods = BoxType::Router.scan_modules();
-    assert_eq!(router_mods.len(), 14, "Router must have exactly 14 dedicated audit modules");
+    assert_eq!(router_mods.len(), 15, "Router must have exactly 15 dedicated audit modules");
 
     let ids: Vec<&str> = router_mods.iter().map(|(id, _, _, _)| *id).collect();
     assert_eq!(
@@ -337,6 +337,7 @@ fn router_box_type_scan_modules_returns_fourteen_dedicated_modules() {
             "router_commit_history",
             "router_nat",
             "router_services_whitelist",
+            "router_protocols",
         ]
     );
 
@@ -344,6 +345,7 @@ fn router_box_type_scan_modules_returns_fourteen_dedicated_modules() {
     let web_mods = BoxType::Web.scan_modules();
     assert_eq!(web_mods.len(), 49);
     assert!(!web_mods.iter().any(|(id, _, _, _)| *id == "router_nat"));
+    assert!(!web_mods.iter().any(|(id, _, _, _)| *id == "router_protocols"));
 }
 
 #[test]
@@ -505,13 +507,22 @@ fn dashboard_router_status_helpers() {
 
 #[test]
 fn evaluate_config_routes_status_detects_clean_and_drifted() {
-    use linux_defender::router::scan::evaluate_config_routes_status;
+    use linux_defender::router::scan::{
+        audit_protocols_and_routes, evaluate_config_routes_status,
+        evaluate_config_routes_status_with_kernel,
+    };
 
+    // Clean Team 0 baseline (WAN 172.31.40.1, DMZ transit 172.16.0.1)
     let clean_routes = r#"
+interfaces {
+    ethernet eth0 {
+        address 172.31.40.2/29
+    }
+}
 protocols {
     static {
-        route 0.0.0.0/0 { next-hop 172.31.20.1 {} }
-        route 172.20.240.0/24 { next-hop 172.16.0.254 {} }
+        route 0.0.0.0/0 { next-hop 172.31.40.1 {} }
+        route 172.20.240.0/24 { next-hop 172.16.0.1 {} }
     }
 }
 "#;
@@ -519,16 +530,116 @@ protocols {
     assert_eq!(st_ok, RouterSubsystemStatus::Valid);
     assert!(desc_ok.contains("WAN Default & DMZ Transit Active"));
 
+    // Clean Competition Team 5 baseline (WAN 172.31.25.1, DMZ transit 172.16.0.1)
+    let team5_clean = r#"
+interfaces {
+    ethernet eth0 {
+        address 172.31.25.2/29
+    }
+}
+protocols {
+    static {
+        route 0.0.0.0/0 { next-hop 172.31.25.1 {} }
+        route 172.20.240.0/24 { next-hop 172.16.0.1 {} }
+    }
+}
+"#;
+    assert_eq!(evaluate_config_routes_status(team5_clean).0, RouterSubsystemStatus::Valid);
+
+    // Default route missing
     let missing_def = r#"
 protocols {
     static {
-        route 172.20.240.0/24 { next-hop 172.16.0.254 {} }
+        route 172.20.240.0/24 { next-hop 172.16.0.1 {} }
     }
 }
 "#;
     let (st_no_def, desc_no_def) = evaluate_config_routes_status(missing_def);
     assert_eq!(st_no_def, RouterSubsystemStatus::Invalid);
     assert!(desc_no_def.contains("Missing Default Route"));
+
+    // Default route gateway drift (Team 5 eth0 expects 172.31.25.1, but 0.0.0.0/0 points to 172.31.25.99)
+    let gw_drift = r#"
+interfaces {
+    ethernet eth0 {
+        address 172.31.25.2/29
+    }
+}
+protocols {
+    static {
+        route 0.0.0.0/0 { next-hop 172.31.25.99 {} }
+        route 172.20.240.0/24 { next-hop 172.16.0.1 {} }
+    }
+}
+"#;
+    let (st_gw, desc_gw) = evaluate_config_routes_status(gw_drift);
+    assert_eq!(st_gw, RouterSubsystemStatus::Invalid);
+    assert!(desc_gw.contains("Default route drift") && desc_gw.contains("172.31.25.1"));
+
+    // DMZ transit drift (172.16.0.254 self-IP instead of 172.16.0.1 Palo Alto Outside)
+    let dmz_drift = r#"
+protocols {
+    static {
+        route 0.0.0.0/0 { next-hop 172.31.40.1 {} }
+        route 172.20.240.0/24 { next-hop 172.16.0.254 {} }
+    }
+}
+"#;
+    let (st_dmz, desc_dmz) = evaluate_config_routes_status(dmz_drift);
+    assert_eq!(st_dmz, RouterSubsystemStatus::Invalid);
+    assert!(desc_dmz.contains("DMZ transit drift") && desc_dmz.contains("172.16.0.1"));
+
+    // Unauthorized dynamic routing protocol (BGP)
+    let rogue_bgp = r#"
+protocols {
+    bgp 65001 {
+        neighbor 172.31.40.6 {
+            remote-as 65002
+        }
+    }
+    static {
+        route 0.0.0.0/0 { next-hop 172.31.40.1 {} }
+        route 172.20.240.0/24 { next-hop 172.16.0.1 {} }
+    }
+}
+"#;
+    let (st_bgp, desc_bgp) = evaluate_config_routes_status(rogue_bgp);
+    assert_eq!(st_bgp, RouterSubsystemStatus::Invalid);
+    assert!(desc_bgp.contains("bgp"));
+
+    // Unexpected split-default hijack static route (0.0.0.0/1)
+    let hijack_route = r#"
+protocols {
+    static {
+        route 0.0.0.0/0 { next-hop 172.31.40.1 {} }
+        route 0.0.0.0/1 { next-hop 172.17.0.2 {} }
+        route 172.20.240.0/24 { next-hop 172.16.0.1 {} }
+    }
+}
+"#;
+    let (st_hijack, desc_hijack) = evaluate_config_routes_status(hijack_route);
+    assert_eq!(st_hijack, RouterSubsystemStatus::Invalid);
+    assert!(desc_hijack.contains("0.0.0.0/1"));
+
+    // Live kernel FIB drift vs clean config.boot
+    let kernel_tampered = "default via 172.31.40.6 dev eth0\n172.20.240.0/24 via 172.16.0.1 dev eth1\n";
+    let (st_kern, desc_kern) = evaluate_config_routes_status_with_kernel(clean_routes, Some(kernel_tampered));
+    assert_eq!(st_kern, RouterSubsystemStatus::Invalid);
+    assert!(desc_kern.contains("Kernel default route drift"));
+
+    let outcome = audit_protocols_and_routes(rogue_bgp, None);
+    assert_eq!(outcome.rogue_protocols, vec!["bgp".to_string()]);
+
+    // Dashboard binding check for router_protocols findings
+    let proto_bad = Finding::new(
+        Severity::Critical,
+        "router_protocols",
+        "Default Route Gateway Drift: 0.0.0.0/0 -> 172.31.40.9 (expected 172.31.40.1)",
+        "",
+    );
+    let (dash_st, dash_desc) = get_router_routes_status(&[proto_bad]);
+    assert_eq!(dash_st, RouterSubsystemStatus::Invalid);
+    assert!(dash_desc.contains("Default Route Gateway Drift"));
 
     let rogue_tunnel = r#"
 interfaces {
@@ -538,8 +649,8 @@ interfaces {
 }
 protocols {
     static {
-        route 0.0.0.0/0 { next-hop 172.31.20.1 {} }
-        route 172.20.240.0/24 { next-hop 172.16.0.254 {} }
+        route 0.0.0.0/0 { next-hop 172.31.40.1 {} }
+        route 172.20.240.0/24 { next-hop 172.16.0.1 {} }
     }
 }
 "#;

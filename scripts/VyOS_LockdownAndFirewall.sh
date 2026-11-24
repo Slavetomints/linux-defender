@@ -76,7 +76,7 @@ usage() {
 Usage: ./VyOS_LockdownAndFirewall.sh [MODE] [OPTIONS]
 
 MODES:
-  --audit                 Run non-destructive forensic audit (14 sections) and save baseline
+  --audit                 Run non-destructive forensic audit (15 sections) and save baseline
   --diff [log_file]       Diff current state against previous baseline
   --harden                Phase 1: Hardening & Init Config (passwords, SSH, firewall, NAT rules 10, 20, 30, 40, 50)
   --restore-nat           Restore CCDC DNAT Rules 10, 20, 30, 40, 50 & configure outbound PAT without full hardening
@@ -711,6 +711,37 @@ if [ "$MODE" == "audit" ]; then
     else
         echo -e "  ${YELLOW}[!] Total unlisted services flagged: ${unapproved_found}${RESET}"
     fi
+
+    echo -e "\n[+] SECTION 15: Routing Protocols & Default Route Drift Check"
+    echo "----------------------------------------------------------------------"
+    echo "[-] Active VyOS Protocol Commands:"
+    run_op show configuration commands | grep -E "^set protocols" || echo "No protocols commands configured in VyOS."
+
+    AUDIT_WAN_OCTET=$(detect_existing_wan_octet)
+    AUDIT_DEF_NH=$(run_op show configuration commands | grep -E "^set protocols static route 0\.0\.0\.0/0 next-hop " | awk '{print $NF}' | tr -d "'\"" | head -n1)
+    AUDIT_DMZ_NH=$(run_op show configuration commands | grep -E "^set protocols static route 172\.20\.240\.0/24 next-hop " | awk '{print $NF}' | tr -d "'\"" | head -n1)
+
+    if [ -z "$AUDIT_DEF_NH" ]; then
+        echo -e "  ${RED}[CRITICAL] Missing Default Route (0.0.0.0/0) in VyOS config!${RESET}"
+    elif [ -n "$AUDIT_WAN_OCTET" ] && [ "$AUDIT_DEF_NH" != "172.31.${AUDIT_WAN_OCTET}.1" ]; then
+        echo -e "  ${RED}[CRITICAL] Default Route Drift: 0.0.0.0/0 -> ${AUDIT_DEF_NH} (expected 172.31.${AUDIT_WAN_OCTET}.1)${RESET}"
+    else
+        echo "  [OK] Default Route: 0.0.0.0/0 -> ${AUDIT_DEF_NH}"
+    fi
+
+    if [ -z "$AUDIT_DMZ_NH" ]; then
+        echo -e "  ${YELLOW}[WARN] Missing DMZ Transit Route (172.20.240.0/24) in VyOS config!${RESET}"
+    elif [ "$AUDIT_DMZ_NH" != "172.16.0.1" ]; then
+        echo -e "  ${RED}[WARN] DMZ Transit Route Drift: 172.20.240.0/24 -> ${AUDIT_DMZ_NH} (expected 172.16.0.1)${RESET}"
+    else
+        echo "  [OK] DMZ Transit Route: 172.20.240.0/24 -> ${AUDIT_DMZ_NH}"
+    fi
+
+    echo "[-] Checking for Unauthorized Dynamic Routing Protocols (non-static):"
+    run_op show configuration commands | grep -E "^set protocols " | grep -vE "^set protocols static " || echo "  [OK] Only static routing configured."
+
+    echo "[-] Live Kernel Routing Table (ip -4 route show):"
+    ip -4 route show 2>/dev/null || ip route show 2>/dev/null || echo "ip route unavailable."
 
     echo "======================================================================"
     echo "          FORENSIC AUDIT COMPLETE"

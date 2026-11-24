@@ -110,13 +110,22 @@ pub fn get_router_nat_status(findings: &[Finding]) -> (RouterSubsystemStatus, St
 
 /// Inspect findings and live router configuration for routing routes status.
 pub fn get_router_routes_status(findings: &[Finding]) -> (RouterSubsystemStatus, String) {
-    let route_findings: Vec<&Finding> = findings.iter().filter(|f| f.module == "router_interfaces").collect();
+    let route_findings: Vec<&Finding> = findings
+        .iter()
+        .filter(|f| f.module == "router_protocols" || f.module == "router_interfaces")
+        .collect();
     if !route_findings.is_empty() {
         if let Some(bad) = route_findings.iter().find(|f| f.severity >= Severity::High && !f.resolved) {
             (RouterSubsystemStatus::Invalid, format!("Invalid: {}", bad.summary))
         } else {
-            let has_default = route_findings.iter().any(|f| f.summary.starts_with("Default Route Active:"));
-            let has_transit = route_findings.iter().any(|f| f.summary.starts_with("Servers DMZ Transit Route Active:"));
+            let has_default = route_findings.iter().any(|f| {
+                f.summary.starts_with("Default Route Valid:")
+                    || f.summary.starts_with("Default Route Active:")
+            });
+            let has_transit = route_findings.iter().any(|f| {
+                f.summary.starts_with("Servers DMZ Transit Route Valid:")
+                    || f.summary.starts_with("Servers DMZ Transit Route Active:")
+            });
             if has_default && has_transit {
                 (RouterSubsystemStatus::Valid, "Configured & Valid (WAN Default & DMZ Transit Active)".into())
             } else if has_default {

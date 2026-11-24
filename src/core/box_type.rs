@@ -260,6 +260,12 @@ pub const ROUTER_SCAN_MODULES: &[(&str, &str, bool, ScanInterval)] = &[
         false,
         ScanInterval::Continuous,
     ),
+    (
+        "router_protocols",
+        "15. Protocols & Route Drift",
+        false,
+        ScanInterval::Frequent,
+    ),
 ];
 
 /// Standard scan modules for non-router Linux boxes.
@@ -762,11 +768,11 @@ mod scored_unit_tests {
         }
     }
 
-    /// Router scan modules must contain exactly the 14 dedicated VyOS audit modules.
+    /// Router scan modules must contain exactly the 15 dedicated VyOS audit modules.
     #[test]
     fn router_scan_modules_scoping() {
         let modules = BoxType::Router.scan_modules();
-        assert_eq!(modules.len(), 14);
+        assert_eq!(modules.len(), 15);
         let ids: Vec<&str> = modules.iter().map(|(id, _, _, _)| *id).collect();
         assert!(ids.contains(&"router_version"));
         assert!(ids.contains(&"router_boot_hooks"));
@@ -782,5 +788,6 @@ mod scored_unit_tests {
         assert!(ids.contains(&"router_commit_history"));
         assert!(ids.contains(&"router_nat"));
         assert!(ids.contains(&"router_services_whitelist"));
+        assert!(ids.contains(&"router_protocols"));
     }
 }

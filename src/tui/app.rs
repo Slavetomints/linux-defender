@@ -1697,7 +1697,11 @@ impl App {
                     "rotate_passwords" => f.module != "router_users",
                     "clean_rootkits" => f.module != "router_dyn_linker",
                     "services" => f.module != "router_services_whitelist",
-                    _ => f.module != "router_nat" && f.module != "router_interfaces",
+                    _ => {
+                        f.module != "router_nat"
+                            && f.module != "router_interfaces"
+                            && f.module != "router_protocols"
+                    }
                 });
 
                 let finding_tx = self.finding_tx.clone();
@@ -1729,6 +1733,7 @@ impl App {
                         _ => {
                             crate::router::scan::run_module("router_nat", &ctx);
                             crate::router::scan::run_module("router_interfaces", &ctx);
+                            crate::router::scan::run_module("router_protocols", &ctx);
                         }
                     }
                 });

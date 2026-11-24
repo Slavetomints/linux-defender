@@ -921,16 +921,44 @@ fn vyos_script_contains_detected_restore_mode_engine() {
 #[test]
 fn vyos_script_preserves_existing_dnat_and_disables_pat() {
     assert!(
-        VYOS_SCRIPT.contains("EXISTING_DNAT_COUNT"),
-        "Script must count existing destination NAT rules before modifying"
+        VYOS_SCRIPT.contains("IP-Centric NAT Baseline Reconciliation"),
+        "Script must execute IP-centric reconciliation before modifying"
     );
     assert!(
-        VYOS_SCRIPT.contains("Preserving existing destination NAT configuration"),
-        "Script must log preservation of existing destination NAT rules"
+        VYOS_SCRIPT.contains("Preserving valid destination NAT rule"),
+        "Script must log preservation of valid existing destination NAT rules"
     );
     assert!(
         VYOS_SCRIPT.contains("Outbound PAT is DISABLED by default"),
         "Script must disable Outbound PAT by default for anti-reverse-shell defense"
+    );
+}
+
+#[test]
+fn build_script_args_maps_force_baseline() {
+    let args = CliArgs {
+        restore_nat: true,
+        force_baseline: true,
+        ..Default::default()
+    };
+    let script_args = build_script_args(&args);
+    assert!(script_args.contains(&"--restore-nat".to_string()));
+    assert!(script_args.contains(&"--force-baseline".to_string()));
+}
+
+#[test]
+fn vyos_script_contains_ip_centric_duplicate_conflict_cleanup() {
+    assert!(
+        VYOS_SCRIPT.contains("Wiping conflicting duplicate rules"),
+        "Script must report wiping conflicting duplicate rules"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("Correcting drifted destination NAT rule"),
+        "Script must report correcting drifted destination NAT rules"
+    );
+    assert!(
+        VYOS_SCRIPT.contains("Deploying missing destination NAT rule"),
+        "Script must report deploying missing destination NAT rules"
     );
 }
 

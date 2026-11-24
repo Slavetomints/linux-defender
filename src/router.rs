@@ -253,6 +253,10 @@ pub struct CliArgs {
     #[arg(long)]
     pub force: bool,
 
+    /// Force overwriting existing destination NAT rules with baseline
+    #[arg(long)]
+    pub force_baseline: bool,
+
     /// Restore mode for --restore-nat: 'baseline', 'detected', or 'backup'
     #[arg(long)]
     pub restore_mode: Option<String>,
@@ -519,6 +523,9 @@ pub fn build_script_args(args: &CliArgs) -> Vec<String> {
     }
     if args.force {
         script_args.push("--force".into());
+    }
+    if args.force_baseline {
+        script_args.push("--force-baseline".into());
     }
     if let Some(ref rm) = args.restore_mode {
         script_args.push("--restore-mode".into());

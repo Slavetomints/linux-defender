@@ -67,10 +67,10 @@ Eight tabs, `1`–`8` to switch:
 | **Svc Restore** | `8` | Reinstall scored services from scratch (Postfix, Dovecot, Splunk, OpenCart, PrestaShop) |
 
 ### VyOS Router (`BoxType::Router`)
-On VyOS routers, generic Linux services and package reinstalls are omitted. The tab bar dynamically presents 7 streamlined tabs with **Tab 2 (Router)** dedicated to active operational remediations and **Tab 4 (Scan)** dedicated to non-destructive VyOS audit checks:
+On VyOS routers, generic Linux services and package reinstalls are omitted. The tab bar dynamically presents 7 streamlined tabs with **Tab 3 (Scan)** dedicated to non-destructive VyOS audit checks and **Tab 4 (Router)** dedicated to active operational remediations:
 
 ```
-┌─[1] Dashboard──[2] Router──[3] Logs──[4] Scan──[5] Backups──[6] Monitor──[7] Tools──────────────────────┐
+┌─[1] Dashboard──[2] Logs──[3] Scan──[4] Router──[5] Backups──[6] Monitor──[7] Tools──────────────────────┐
 │                                                                                                           │
 │  ...                                                                                                      │
 │                                                                                                           │
@@ -82,15 +82,15 @@ On VyOS routers, generic Linux services and package reinstalls are omitted. The 
 | Tab | Key | What it does |
 |---|---|---|
 | **Dashboard** | `1` | Scored SSH status, NAT Rules status, Transit Routing status, last backup timestamp |
-| **Router** | `2` | VyOS operations: Phase 1 Hardening, Restore NAT Baseline, Dual Password Rotation, Sanitize Hooks/Crons, Linker Cleanup, Purge Containers, Console Lockdown |
-| **Logs** | `3` | Full-width stacked syslog and auth streams |
-| **Scan** | `4` | 14 dedicated VyOS modular scans emitting structured `Finding` alerts to Dashboard and Findings view |
+| **Logs** | `2` | Full-width stacked syslog and auth streams |
+| **Scan** | `3` | 14 dedicated VyOS modular scans emitting structured `Finding` alerts to Dashboard and Findings view |
+| **Router** | `4` | VyOS operations: Phase 1 Hardening, Restore NAT Baseline, Dual Password Rotation, Sanitize Hooks/Crons, Linker Cleanup, Purge Containers, Console Lockdown |
 | **Backups** | `5` | Targeted router configuration backups (`/config/config.boot`, scripts, credentials) |
 | **Monitor** | `6` | Forensic inspection tools (process spy, network watch, binary integrity) |
 | **Tools** | `7` | Interactive wizards with stateful list navigation and scrollable active firewall ruleset |
 
-#### Dedicated VyOS Audit Modules (Tab 4)
-When running on `Router`, Tab 4 executes 14 non-destructive, modular audit scanners tailored to VyOS 1.4+ configuration and CCDC topology:
+#### Dedicated VyOS Audit Modules (Tab 3)
+When running on `Router`, Tab 3 executes 14 non-destructive, modular audit scanners tailored to VyOS 1.4+ configuration and CCDC topology:
 1. **`router_version`** (*1. System Version & Identity*): Captures `show version`, release train, kernel version, architecture, uptime, and build UUID.
 2. **`router_boot_hooks`** (*2. /config/scripts/ Boot Hooks*): Scans `/config/scripts/` (`vyos-preconfig-bootup.script`, `vyos-postconfig-bootup.script`, `post-upgrade`) for backdoor persistence tokens.
 3. **`router_commit_hooks`** (*3. Commit Hooks (High Risk)*): Audits `/config/scripts/commit/pre-hooks.d/` and `post-hooks.d/`. Stock VyOS has 0 commit hooks; flags any root hooks.
@@ -106,8 +106,8 @@ When running on `Router`, Tab 4 executes 14 non-destructive, modular audit scann
 13. **`router_nat`** (*13. NAT Configuration (IP Baseline)*): **IP-Centric NAT Engine**: Matches rules by target server IP (`.10`, `.15`, `.20`, `.100`, `.120`) and ports under ANY rule number. Flags port drift, duplicate/conflicting rules, rogue translations, missing scored targets, and outbound PAT masquerade status.
 14. **`router_services_whitelist`** (*14. Services vs ROUTER_ALLOW*): Compares running systemd services against the curated VyOS whitelist (`ROUTER_WHITELIST`) and blacklist (`ROUTER_BLACKLIST`).
 
-#### Dedicated Router Remediations (Tab 2)
-Tab 2 provides single-key failsafe remediations with rollback protection:
+#### Dedicated Router Remediations (Tab 4)
+Tab 4 provides single-key failsafe remediations with rollback protection:
 - **Phase 1: Hardening & Init Config** (`--harden`): Deploys 1:1 NAT, control-plane firewall, cleans persistence hooks, rotates credentials with 5-minute failsafe rollback.
 - **Restore NAT Baseline on Router** (`--restore-nat`): IP-centric cleanup that dynamically deletes any conflicting rule numbers pointing to scored server IPs before deploying standard rules 10–14.
 - **Update VyOS & Linux Root Passwords** (`--rotate-passwords`): Separately updates `vyos` and Linux superuser `root` passwords and sanitizes `authorized_keys`.
@@ -246,7 +246,7 @@ VyOS router hardening, forensic audit, firewall deployment, and NAT restoration 
 | `--diff [BASE]` | read-only | Compares live VyOS state against last captured baseline |
 | `--harden` | prompts / commit-confirm | Phase 1: Cleans and deploys DNAT rules 10-14, transit routing, control-plane firewall, quenches hooks |
 | `--restore-nat` | prompts / commit-confirm | Restores scored DNAT rules 10-14 and static routes using selected restore strategy |
-| `--restore-mode <MODE>` | option | Restore strategy: `baseline` (clean-slate wipe & topology baseline), `detected` (re-apply from Tab 4 scan), or `backup` |
+| `--restore-mode <MODE>` | option | Restore strategy: `baseline` (clean-slate wipe & topology baseline), `detected` (re-apply from Tab 3 scan), or `backup` |
 | `--config-source <PATH>` | option | File path to detected JSON (`/etc/linux-defender/vyos/detected_nat_routes.json`) or backup for restore |
 | `--rotate-passwords` | prompts | Separately updates `vyos` and Linux `root` passwords; sanitizes `authorized_keys` |
 | `--console-lockdown` | prompts | Phase 2: Removes SSH service and drops port 22 (Console-Only Administration) |
@@ -273,7 +273,7 @@ sudo linux-defender router --confirm
 # Restore NAT and routes from clean-slate baseline grounded in topology
 sudo linux-defender router --restore-nat --team 1 --restore-mode baseline
 
-# Restore NAT and routes from detected JSON recorded by Tab 4 scan
+# Restore NAT and routes from detected JSON recorded by Tab 3 scan
 sudo linux-defender router --restore-nat --restore-mode detected --config-source /etc/linux-defender/vyos/detected_nat_routes.json
 ```
 

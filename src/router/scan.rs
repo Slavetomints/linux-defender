@@ -1,4 +1,4 @@
-//! VyOS 14 modular audit scan engine for Tab 4 (Scan) with IP-Centric NAT detection.
+//! VyOS 14 modular audit scan engine for Tab 3 (Scan) with IP-Centric NAT detection.
 //!
 //! Implements 14 dedicated router forensic audit and integrity checks grounded
 //! in CCDC network topology:
@@ -9,7 +9,7 @@
 //!
 //! Each module runs independently, emits rich structured `Finding` objects with
 //! command details, detection triggers, and remediation recommendations, and saves
-//! state for Tab 2 (Router Operations) remediation actions.
+//! state for Tab 4 (Router Operations) remediation actions.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,7 +25,7 @@ const CONFIG_BOOT_PATHS: &[&str] = &[
     "tests/fixtures/router/config.boot.clean",
 ];
 
-/// Path for recording detected NAT rules and routes for Tab 2 restore.
+/// Path for recording detected NAT rules and routes for Tab 4 restore.
 const DETECTED_STATE_PATH_PRIMARY: &str = "/etc/linux-defender/vyos/detected_nat_routes.json";
 const DETECTED_STATE_PATH_FALLBACK: &str = "/tmp/defender/vyos/detected_nat_routes.json";
 
@@ -380,7 +380,7 @@ pub fn evaluate_config_nat_status(content: &str) -> (RouterSubsystemStatus, Stri
     if parsed_rules.is_empty() {
         return (
             RouterSubsystemStatus::PendingScan,
-            "Pending scan — run [4]".into(),
+            "Pending scan — run [3]".into(),
         );
     }
 
@@ -433,7 +433,7 @@ pub fn evaluate_config_routes_status(content: &str) -> (RouterSubsystemStatus, S
     if content.trim().is_empty() {
         return (
             RouterSubsystemStatus::PendingScan,
-            "Pending scan — run [4]".into(),
+            "Pending scan — run [3]".into(),
         );
     }
 
@@ -671,7 +671,7 @@ pub fn scan_boot_hooks(ctx: &DefenderContext) {
             if !tokens.is_empty() {
                 finding.context.push(("Matched Tokens", tokens.join(", ")));
             }
-            finding.recommendation = "Navigate to Tab [2] Router Operations and run 'Sanitize Boot & Commit Hooks' to quarantine rogue scripts.".into();
+            finding.recommendation = "Navigate to Tab [4] Router Operations and run 'Sanitize Boot & Commit Hooks' to quarantine rogue scripts.".into();
             ctx.emit(finding);
         }
     }
@@ -726,7 +726,7 @@ pub fn scan_commit_hooks(ctx: &DefenderContext) {
             finding.path = Some(path.clone());
             finding.context.push(("Command Executed", format!("ls -la {} && cat {}", dir, path.display())));
             finding.context.push(("Detection Trigger", "Commit hook scripts execute as root on every configuration commit!".into()));
-            finding.recommendation = "Run 'Sanitize Boot & Commit Hooks' in Tab [2] Router Operations immediately to delete commit hooks.".into();
+            finding.recommendation = "Run 'Sanitize Boot & Commit Hooks' in Tab [4] Router Operations immediately to delete commit hooks.".into();
             ctx.emit(finding);
         }
     }
@@ -753,7 +753,7 @@ pub fn scan_task_scheduler(ctx: &DefenderContext) {
         );
         finding.context.push(("Command Executed", "show configuration commands | grep task-scheduler".into()));
         finding.context.push(("Detection Trigger", "Active task-scheduler block in /config/config.boot".into()));
-        finding.recommendation = "Navigate to Tab [2] Router Operations and run 'Sanitize Task Scheduler & Crons'.".into();
+        finding.recommendation = "Navigate to Tab [4] Router Operations and run 'Sanitize Task Scheduler & Crons'.".into();
         ctx.emit(finding);
     }
 
@@ -812,7 +812,7 @@ pub fn scan_task_scheduler(ctx: &DefenderContext) {
             );
             finding.context.push(("File Path", path));
             finding.context.push(("Cron Command", line));
-            finding.recommendation = "Review scheduled task. Run 'Sanitize Task Scheduler & Crons' in Tab [2] to flush rogue crontabs.".into();
+            finding.recommendation = "Review scheduled task. Run 'Sanitize Task Scheduler & Crons' in Tab [4] to flush rogue crontabs.".into();
             ctx.emit(finding);
         }
     }
@@ -857,7 +857,7 @@ pub fn scan_users(ctx: &DefenderContext) {
                     trimmed.to_string(),
                 );
                 finding.context.push(("Risk", "Cleartext password exposure in configuration file".into()));
-                finding.recommendation = "Run 'Update VyOS & Linux Root Passwords' in Tab [2] to encrypt credentials.".into();
+                finding.recommendation = "Run 'Update VyOS & Linux Root Passwords' in Tab [4] to encrypt credentials.".into();
                 ctx.emit(finding);
             }
         }
@@ -914,7 +914,7 @@ pub fn scan_users(ctx: &DefenderContext) {
                     finding.path = Some(PathBuf::from(path));
                     finding.context.push(("File Path", path.to_string()));
                     finding.context.push(("Key Preview", trimmed.chars().take(40).collect::<String>() + "..."));
-                    finding.recommendation = "Sanitize authorized_keys in Tab [2] (Update VyOS & Linux Root Passwords).".into();
+                    finding.recommendation = "Sanitize authorized_keys in Tab [4] (Update VyOS & Linux Root Passwords).".into();
                     ctx.emit(finding);
                 }
             }
@@ -965,7 +965,7 @@ pub fn scan_interfaces(ctx: &DefenderContext) {
             "Router cannot reach upstream competition network.",
         );
         finding.context.push(("Missing Route", "0.0.0.0/0".into()));
-        finding.recommendation = "Deploy transit routes in Tab [2] Router Operations.".into();
+        finding.recommendation = "Deploy transit routes in Tab [4] Router Operations.".into();
         ctx.emit(finding);
     }
 
@@ -1091,7 +1091,7 @@ pub fn scan_containers(ctx: &DefenderContext) {
         );
         finding.context.push(("Command Executed", "show configuration commands | grep container".into()));
         finding.context.push(("Risk", "Containers on routers frequently host C2 payloads or network proxies".into()));
-        finding.recommendation = "Run 'Purge Rogue Containers' in Tab [2] Router Operations.".into();
+        finding.recommendation = "Run 'Purge Rogue Containers' in Tab [4] Router Operations.".into();
         ctx.emit(finding);
     }
 
@@ -1224,7 +1224,7 @@ pub fn scan_dynamic_linker(ctx: &DefenderContext) {
         finding.path = Some(preload.to_path_buf());
         finding.context.push(("Command Executed", "cat /etc/ld.so.preload".into()));
         finding.context.push(("Risk", "ld.so.preload hijacks libc function calls across all processes".into()));
-        finding.recommendation = "Run 'Remove Linker Overrides' in Tab [2] to delete /etc/ld.so.preload.".into();
+        finding.recommendation = "Run 'Remove Linker Overrides' in Tab [4] to delete /etc/ld.so.preload.".into();
         ctx.emit(finding);
     } else {
         let mut finding = Finding::new(
@@ -1326,7 +1326,7 @@ pub fn scan_commit_history(ctx: &DefenderContext) {
         if commit_log.is_empty() { "No commit history found in runtime.".into() } else { commit_log.clone() },
     );
     finding.context.push(("Command Executed", "show system commit".into()));
-    finding.recommendation = "Verify authors of recent configuration commits. Use Tab [2] to rollback if unauthorized changes occurred.".into();
+    finding.recommendation = "Verify authors of recent configuration commits. Use Tab [4] to rollback if unauthorized changes occurred.".into();
     ctx.emit(finding);
 }
 
@@ -1565,7 +1565,7 @@ pub fn scan_nat(ctx: &DefenderContext) {
         finding.context.push(("Target Server", target.name.to_string()));
         finding.context.push(("Rule Number", rule.rule_num.to_string()));
         finding.context.push(("Configured Ports", rule.destination_ports.clone()));
-        finding.recommendation = "Run 'Restore NAT Baseline on Router' in Tab [2] to restore standard ports.".into();
+        finding.recommendation = "Run 'Restore NAT Baseline on Router' in Tab [4] to restore standard ports.".into();
         ctx.emit(finding);
     }
 
@@ -1580,7 +1580,7 @@ pub fn scan_nat(ctx: &DefenderContext) {
         );
         finding.context.push(("Target Server", target.name.to_string()));
         finding.context.push(("Conflicting Rules", rule_nums.join(", ")));
-        finding.recommendation = "Run 'Restore NAT Baseline on Router' in Tab [2] to wipe duplicate rules.".into();
+        finding.recommendation = "Run 'Restore NAT Baseline on Router' in Tab [4] to wipe duplicate rules.".into();
         ctx.emit(finding);
     }
 
@@ -1594,7 +1594,7 @@ pub fn scan_nat(ctx: &DefenderContext) {
         );
         finding.context.push(("Missing Target", target.name.to_string()));
         finding.context.push(("Expected IP", target.internal_ip.to_string()));
-        finding.recommendation = "Navigate to Tab [2] Router Operations and run 'Restore NAT Baseline on Router'.".into();
+        finding.recommendation = "Navigate to Tab [4] Router Operations and run 'Restore NAT Baseline on Router'.".into();
         ctx.emit(finding);
     }
 
@@ -1621,7 +1621,7 @@ pub fn scan_nat(ctx: &DefenderContext) {
             "CCDC Best Practice: Keep outbound PAT disabled to deny reverse shells unless explicitly needed.",
         );
         finding.context.push(("Status", "Outbound PAT Active".into()));
-        finding.recommendation = "Disable outbound PAT via Tab [2] Restore NAT Baseline (default).".into();
+        finding.recommendation = "Disable outbound PAT via Tab [4] Restore NAT Baseline (default).".into();
         ctx.emit(finding);
     } else {
         let mut finding = Finding::new(
@@ -1699,7 +1699,7 @@ pub fn scan_services_whitelist(ctx: &DefenderContext) {
             );
             finding.context.push(("Service Name", svc.clone()));
             finding.context.push(("Policy", "Unapproved Daemon".into()));
-            finding.recommendation = "Navigate to Tab [2] and run 'Disable Unnecessary Services'.".into();
+            finding.recommendation = "Navigate to Tab [4] and run 'Disable Unnecessary Services'.".into();
             ctx.emit(finding);
         }
     }

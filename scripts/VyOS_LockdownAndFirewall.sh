@@ -884,7 +884,7 @@ apply_routing_baseline() {
     set protocols static route 172.20.240.0/24 next-hop "$SERVERS_NEXTHOP"
 }
 
-# ─── Detected State Restoration Engine (Parses Tab 4 JSON State) ─────────────
+# ─── Detected State Restoration Engine (Parses Tab 3 JSON State) ─────────────
 apply_detected_configuration() {
     local file="$1"
     if [ ! -f "$file" ]; then

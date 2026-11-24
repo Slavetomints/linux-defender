@@ -130,13 +130,13 @@ impl Tab {
     ];
 
     /// All tabs for Router box type:
-    /// Router is placed at tab 2, and both Hardening and Svc Restore are omitted,
+    /// Router is placed at tab 4 (matching Hardening on other boxes), and Svc Restore is omitted,
     /// giving the router exactly 7 streamlined tabs.
     pub const ROUTER: &'static [Tab] = &[
         Tab::Dashboard,
-        Tab::Router,
         Tab::Logs,
         Tab::Scan,
+        Tab::Router,
         Tab::Backups,
         Tab::Monitor,
         Tab::Tools,
@@ -4420,16 +4420,16 @@ mod tests {
     }
 
     #[test]
-    fn router_tabs_move_router_to_tab_2_and_hide_service_restore() {
+    fn router_tabs_move_router_to_tab_4_and_hide_service_restore() {
         let tabs = Tab::for_box_type(BoxType::Router);
         assert_eq!(tabs.len(), 7, "Router should have 7 total accessible tabs");
         assert_eq!(
             tabs,
             &[
                 Tab::Dashboard,
-                Tab::Router,
                 Tab::Logs,
                 Tab::Scan,
+                Tab::Router,
                 Tab::Backups,
                 Tab::Monitor,
                 Tab::Tools,
@@ -4438,14 +4438,15 @@ mod tests {
         assert!(!tabs.contains(&Tab::ServiceRestore));
         assert!(!tabs.contains(&Tab::Hardening));
         assert_eq!(tabs[0], Tab::Dashboard);
-        assert_eq!(tabs[1], Tab::Router);
-        assert_eq!(tabs[2], Tab::Logs);
+        assert_eq!(tabs[1], Tab::Logs);
+        assert_eq!(tabs[2], Tab::Scan);
+        assert_eq!(tabs[3], Tab::Router);
         assert_eq!(tabs[6], Tab::Tools);
 
         assert_eq!(Tab::from_digit('1', BoxType::Router), Some(Tab::Dashboard));
-        assert_eq!(Tab::from_digit('2', BoxType::Router), Some(Tab::Router));
-        assert_eq!(Tab::from_digit('3', BoxType::Router), Some(Tab::Logs));
-        assert_eq!(Tab::from_digit('4', BoxType::Router), Some(Tab::Scan));
+        assert_eq!(Tab::from_digit('2', BoxType::Router), Some(Tab::Logs));
+        assert_eq!(Tab::from_digit('3', BoxType::Router), Some(Tab::Scan));
+        assert_eq!(Tab::from_digit('4', BoxType::Router), Some(Tab::Router));
         assert_eq!(Tab::from_digit('5', BoxType::Router), Some(Tab::Backups));
         assert_eq!(Tab::from_digit('6', BoxType::Router), Some(Tab::Monitor));
         assert_eq!(Tab::from_digit('7', BoxType::Router), Some(Tab::Tools));
@@ -4454,9 +4455,9 @@ mod tests {
         assert_eq!(Tab::from_digit('0', BoxType::Router), None);
 
         assert_eq!(Tab::digit_for(Tab::Dashboard, BoxType::Router), Some('1'));
-        assert_eq!(Tab::digit_for(Tab::Router, BoxType::Router), Some('2'));
-        assert_eq!(Tab::digit_for(Tab::Logs, BoxType::Router), Some('3'));
-        assert_eq!(Tab::digit_for(Tab::Scan, BoxType::Router), Some('4'));
+        assert_eq!(Tab::digit_for(Tab::Logs, BoxType::Router), Some('2'));
+        assert_eq!(Tab::digit_for(Tab::Scan, BoxType::Router), Some('3'));
+        assert_eq!(Tab::digit_for(Tab::Router, BoxType::Router), Some('4'));
         assert_eq!(Tab::digit_for(Tab::Backups, BoxType::Router), Some('5'));
         assert_eq!(Tab::digit_for(Tab::Monitor, BoxType::Router), Some('6'));
         assert_eq!(Tab::digit_for(Tab::Tools, BoxType::Router), Some('7'));

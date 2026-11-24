@@ -104,7 +104,7 @@ pub fn get_router_nat_status(findings: &[Finding]) -> (RouterSubsystemStatus, St
     } else if let Some((st, desc)) = crate::router::scan::evaluate_live_nat_status() {
         (st, desc)
     } else {
-        (RouterSubsystemStatus::PendingScan, "Pending scan — run [4]".into())
+        (RouterSubsystemStatus::PendingScan, "Pending scan — run [3]".into())
     }
 }
 
@@ -130,7 +130,7 @@ pub fn get_router_routes_status(findings: &[Finding]) -> (RouterSubsystemStatus,
     } else if let Some((st, desc)) = crate::router::scan::evaluate_live_routes_status() {
         (st, desc)
     } else {
-        (RouterSubsystemStatus::PendingScan, "Pending scan — run [4]".into())
+        (RouterSubsystemStatus::PendingScan, "Pending scan — run [3]".into())
     }
 }
 

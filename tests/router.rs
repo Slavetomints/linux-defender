@@ -102,7 +102,7 @@ fn build_script_args_maps_remediation_flags() {
 fn router_steps_registry_is_valid() {
     assert_eq!(ROUTER_STEPS.len(), 12);
     let ids: Vec<&str> = ROUTER_STEPS.iter().map(|s| s.id).collect();
-    assert!(!ids.contains(&"audit"), "audit is superseded by Tab 4 modular scans");
+    assert!(!ids.contains(&"audit"), "audit is superseded by Tab 3 modular scans");
     assert!(ids.contains(&"diff"));
     assert!(ids.contains(&"harden"));
     assert!(ids.contains(&"router_nat"));
@@ -257,14 +257,14 @@ fn router_tabs_seven_and_digit_for_dynamic_scan() {
     assert!(!tabs.contains(&Tab::Hardening));
     assert!(!tabs.contains(&Tab::ServiceRestore));
     assert_eq!(tabs[0], Tab::Dashboard);
-    assert_eq!(tabs[1], Tab::Router);
-    assert_eq!(tabs[2], Tab::Logs);
-    assert_eq!(tabs[3], Tab::Scan);
+    assert_eq!(tabs[1], Tab::Logs);
+    assert_eq!(tabs[2], Tab::Scan);
+    assert_eq!(tabs[3], Tab::Router);
     assert_eq!(tabs[4], Tab::Backups);
     assert_eq!(tabs[5], Tab::Monitor);
     assert_eq!(tabs[6], Tab::Tools);
 
-    assert_eq!(Tab::digit_for(Tab::Scan, BoxType::Router), Some('4'));
+    assert_eq!(Tab::digit_for(Tab::Scan, BoxType::Router), Some('3'));
     assert_eq!(Tab::digit_for(Tab::Scan, BoxType::Web), Some('3'));
 }
 

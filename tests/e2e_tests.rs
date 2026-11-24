@@ -75,7 +75,9 @@ fn test_t1_f1_01_router_tabs_count() {
 fn test_t1_f1_02_router_tabs_sequence() {
     let tabs = Tab::for_box_type(BoxType::Router);
     assert_eq!(tabs[0], Tab::Dashboard);
-    assert_eq!(tabs[1], Tab::Router);
+    assert_eq!(tabs[1], Tab::Logs);
+    assert_eq!(tabs[2], Tab::Scan);
+    assert_eq!(tabs[3], Tab::Router);
 }
 
 #[test]
@@ -153,11 +155,12 @@ fn test_t1_f2_05_pane_active_color_contract() {
 // --- F3: Dynamic Scan Prompt ---
 
 #[test]
-fn test_t1_f3_01_router_scan_digit_is_four() {
-    // On Router, Scan is tab 4
+fn test_t1_f3_01_router_scan_digit_is_three() {
+    // On Router, Scan is tab 3 (matching all boxes)
     let router_tabs = Tab::for_box_type(BoxType::Router);
     let scan_pos = router_tabs.iter().position(|&t| t == Tab::Scan);
-    assert!(scan_pos.is_some());
+    assert_eq!(scan_pos, Some(2)); // index 2 is tab 3
+    assert_eq!(Tab::digit_for(Tab::Scan, BoxType::Router), Some('3'));
 }
 
 #[test]
@@ -1310,7 +1313,7 @@ fn test_t3_07_f14_f7_f8_all_new_script_flags_bash_n() {
 #[test]
 fn test_t3_08_f1_f2_unified_7_tab_layout_pane_focus_toggling() {
     let tabs = Tab::for_box_type(BoxType::Router);
-    assert_eq!(tabs[1], Tab::Router);
+    assert_eq!(tabs[3], Tab::Router);
 }
 
 #[test]

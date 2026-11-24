@@ -69,7 +69,7 @@ pub fn render(
         .split(list_area);
 
     render_tool_list(f, rows[0], selected, download_status, box_type);
-    render_help(f, rows[1], selected);
+    render_help(f, rows[1], selected, box_type);
 
     if let (Some(cfg_area), Some(cfg)) = (config_area, nft_config) {
         render_nft_config(f, cfg_area, cfg, nft_scroll);
@@ -227,11 +227,11 @@ fn maybe_highlight(item: ListItem, selected: bool) -> ListItem {
 }
 
 /// Render contextual key-binding help for the currently selected tool.
-fn render_help(f: &mut Frame, area: Rect, selected: SelectedTool) {
+fn render_help(f: &mut Frame, area: Rect, selected: SelectedTool, box_type: BoxType) {
     let lines = match selected {
         SelectedTool::Binary(_) => vec![Line::from(vec![
             Span::styled(
-                " [↑↓] ",
+                " [Up/Down] ",
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
@@ -249,29 +249,39 @@ fn render_help(f: &mut Frame, area: Rect, selected: SelectedTool) {
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "run nftbuild  ⚠ APPLIES FIREWALL RULES IMMEDIATELY",
+                "run nftbuild  [!] APPLIES FIREWALL RULES IMMEDIATELY",
                 Style::default().fg(Color::Red),
             ),
         ])],
-        SelectedTool::Wizard(_) => vec![Line::from(vec![
-            Span::styled(
-                " [↑↓] ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("navigate   ", Style::default().fg(Color::White)),
-            Span::styled(
-                "[r] ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "open wizard (interactive, stays in TUI)",
-                Style::default().fg(Color::White),
-            ),
-        ])],
+        SelectedTool::Wizard(idx) => {
+            let wizards = wizards_for_box_type(box_type);
+            let action_desc = if wizards.get(idx).map(|w| w.name) == Some("palo_alto_audit")
+                && box_type == BoxType::General
+            {
+                "forward to Palo Alto tab [8]"
+            } else {
+                "open wizard (interactive, stays in TUI)"
+            };
+            vec![Line::from(vec![
+                Span::styled(
+                    " [Up/Down] ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("navigate   ", Style::default().fg(Color::White)),
+                Span::styled(
+                    "[Enter/r] ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    action_desc,
+                    Style::default().fg(Color::White),
+                ),
+            ])]
+        }
     };
     let block = Block::default()
         .borders(Borders::ALL)

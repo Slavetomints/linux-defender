@@ -1,7 +1,7 @@
 /// Palo Alto PAN-OS XML configuration audit wizard.
 ///
-/// Steps: enter XML path → optional baseline path → optional team number →
-///        run audit → review findings → export remediation script.
+/// Steps: enter XML path -> optional baseline path -> optional team number ->
+///        run audit -> review findings -> export remediation script.
 use crossterm::event::KeyCode;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -57,7 +57,7 @@ impl FormField {
         match self {
             FormField::ConfigPath => "PAN-OS XML Config File (full path)",
             FormField::BaselinePath => "Baseline XML for Drift Comparison (optional, full path)",
-            FormField::TeamNumber => "CCDC Team Number (1-20, or 0 for practice — optional)",
+            FormField::TeamNumber => "CCDC Team Number (1-20, or 0 for practice - optional)",
         }
     }
 
@@ -182,11 +182,11 @@ impl PaloAltoWizard {
                     Style::default().fg(Color::DarkGray),
                 )),
                 Line::from(Span::styled(
-                    "  Baseline path is optional — leave blank to skip drift comparison.",
+                    "  Baseline path is optional - leave blank to skip drift comparison.",
                     Style::default().fg(Color::DarkGray),
                 )),
                 Line::from(Span::styled(
-                    "  Team number is optional — used only for public subnet calculation.",
+                    "  Team number is optional - used only for public subnet calculation.",
                     Style::default().fg(Color::DarkGray),
                 )),
                 Line::from(""),
@@ -202,7 +202,7 @@ impl PaloAltoWizard {
         f.render_widget(
             Paragraph::new(info_lines).block(
                 Block::default()
-                    .title(" Palo Alto XML Audit — Configuration ")
+                    .title(" Palo Alto XML Audit - Configuration ")
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::DarkGray)),
             ),
@@ -211,7 +211,7 @@ impl PaloAltoWizard {
 
         f.render_widget(
             Paragraph::new(
-                " [Tab/↑↓] switch field  [type] enter path  [Backspace] delete  [Enter] run audit  [Esc] cancel",
+                " [Tab/Up/Down] switch field  [type] enter path  [Backspace] delete  [Enter] run audit  [Esc] cancel",
             )
             .style(Style::default().fg(Color::DarkGray)),
             rows[4],
@@ -253,7 +253,7 @@ impl PaloAltoWizard {
 
         let summary = if self.findings.is_empty() {
             Line::from(Span::styled(
-                " ✓ CLEAN — no findings detected. Configuration passes all audit checks.",
+                " [OK] CLEAN - no findings detected. Configuration passes all audit checks.",
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
@@ -334,7 +334,7 @@ impl PaloAltoWizard {
                 ])];
                 // Truncate message to avoid very long lines
                 let msg = if finding.message.len() > 120 {
-                    format!("{}…", &finding.message[..120])
+                    format!("{}...", &finding.message[..120])
                 } else {
                     finding.message.clone()
                 };
@@ -344,7 +344,7 @@ impl PaloAltoWizard {
                 )));
                 if !finding.remediation.is_empty() {
                     lines.push(Line::from(Span::styled(
-                        format!("      ⤷ {}", finding.remediation.join("; ")),
+                        format!("      -> {}", finding.remediation.join("; ")),
                         Style::default().fg(Color::Green),
                     )));
                 }
@@ -375,7 +375,7 @@ impl PaloAltoWizard {
 
         f.render_widget(
             Paragraph::new(
-                " [↑↓] scroll  [E] export remediation script  [Esc] close",
+                " [Up/Down] scroll  [E] export remediation script  [Esc] close",
             )
             .style(Style::default().fg(Color::Yellow)),
             rows[2],
@@ -392,7 +392,7 @@ impl PaloAltoWizard {
         let lines = vec![
             Line::from(""),
             Line::from(Span::styled(
-                " ✓ Remediation script exported successfully!",
+                " [OK] Remediation script exported successfully!",
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
